@@ -1,0 +1,11 @@
+services:
+  whale:
+    image: ghcr.io/OWNER/whale:latest
+    environment:
+      WHALE_TOKEN: "change-me"
+      WHALE_CONCURRENCY: "2"
+    volumes:
+      - ./data:/data
+      - ./downloads:/downloads
+    ports: ["8080:8080"]
+    restart: unless-stopped

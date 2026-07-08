@@ -1,0 +1,305 @@
+'use strict';
+
+// ---- Token persistence ----------------------------------------------------
+const TOKEN_KEY = 'whale_token';
+function getToken() { return localStorage.getItem(TOKEN_KEY) || ''; }
+function setToken(t) {
+  if (t) localStorage.setItem(TOKEN_KEY, t);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+
+// ---- DOM refs -------------------------------------------------------------
+const els = {
+  settings: document.getElementById('settings'),
+  settingsToggle: document.getElementById('settings-toggle'),
+  token: document.getElementById('token'),
+  tokenSave: document.getElementById('token-save'),
+  tokenHint: document.getElementById('token-hint'),
+  submitForm: document.getElementById('submit-form'),
+  url: document.getElementById('url'),
+  submitBtn: document.getElementById('submit-btn'),
+  filters: document.getElementById('filters'),
+  search: document.getElementById('search'),
+  history: document.getElementById('history'),
+  empty: document.getElementById('empty'),
+  loadMore: document.getElementById('load-more'),
+  toasts: document.getElementById('toasts'),
+};
+
+// ---- List state -----------------------------------------------------------
+const state = {
+  status: '',       // filter chip
+  q: '',            // search query
+  cursor: null,     // next before_id
+  loading: false,
+  rows: new Map(),  // id -> <li> element
+};
+
+// ---- Toast ----------------------------------------------------------------
+function toast(msg, kind) {
+  const t = document.createElement('div');
+  t.className = 'toast' + (kind ? ' toast-' + kind : '');
+  t.textContent = msg;
+  els.toasts.appendChild(t);
+  setTimeout(() => { t.classList.add('leaving'); }, 3200);
+  setTimeout(() => { t.remove(); }, 3600);
+}
+
+// ---- Auth-aware fetch ------------------------------------------------------
+async function apiFetch(path, opts) {
+  opts = opts || {};
+  const headers = Object.assign({}, opts.headers, {
+    'Authorization': 'Bearer ' + getToken(),
+  });
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 401) {
+    showTokenField(true);
+    throw { unauthorized: true };
+  }
+  return res;
+}
+
+function showTokenField(invalid) {
+  els.settings.classList.remove('hidden');
+  els.tokenHint.classList.toggle('hidden', !invalid);
+  els.token.value = getToken();
+  els.token.focus();
+}
+
+// ---- Rendering ------------------------------------------------------------
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
+function fmtDuration(sec) {
+  if (sec == null) return '';
+  sec = Math.floor(sec);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  const p2 = (n) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${p2(m)}:${p2(s)}` : `${m}:${p2(s)}`;
+}
+
+const TERMINAL = { completed: 1, failed: 1, duplicate: 1 };
+
+function rowHtml(item) {
+  const thumb = item.thumbnail_url
+    ? `<img class="thumb" src="${esc(item.thumbnail_url)}" alt="" loading="lazy">`
+    : `<div class="thumb thumb-empty"></div>`;
+  const dur = item.duration ? `<span class="dur">${esc(fmtDuration(item.duration))}</span>` : '';
+  const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
+  const active = item.status === 'queued' || item.status === 'running';
+  const bar = `<div class="progress ${active ? '' : 'hidden'}"><div class="progress-fill" style="width:0%"></div></div>`;
+  const meta = item.error ? `<div class="err">${esc(item.error)}</div>` : '';
+  return `
+    <a class="thumb-wrap" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${thumb}${dur}</a>
+    <div class="body">
+      <div class="title">${esc(item.title)}</div>
+      ${uploader}
+      <div class="statusline">
+        <span class="badge badge-${esc(item.status)}">${esc(item.status)}</span>
+        <span class="speed"></span>
+        <span class="eta"></span>
+      </div>
+      ${bar}
+      ${meta}
+    </div>`;
+}
+
+function upsertRow(item, prepend) {
+  let li = state.rows.get(item.id);
+  if (!li) {
+    li = document.createElement('li');
+    li.className = 'item';
+    li.dataset.id = item.id;
+    state.rows.set(item.id, li);
+    if (prepend) els.history.prepend(li);
+    else els.history.appendChild(li);
+  }
+  li.innerHTML = rowHtml(item);
+  els.empty.classList.add('hidden');
+  return li;
+}
+
+// Patch a row in place from a ProgressEvent (does not rebuild full row).
+function patchRow(ev) {
+  const li = state.rows.get(ev.id);
+  if (!li) return; // unknown row; will appear on next list load
+  const badge = li.querySelector('.badge');
+  if (badge) {
+    badge.textContent = ev.status;
+    badge.className = 'badge badge-' + ev.status;
+  }
+  const speed = li.querySelector('.speed');
+  if (speed) speed.textContent = ev.speed || '';
+  const eta = li.querySelector('.eta');
+  if (eta) eta.textContent = ev.eta ? 'ETA ' + ev.eta : '';
+  const bar = li.querySelector('.progress');
+  const fill = li.querySelector('.progress-fill');
+  const terminal = !!TERMINAL[ev.status];
+  if (terminal) {
+    if (bar) bar.classList.add('hidden');
+    if (speed) speed.textContent = '';
+    if (eta) eta.textContent = '';
+  } else if (bar && fill) {
+    bar.classList.remove('hidden');
+    if (ev.percent != null) fill.style.width = Math.max(0, Math.min(100, ev.percent)) + '%';
+  }
+}
+
+// ---- List loading ---------------------------------------------------------
+async function loadItems(reset) {
+  if (state.loading) return;
+  state.loading = true;
+  els.loadMore.disabled = true;
+  if (reset) {
+    state.cursor = null;
+    state.rows.clear();
+    els.history.innerHTML = '';
+  }
+  const params = new URLSearchParams();
+  if (state.status) params.set('status', state.status);
+  if (state.q) params.set('q', state.q);
+  if (state.cursor != null) params.set('before_id', state.cursor);
+  try {
+    const res = await apiFetch('/api/items?' + params.toString());
+    if (!res.ok) { toast('Failed to load history', 'error'); return; }
+    const data = await res.json();
+    (data.items || []).forEach((it) => upsertRow(it, false));
+    state.cursor = data.next_cursor;
+    els.loadMore.classList.toggle('hidden', data.next_cursor == null);
+    const isEmpty = state.rows.size === 0;
+    els.empty.classList.toggle('hidden', !isEmpty);
+  } catch (e) {
+    if (!e || !e.unauthorized) toast('Network error', 'error');
+  } finally {
+    state.loading = false;
+    els.loadMore.disabled = false;
+  }
+}
+
+// ---- Submit ---------------------------------------------------------------
+async function submitUrl(url) {
+  if (!url) return;
+  if (!getToken()) { showTokenField(false); toast('Set your token first', 'error'); return; }
+  els.submitBtn.disabled = true;
+  try {
+    const res = await apiFetch('/api/items', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url, options: {} }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 422 || (data && data.error === 'probe_failed')) {
+      toast(data.message || 'Probe failed', 'error');
+      return;
+    }
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || 'Submit failed', 'error');
+      return;
+    }
+    // Accept both single {item} and batch {items} shapes.
+    if (Array.isArray(data.items)) {
+      data.items.forEach((it) => upsertRow(it, true));
+      const dupes = data.duplicates || 0;
+      toast(`Queued ${data.items.length} item(s)` + (dupes ? `, ${dupes} already downloaded` : ''),
+        dupes ? 'info' : 'ok');
+    } else if (data.item) {
+      upsertRow(data.item, true);
+      toast(data.duplicate ? 'Already downloaded' : 'Queued', data.duplicate ? 'info' : 'ok');
+    } else {
+      toast('Queued', 'ok');
+    }
+    els.url.value = '';
+  } catch (e) {
+    if (!e || !e.unauthorized) toast('Network error', 'error');
+  } finally {
+    els.submitBtn.disabled = false;
+  }
+}
+
+// ---- SSE ------------------------------------------------------------------
+let es = null;
+function connectEvents() {
+  const token = getToken();
+  if (!token) return;
+  if (es) { es.close(); es = null; }
+  es = new EventSource('/api/events?token=' + encodeURIComponent(token));
+  es.addEventListener('progress', (e) => {
+    try { patchRow(JSON.parse(e.data)); } catch (_) { /* ignore */ }
+  });
+  es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+
+// ---- Debounce -------------------------------------------------------------
+function debounce(fn, ms) {
+  let h;
+  return function () {
+    const args = arguments;
+    clearTimeout(h);
+    h = setTimeout(() => fn.apply(null, args), ms);
+  };
+}
+
+// ---- Wire up UI -----------------------------------------------------------
+els.settingsToggle.addEventListener('click', () => {
+  els.settings.classList.toggle('hidden');
+  if (!els.settings.classList.contains('hidden')) els.token.value = getToken();
+});
+
+els.tokenSave.addEventListener('click', () => {
+  setToken(els.token.value.trim());
+  els.tokenHint.classList.add('hidden');
+  els.settings.classList.add('hidden');
+  connectEvents();
+  loadItems(true);
+});
+
+els.submitForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  submitUrl(els.url.value.trim());
+});
+
+els.filters.addEventListener('click', (e) => {
+  const chip = e.target.closest('.chip');
+  if (!chip) return;
+  els.filters.querySelectorAll('.chip').forEach((c) => c.classList.remove('active'));
+  chip.classList.add('active');
+  state.status = chip.dataset.status || '';
+  loadItems(true);
+});
+
+els.search.addEventListener('input', debounce(() => {
+  state.q = els.search.value.trim();
+  loadItems(true);
+}, 300));
+
+els.loadMore.addEventListener('click', () => loadItems(false));
+
+// ---- Share target: ?url= / ?text= -----------------------------------------
+function handleShareParam() {
+  const p = new URLSearchParams(location.search);
+  const shared = p.get('url') || p.get('text') || '';
+  if (!shared) return;
+  els.url.value = shared;
+  // Clean the URL so a reload doesn't resubmit.
+  history.replaceState(null, '', location.pathname);
+  if (getToken()) submitUrl(shared);
+  else { showTokenField(false); toast('Set your token to submit', 'info'); }
+}
+
+// ---- Service worker -------------------------------------------------------
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => { /* ignore */ });
+  });
+}
+
+// ---- Boot -----------------------------------------------------------------
+if (!getToken()) showTokenField(false);
+connectEvents();
+loadItems(true);
+handleShareParam();

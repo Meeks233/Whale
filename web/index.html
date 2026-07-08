@@ -1,5 +1,56 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Whale</title></head>
-<body><!-- Frontend implemented by workstream F --></body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <title>Whale</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="icon" href="/icons/192.png">
+  <link rel="apple-touch-icon" href="/icons/192.png">
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">🐋 Whale</h1>
+    <button id="settings-toggle" class="icon-btn" aria-label="Settings" title="Settings">⚙︎</button>
+  </header>
+
+  <section id="settings" class="settings hidden">
+    <label for="token">API token</label>
+    <div class="row">
+      <input id="token" type="password" autocomplete="off" placeholder="Bearer token">
+      <button id="token-save" class="btn">Save</button>
+    </div>
+    <p id="token-hint" class="hint hidden">Invalid token.</p>
+  </section>
+
+  <section class="submit">
+    <form id="submit-form" class="row">
+      <input id="url" type="url" inputmode="url" autocomplete="off" placeholder="Paste a video URL…" required>
+      <button id="submit-btn" class="btn" type="submit">Download</button>
+    </form>
+  </section>
+
+  <section class="controls">
+    <div id="filters" class="chips">
+      <button class="chip active" data-status="">All</button>
+      <button class="chip" data-status="queued">Queued</button>
+      <button class="chip" data-status="running">Running</button>
+      <button class="chip" data-status="completed">Completed</button>
+      <button class="chip" data-status="failed">Failed</button>
+    </div>
+    <input id="search" type="search" placeholder="Search title or uploader…">
+  </section>
+
+  <main>
+    <ul id="history" class="history"></ul>
+    <div id="empty" class="empty hidden">No items yet.</div>
+    <button id="load-more" class="btn wide hidden">Load more</button>
+  </main>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <script src="/app.js"></script>
+</body>
 </html>
