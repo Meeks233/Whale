@@ -8,9 +8,6 @@ on:
       - "*"
   workflow_dispatch:
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/whale
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,6 +17,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Compute lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/whale" >> "$GITHUB_OUTPUT"
 
       - name: Read YTDLP_VERSION
         id: ytdlp
@@ -47,5 +48,5 @@ jobs:
           build-args: |
             YTDLP_VERSION=${{ steps.ytdlp.outputs.version }}
           tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:sha-${{ steps.sha.outputs.short }}
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:sha-${{ steps.sha.outputs.short }}

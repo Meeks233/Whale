@@ -5,9 +5,6 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/whale
-
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -17,6 +14,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Compute lowercase image name
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/whale" >> "$GITHUB_OUTPUT"
 
       - name: Determine versions
         id: check
@@ -54,8 +55,8 @@ jobs:
           build-args: |
             YTDLP_VERSION=${{ steps.check.outputs.latest }}
           tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:ytdlp-${{ steps.check.outputs.latest }}
+            ${{ steps.image.outputs.name }}:latest
+            ${{ steps.image.outputs.name }}:ytdlp-${{ steps.check.outputs.latest }}
 
       - name: Commit bumped YTDLP_VERSION
         if: steps.check.outputs.changed == 'true'
