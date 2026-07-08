@@ -1,1 +1,4 @@
 /target
+/docker-compose.local.yml
+/data
+/downloads
