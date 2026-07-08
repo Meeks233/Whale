@@ -5,6 +5,7 @@ use super::YtdlpError;
 use crate::config::Config;
 use crate::types::{Item, ProgressEvent, Status};
 use crate::ytdlp::options::download_args;
+use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
@@ -21,10 +22,11 @@ pub struct DownloadOutcome {
 pub async fn download(
     cfg: &Config,
     item: &Item,
+    cookies: Option<&Path>,
     progress: mpsc::Sender<ProgressEvent>,
 ) -> Result<DownloadOutcome, YtdlpError> {
     let mut child = tokio::process::Command::new(&cfg.ytdlp_path)
-        .args(download_args(cfg, item))
+        .args(download_args(cfg, item, cookies))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null())

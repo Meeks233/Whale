@@ -3,8 +3,10 @@
 mod api;
 mod archive;
 mod config;
+mod cookies;
 mod db;
 mod error;
+mod platform;
 mod queue;
 mod seal_import;
 mod types;
@@ -72,7 +74,12 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
     let seed = db.all_archive_keys().await?;
     let archive = archive::Archive::load(&cfg.archive_path(), seed).await?;
 
-    let queue = queue::Queue::spawn(cfg.clone(), db.clone(), archive.clone());
+    let cookie_store = cookies::CookieStore::new(&cfg.data_dir);
+    cookie_store
+        .ensure_dir()
+        .with_context(|| "cannot create cookies dir")?;
+
+    let queue = queue::Queue::spawn(cfg.clone(), db.clone(), archive.clone(), cookie_store.clone());
     for id in requeue {
         queue.enqueue(id).await;
     }
@@ -82,6 +89,7 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         db,
         archive,
         queue,
+        cookies: cookie_store,
         ytdlp_version,
     };
 

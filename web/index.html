@@ -13,7 +13,10 @@
 <body>
   <header class="topbar">
     <h1 class="brand">🐋 Whale</h1>
-    <button id="settings-toggle" class="icon-btn" aria-label="Settings" title="Settings">⚙︎</button>
+    <div class="topbar-actions">
+      <button id="cookies-toggle" class="icon-btn" aria-label="Cookies" title="Cookies">🍪</button>
+      <button id="settings-toggle" class="icon-btn" aria-label="Settings" title="Settings">⚙︎</button>
+    </div>
   </header>
 
   <section id="settings" class="settings hidden">
@@ -23,6 +26,16 @@
       <button id="token-save" class="btn">Save</button>
     </div>
     <p id="token-hint" class="hint hidden">Invalid token.</p>
+  </section>
+
+  <section id="cookies" class="settings hidden">
+    <label>Platform cookies</label>
+    <p class="hint-muted">
+      Log in on a site, export its cookies with a “Get cookies.txt” browser extension,
+      then paste them here. Whale applies them automatically to every download from that
+      platform (X cookies → all x.com / twitter.com links, etc.).
+    </p>
+    <div id="cookie-list" class="cookie-list"></div>
   </section>
 
   <section class="submit">

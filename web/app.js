@@ -12,6 +12,9 @@ function setToken(t) {
 const els = {
   settings: document.getElementById('settings'),
   settingsToggle: document.getElementById('settings-toggle'),
+  cookies: document.getElementById('cookies'),
+  cookiesToggle: document.getElementById('cookies-toggle'),
+  cookieList: document.getElementById('cookie-list'),
   token: document.getElementById('token'),
   tokenSave: document.getElementById('token-save'),
   tokenHint: document.getElementById('token-hint'),
@@ -234,6 +237,106 @@ function connectEvents() {
   es.onerror = () => { /* EventSource auto-reconnects */ };
 }
 
+// ---- Cookies --------------------------------------------------------------
+function fmtBytes(n) {
+  if (!n) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function cookieRowHtml(p) {
+  const statusLabel = !p.present
+    ? '<span class="ck-status ck-none">Not set</span>'
+    : p.enabled
+      ? `<span class="ck-status ck-on">Active · ${esc(fmtBytes(p.bytes))}</span>`
+      : `<span class="ck-status ck-off">Disabled · ${esc(fmtBytes(p.bytes))}</span>`;
+  const actions = p.present
+    ? `<button class="ck-btn" data-act="toggle" data-enabled="${p.enabled ? 'false' : 'true'}">${p.enabled ? 'Disable' : 'Enable'}</button>
+       <button class="ck-btn ck-danger" data-act="delete">Delete</button>`
+    : '';
+  return `
+    <div class="ck-head">
+      <span class="ck-name">${esc(p.name)}</span>
+      ${statusLabel}
+    </div>
+    <div class="ck-body">
+      <a class="ck-btn" href="${esc(p.login_url)}" target="_blank" rel="noopener">Log in ↗</a>
+      <button class="ck-btn" data-act="paste">${p.present ? 'Replace cookies' : 'Paste cookies'}</button>
+      ${actions}
+      <textarea class="ck-paste hidden" placeholder="Paste Netscape cookies.txt here…" rows="4"></textarea>
+      <div class="ck-paste-actions hidden">
+        <button class="ck-btn ck-primary" data-act="save">Save</button>
+        <button class="ck-btn" data-act="cancel">Cancel</button>
+      </div>
+    </div>`;
+}
+
+async function loadCookies() {
+  if (!getToken()) { showTokenField(false); toast('Set your token first', 'error'); return; }
+  try {
+    const res = await apiFetch('/api/cookies');
+    if (!res.ok) { toast('Failed to load cookies', 'error'); return; }
+    const data = await res.json();
+    els.cookieList.innerHTML = '';
+    (data.platforms || []).forEach((p) => {
+      const div = document.createElement('div');
+      div.className = 'cookie-item';
+      div.dataset.key = p.key;
+      div.innerHTML = cookieRowHtml(p);
+      els.cookieList.appendChild(div);
+    });
+  } catch (e) {
+    if (!e || !e.unauthorized) toast('Network error', 'error');
+  }
+}
+
+async function cookieAction(key, act, el) {
+  const item = el.closest('.cookie-item');
+  const paste = item.querySelector('.ck-paste');
+  const pasteActions = item.querySelector('.ck-paste-actions');
+  if (act === 'paste') {
+    paste.classList.remove('hidden');
+    pasteActions.classList.remove('hidden');
+    paste.focus();
+    return;
+  }
+  if (act === 'cancel') {
+    paste.value = '';
+    paste.classList.add('hidden');
+    pasteActions.classList.add('hidden');
+    return;
+  }
+  try {
+    let res;
+    if (act === 'save') {
+      const text = paste.value.trim();
+      if (!text) { toast('Paste cookies first', 'error'); return; }
+      res = await apiFetch('/api/cookies/' + encodeURIComponent(key), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookies: text }),
+      });
+    } else if (act === 'toggle') {
+      const enabled = el.dataset.enabled === 'true';
+      res = await apiFetch('/api/cookies/' + encodeURIComponent(key), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+    } else if (act === 'delete') {
+      res = await apiFetch('/api/cookies/' + encodeURIComponent(key), { method: 'DELETE' });
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast((data && (data.message || data.error)) || 'Cookie update failed', 'error'); return; }
+    if (act === 'save') toast('Cookies saved', 'ok');
+    if (act === 'delete') toast('Cookies removed', 'info');
+    loadCookies();
+  } catch (e) {
+    if (!e || !e.unauthorized) toast('Network error', 'error');
+  }
+}
+
 // ---- Debounce -------------------------------------------------------------
 function debounce(fn, ms) {
   let h;
@@ -248,6 +351,21 @@ function debounce(fn, ms) {
 els.settingsToggle.addEventListener('click', () => {
   els.settings.classList.toggle('hidden');
   if (!els.settings.classList.contains('hidden')) els.token.value = getToken();
+});
+
+els.cookiesToggle.addEventListener('click', () => {
+  const opening = els.cookies.classList.contains('hidden');
+  els.cookies.classList.toggle('hidden');
+  els.settings.classList.add('hidden');
+  if (opening) loadCookies();
+});
+
+els.cookieList.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const item = btn.closest('.cookie-item');
+  if (!item) return;
+  cookieAction(item.dataset.key, btn.dataset.act, btn);
 });
 
 els.tokenSave.addEventListener('click', () => {

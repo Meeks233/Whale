@@ -2,6 +2,7 @@
 
 use crate::archive::Archive;
 use crate::config::Config;
+use crate::cookies::CookieStore;
 use crate::db::Db;
 use crate::types::{ProgressEvent, Status};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ pub struct Queue {
 }
 
 impl Queue {
-    pub fn spawn(cfg: Config, db: Db, archive: Archive) -> Self {
+    pub fn spawn(cfg: Config, db: Db, archive: Archive, cookies: CookieStore) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
         let (events, _) = broadcast::channel::<ProgressEvent>(1024);
         let semaphore = Arc::new(Semaphore::new(cfg.concurrency.max(1)));
@@ -29,9 +30,10 @@ impl Queue {
                 let cfg = cfg.clone();
                 let db = db.clone();
                 let archive = archive.clone();
+                let cookies = cookies.clone();
                 let events = worker_events.clone();
                 tokio::spawn(async move {
-                    run_job(&cfg, &db, &archive, &events, id).await;
+                    run_job(&cfg, &db, &archive, &cookies, &events, id).await;
                     drop(permit);
                 });
             }
@@ -53,6 +55,7 @@ async fn run_job(
     cfg: &Config,
     db: &Db,
     archive: &Archive,
+    cookies: &CookieStore,
     events: &broadcast::Sender<ProgressEvent>,
     id: i64,
 ) {
@@ -89,7 +92,9 @@ async fn run_job(
         }
     });
 
-    let result = crate::ytdlp::download(cfg, &item, ptx).await;
+    // Auto-select the platform cookie for this URL (falls back to global).
+    let cookie = crate::cookies::resolve(cookies, cfg.cookies.as_deref(), &item.webpage_url);
+    let result = crate::ytdlp::download(cfg, &item, cookie.as_deref(), ptx).await;
     forwarder.abort();
 
     match result {

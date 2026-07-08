@@ -84,6 +84,51 @@ input:focus { outline: none; border-color: var(--accent); }
 }
 .settings label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
 .hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
+.hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
+
+.topbar-actions { display: flex; gap: 2px; }
+
+/* ---- Cookies panel ---- */
+.cookie-list { display: flex; flex-direction: column; gap: 8px; }
+.cookie-item {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
+.ck-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ck-name { font-weight: 600; font-size: 14px; }
+.ck-status { font-size: 12px; }
+.ck-none { color: var(--muted); }
+.ck-on { color: var(--ok); }
+.ck-off { color: var(--warn); }
+.ck-body { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ck-btn {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+.ck-btn:hover { border-color: var(--accent); }
+.ck-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ck-danger { color: var(--err); }
+.ck-paste {
+  flex: 1 0 100%;
+  margin-top: 6px;
+  padding: 8px;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  resize: vertical;
+}
+.ck-paste-actions { flex: 1 0 100%; display: flex; gap: 6px; }
 
 .submit { margin-bottom: 12px; }
 

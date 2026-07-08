@@ -3,16 +3,21 @@
 
 use crate::config::Config;
 use crate::types::Item;
+use std::path::Path;
 
 /// Args for the metadata probe (`yt-dlp --dump-json --skip-download ...`).
-pub fn probe_args(cfg: &Config, url: &str) -> Vec<String> {
+///
+/// `cookies` is the already-resolved cookie file for this URL (per-platform
+/// cookie if present, else the global one) — see `crate::cookies::resolve`.
+pub fn probe_args(cfg: &Config, url: &str, cookies: Option<&Path>) -> Vec<String> {
+    let _ = cfg; // kept for signature symmetry / future per-config probe flags
     let mut args: Vec<String> = vec![
         "--dump-json".into(),
         "--skip-download".into(),
         "--no-warnings".into(),
         "--ignore-config".into(),
     ];
-    if let Some(cookies) = &cfg.cookies {
+    if let Some(cookies) = cookies {
         args.push("--cookies".into());
         args.push(cookies.display().to_string());
     }
@@ -20,8 +25,9 @@ pub fn probe_args(cfg: &Config, url: &str) -> Vec<String> {
     args
 }
 
-/// Args for a download run.
-pub fn download_args(cfg: &Config, item: &Item) -> Vec<String> {
+/// Args for a download run. `cookies` is the resolved cookie file for the item's
+/// URL (per-platform if present, else global) — see `crate::cookies::resolve`.
+pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "--ignore-config".into(),
         "--no-warnings".into(),
@@ -70,7 +76,7 @@ pub fn download_args(cfg: &Config, item: &Item) -> Vec<String> {
     args.push("after_move:filepath".into());
     args.push(format!("{}/.last_path_{}", cfg.data_dir.display(), item.id));
 
-    if let Some(cookies) = &cfg.cookies {
+    if let Some(cookies) = cookies {
         args.push("--cookies".into());
         args.push(cookies.display().to_string());
     }
@@ -143,19 +149,19 @@ mod tests {
     fn probe_args_shape() {
         let cfg = test_config();
         let url = "https://example.com/watch?v=abc123";
-        let args = probe_args(&cfg, url);
+        let args = probe_args(&cfg, url, None);
         assert_eq!(args.first().unwrap(), "--dump-json");
         assert_eq!(args.last().unwrap(), url);
-        // no cookies configured → no --cookies flag
+        // no cookies resolved → no --cookies flag
         assert!(!args.iter().any(|a| a == "--cookies"));
     }
 
     #[test]
     fn probe_args_with_cookies() {
-        let mut cfg = test_config();
-        cfg.cookies = Some(PathBuf::from("/data/cookies.txt"));
+        let cfg = test_config();
         let url = "https://example.com/x";
-        let args = probe_args(&cfg, url);
+        let cookies = PathBuf::from("/data/cookies.txt");
+        let args = probe_args(&cfg, url, Some(&cookies));
         let ci = pos(&args, "--cookies");
         assert_eq!(args[ci + 1], "/data/cookies.txt");
         assert_eq!(args.last().unwrap(), url);
@@ -165,7 +171,7 @@ mod tests {
     fn download_args_key_flags_in_order() {
         let cfg = test_config();
         let item = test_item();
-        let args = download_args(&cfg, &item);
+        let args = download_args(&cfg, &item, None);
 
         // --merge-output-format immediately followed by "mkv"
         let mi = pos(&args, "--merge-output-format");
@@ -215,9 +221,9 @@ mod tests {
         cfg.embed_thumbnail = false;
         cfg.auto_subs = true;
         cfg.container = Container::Mp4;
-        cfg.cookies = Some(PathBuf::from("/data/c.txt"));
         let item = test_item();
-        let args = download_args(&cfg, &item);
+        let cookies = PathBuf::from("/data/c.txt");
+        let args = download_args(&cfg, &item, Some(&cookies));
 
         assert!(!args.iter().any(|a| a == "--embed-subs"));
         assert!(!args.iter().any(|a| a == "--write-subs"));

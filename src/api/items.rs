@@ -22,7 +22,9 @@ pub async fn submit(
     }
     let force = req.options.as_ref().and_then(|o| o.force).unwrap_or(false);
 
-    let probes = crate::ytdlp::probe(&state.cfg, &url)
+    // Auto-select the platform cookie for this URL (falls back to global).
+    let cookie = crate::cookies::resolve(&state.cookies, state.cfg.cookies.as_deref(), &url);
+    let probes = crate::ytdlp::probe(&state.cfg, &url, cookie.as_deref())
         .await
         .map_err(|e| AppError::ProbeFailed(e.to_string()))?;
 

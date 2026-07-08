@@ -3,13 +3,19 @@
 use super::YtdlpError;
 use crate::config::Config;
 use crate::types::ProbeResult;
+use std::path::Path;
 
 /// How many trailing bytes of stderr to surface on failure.
 const STDERR_TAIL: usize = 500;
 
 /// Probe a URL; returns one ProbeResult per video (playlists → many).
-pub async fn probe(cfg: &Config, url: &str) -> Result<Vec<ProbeResult>, YtdlpError> {
-    let args = crate::ytdlp::options::probe_args(cfg, url);
+/// `cookies` is the resolved cookie file for this URL (see `crate::cookies`).
+pub async fn probe(
+    cfg: &Config,
+    url: &str,
+    cookies: Option<&Path>,
+) -> Result<Vec<ProbeResult>, YtdlpError> {
+    let args = crate::ytdlp::options::probe_args(cfg, url, cookies);
 
     let output = tokio::process::Command::new(&cfg.ytdlp_path)
         .args(&args)
