@@ -42,12 +42,24 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         created_at: row.try_get("created_at")?,
         completed_at: row.try_get("completed_at")?,
         public: row.try_get::<i64, _>("public")? != 0,
+        public_slug: row.try_get("public_slug")?,
     })
 }
 
 const SELECT_COLS: &str = "id, extractor, video_id, archive_key, title, uploader, \
     webpage_url, thumbnail_url, duration, filepath, filesize, source, status, error, \
-    created_at, completed_at, public";
+    created_at, completed_at, public, public_slug";
+
+/// Generate a 24-char (96-bit) hex slug from OS randomness — unguessable, so
+/// public links can't be derived from the sequential item id.
+fn random_slug() -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 12];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .map_err(|e| anyhow::anyhow!("cannot read randomness for public slug: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
 
 pub(super) async fn connect(data_dir: &Path) -> anyhow::Result<Db> {
     let opts = SqliteConnectOptions::new()
@@ -131,12 +143,30 @@ pub(super) async fn set_completed(db: &Db, id: i64, path: &str, size: i64) -> an
 }
 
 pub(super) async fn set_public(db: &Db, id: i64, public: bool) -> anyhow::Result<()> {
-    sqlx::query("UPDATE items SET public = ? WHERE id = ?")
-        .bind(public as i64)
-        .bind(id)
-        .execute(&db.pool)
-        .await?;
+    if public {
+        // Assign a slug the first time; keep it stable on re-share (COALESCE).
+        sqlx::query("UPDATE items SET public = 1, public_slug = COALESCE(public_slug, ?) WHERE id = ?")
+            .bind(random_slug()?)
+            .bind(id)
+            .execute(&db.pool)
+            .await?;
+    } else {
+        sqlx::query("UPDATE items SET public = 0 WHERE id = ?")
+            .bind(id)
+            .execute(&db.pool)
+            .await?;
+    }
     Ok(())
+}
+
+pub(super) async fn find_by_public_slug(db: &Db, slug: &str) -> anyhow::Result<Option<Item>> {
+    let row = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM items WHERE public_slug = ?"
+    ))
+    .bind(slug)
+    .fetch_optional(&db.pool)
+    .await?;
+    row.map(|r| row_to_item(&r)).transpose()
 }
 
 pub(super) async fn get(db: &Db, id: i64) -> anyhow::Result<Option<Item>> {
@@ -540,17 +570,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_public_toggles_flag() {
+    async fn set_public_assigns_stable_slug_and_looks_up() {
         let (db, _dir) = temp_db().await;
         let p = probe("youtube", "pub1", "Public me");
         let item = db.insert_probe(&p, Source::Download).await.unwrap();
         assert!(!item.public);
+        assert!(item.public_slug.is_none());
 
         db.set_public(item.id, true).await.unwrap();
-        assert!(db.get(item.id).await.unwrap().unwrap().public);
+        let pubd = db.get(item.id).await.unwrap().unwrap();
+        assert!(pubd.public);
+        let slug = pubd.public_slug.clone().expect("slug assigned");
+        assert_eq!(slug.len(), 24);
+        assert!(slug.chars().all(|c| c.is_ascii_hexdigit()));
 
+        // Slug lookup resolves to the same row.
+        let found = db.find_by_public_slug(&slug).await.unwrap().unwrap();
+        assert_eq!(found.id, item.id);
+
+        // Going private keeps the slug stable but the item is no longer public.
         db.set_public(item.id, false).await.unwrap();
-        assert!(!db.get(item.id).await.unwrap().unwrap().public);
+        let priv_again = db.get(item.id).await.unwrap().unwrap();
+        assert!(!priv_again.public);
+        assert_eq!(priv_again.public_slug.as_deref(), Some(slug.as_str()));
+
+        // Re-sharing reuses the same slug (COALESCE).
+        db.set_public(item.id, true).await.unwrap();
+        assert_eq!(
+            db.get(item.id).await.unwrap().unwrap().public_slug.as_deref(),
+            Some(slug.as_str())
+        );
+
+        // Unknown slug → None.
+        assert!(db.find_by_public_slug("deadbeef").await.unwrap().is_none());
     }
 
     #[tokio::test]

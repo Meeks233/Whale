@@ -96,16 +96,17 @@ function fileUrl(id, download) {
   return '/api/items/' + id + '/file?token=' + t + (download ? '&download=1' : '');
 }
 
-// Tokenless link — only resolves for items flagged public.
-function publicUrl(id) {
-  return location.origin + '/api/items/' + id + '/file';
+// Tokenless public link, keyed by the item's random slug (not its id, so it
+// can't be guessed by enumeration).
+function publicUrl(slug) {
+  return location.origin + '/api/p/' + slug;
 }
 
 function actionsHtml(item) {
   if (item.status !== 'completed' || !item.filepath) return '';
   const pub = !!item.public;
-  const copyBtn = pub
-    ? `<button class="act" data-act="copy" data-id="${item.id}">🔗 Copy link</button>`
+  const copyBtn = pub && item.public_slug
+    ? `<button class="act" data-act="copy" data-slug="${item.public_slug}">🔗 Copy link</button>`
     : '';
   return `
     <div class="actions">
@@ -394,8 +395,8 @@ async function togglePublic(id, makePublic) {
   }
 }
 
-function copyPublicLink(id) {
-  const link = publicUrl(id);
+function copyPublicLink(slug) {
+  const link = publicUrl(slug);
   if (navigator.clipboard) {
     navigator.clipboard.writeText(link).then(
       () => toast('Public link copied', 'ok'),
@@ -472,7 +473,7 @@ els.history.addEventListener('click', (e) => {
   if (!btn) return;
   const id = Number(btn.dataset.id);
   if (btn.dataset.act === 'public') togglePublic(id, btn.dataset.public !== '1');
-  else if (btn.dataset.act === 'copy') copyPublicLink(id);
+  else if (btn.dataset.act === 'copy') copyPublicLink(btn.dataset.slug);
 });
 
 // ---- Share target: ?url= / ?text= -----------------------------------------

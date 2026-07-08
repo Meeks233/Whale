@@ -1,11 +1,17 @@
 //! Media file streaming — range-capable playback + download. See docs/API.md.
 //!
-//! Access is granted when the request carries a valid token (Authorization
-//! header or `?token=`) OR the item is flagged `public`. Serving is delegated to
-//! `tower_http::services::ServeFile`, which handles Range/HEAD/Content-Type.
+//! Two entry points:
+//! - `GET /api/items/:id/file` — **token-required**, by sequential id (owner use).
+//! - `GET /api/p/:slug` — **tokenless**, by the item's random public slug, and
+//!   only while it is still flagged `public`. The slug is unguessable, so public
+//!   items can't be discovered by enumerating ids.
+//!
+//! Serving is delegated to `tower_http::services::ServeFile`, which handles
+//! Range/HEAD/Content-Type.
 
 use super::AppState;
 use crate::error::AppError;
+use crate::types::Item;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::header;
@@ -14,9 +20,8 @@ use std::path::Path as FsPath;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
-/// GET /api/items/:id/file — stream the downloaded media (supports Range).
-/// Public route: authorizes via token OR the item's `public` flag.
-/// Add `?download=1` to force a browser download (Content-Disposition attachment).
+/// GET /api/items/:id/file — stream by id. Requires a valid token (header or
+/// `?token=`). Add `?download=1` to force a download (Content-Disposition).
 pub async fn file(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -24,13 +29,32 @@ pub async fn file(
 ) -> Result<Response, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
     let token = super::auth::extract_token(req.headers(), &query);
-    let authed = token.as_deref() == Some(state.cfg.token.as_str());
-
-    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
-    if !authed && !item.public {
+    if token.as_deref() != Some(state.cfg.token.as_str()) {
         return Err(AppError::Unauthorized);
     }
+    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    serve_item(item, req).await
+}
 
+/// GET /api/p/:slug — tokenless public stream, keyed by the item's random slug.
+/// 404 if the slug is unknown or the item is no longer public.
+pub async fn public_file(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    req: Request,
+) -> Result<Response, AppError> {
+    let item = state
+        .db
+        .find_by_public_slug(&slug)
+        .await?
+        .filter(|i| i.public)
+        .ok_or(AppError::NotFound)?;
+    serve_item(item, req).await
+}
+
+/// Stream `item`'s file, honoring `?download=1` for an attachment disposition.
+async fn serve_item(item: Item, req: Request) -> Result<Response, AppError> {
+    let query = req.uri().query().unwrap_or("").to_string();
     let path = match item.filepath.as_deref() {
         Some(p) if !p.is_empty() => p.to_string(),
         _ => return Err(AppError::BadRequest("item has no downloaded file".into())),

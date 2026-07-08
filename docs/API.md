@@ -75,15 +75,23 @@ Only valid when `status = failed`. Resets to `queued` and enqueues. `200` → `I
 
 ### `POST /api/items/:id/public` — set the public flag
 Body `{ "public": true|false }`. Only valid when `status = completed` and a `filepath` exists.
-When `public` is true the media file streams without a token (shareable direct link). `200` → `Item`,
+Making an item public assigns a random `public_slug` (kept stable across re-shares) and returns it
+on the `Item`; the shareable link is then `GET /api/p/:slug`. `200` → `Item`,
 `400 {"error":"bad_request"}` if the item isn't a completed file, `404` if unknown.
 
-### `GET /api/items/:id/file` — stream / download the media file
-Range-capable playback (used as the `<video>` source) and download. **Self-authorizing**: served when
-the request carries a valid token (`Authorization: Bearer` **or** `?token=`) OR the item is `public`.
+### `GET /api/items/:id/file` — stream / download by id (token required)
+Range-capable playback (used as the `<video>` source) and download, keyed by the sequential id.
+**Requires a valid token** (`Authorization: Bearer` **or** `?token=`) — the id is never a tokenless
+surface. Use `/api/p/:slug` for tokenless public sharing.
 - Honors `Range`/`If-*` (returns `206 Partial Content`); `Content-Type` from the file extension.
 - Add `?download=1` to force a browser save (`Content-Disposition: attachment`, RFC 5987 UTF-8 filename).
-- `401` if neither token nor public; `400` if the item has no file yet; `404` if the file is missing.
+- `401` without a valid token; `400` if the item has no file yet; `404` if missing.
+
+### `GET /api/p/:slug` — tokenless public stream
+Streams a public item by its random `public_slug`. **No token needed**, but only resolves while the
+item is still flagged `public` (revoking makes it `404` without changing the slug). Same
+`Range`/`?download=1` behavior as the id route. `404` if the slug is unknown or no longer public.
+Because the slug is unguessable, public items can't be discovered by enumerating ids.
 
 ### `DELETE /api/items/:id` — remove a record
 Query: `delete_file` (bool, default `false`). Removes the DB row; if `delete_file=true` and a

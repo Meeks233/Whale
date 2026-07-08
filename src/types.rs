@@ -84,6 +84,9 @@ pub struct Item {
     pub completed_at: Option<i64>,
     /// When true, the media file streams without a token (shareable direct link).
     pub public: bool,
+    /// Random, unguessable slug for the public link (`/api/p/:slug`). Set the
+    /// first time an item is made public; `None` until then.
+    pub public_slug: Option<String>,
 }
 
 /// Result of the metadata probe (yt-dlp --dump-json).

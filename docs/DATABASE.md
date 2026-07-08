@@ -34,12 +34,16 @@ CREATE INDEX        idx_items_status      ON items(status);
 CREATE INDEX        idx_items_created     ON items(created_at DESC, id DESC);  -- keyset paging
 ```
 
-### `migrations/0002_public.sql`
+### `migrations/0002_public.sql` + `migrations/0003_public_slug.sql`
 ```sql
 ALTER TABLE items ADD COLUMN public INTEGER NOT NULL DEFAULT 0;  -- 1 = streamable tokenless
+ALTER TABLE items ADD COLUMN public_slug TEXT;                   -- random share slug
+CREATE UNIQUE INDEX idx_items_public_slug ON items(public_slug) WHERE public_slug IS NOT NULL;
 ```
-When `public = 1`, `GET /api/items/:id/file` serves the media without a token (shareable
-direct link). Default `0` (private; token required).
+`public = 1` enables tokenless streaming via `GET /api/p/:public_slug` (default `0`, private). The
+`public_slug` is a random 24-hex-char token assigned the first time an item is made public and kept
+stable afterwards, so public links can't be derived from the sequential `id`. The `/api/items/:id/file`
+route always requires a token.
 
 ### Optional FTS (phase 2, `migrations/0002_fts.sql`)
 ```sql

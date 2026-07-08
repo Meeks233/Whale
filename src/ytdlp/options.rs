@@ -151,6 +151,7 @@ mod tests {
             created_at: 0,
             completed_at: None,
             public: false,
+            public_slug: None,
         }
     }
 

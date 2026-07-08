@@ -57,6 +57,10 @@ impl Db {
         queries::set_public(self, id, public).await
     }
 
+    pub async fn find_by_public_slug(&self, slug: &str) -> anyhow::Result<Option<Item>> {
+        queries::find_by_public_slug(self, slug).await
+    }
+
     pub async fn get(&self, id: i64) -> anyhow::Result<Option<Item>> {
         queries::get(self, id).await
     }

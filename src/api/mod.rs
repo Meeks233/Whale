@@ -47,6 +47,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(items::health))
         .route("/api/events", get(events::events))
         .route("/api/items/:id/file", get(media::file))
+        .route("/api/p/:slug", get(media::public_file))
         .fallback(crate::web::static_handler);
 
     Router::new()
