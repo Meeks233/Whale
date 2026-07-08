@@ -6,7 +6,7 @@ pub mod options;
 
 use crate::config::Config;
 
-pub use download::{download, DownloadOutcome};
+pub use download::download;
 pub use metadata::probe;
 
 #[derive(Debug, thiserror::Error)]
