@@ -54,7 +54,9 @@ Behavior: probe → dedup → enqueue (see ARCHITECTURE §3).
 ### `GET /api/items` — list history
 Query params:
 - `status` — optional filter (`queued|running|completed|failed|duplicate`)
-- `q` — optional search over title/uploader
+- `q` — optional e621-style search (combines with `status`). Supported prefixes:
+  `id:`, `user:`/`uploader:`, `title:`, `platform:`/`site:`/`extractor:`. Prefix a term with
+  `-` to negate it; quote phrases (`title:"never gonna"`). Bare words match title OR uploader.
 - `limit` — default 50, max 200
 - `before_id` — keyset cursor (return rows with `id < before_id`)
 
@@ -70,6 +72,18 @@ Query params:
 ### `POST /api/items/:id/retry` — re-queue a failed item
 Only valid when `status = failed`. Resets to `queued` and enqueues. `200` → `Item`.
 `409 {"error":"bad_request"}` if not in a retryable state.
+
+### `POST /api/items/:id/public` — set the public flag
+Body `{ "public": true|false }`. Only valid when `status = completed` and a `filepath` exists.
+When `public` is true the media file streams without a token (shareable direct link). `200` → `Item`,
+`400 {"error":"bad_request"}` if the item isn't a completed file, `404` if unknown.
+
+### `GET /api/items/:id/file` — stream / download the media file
+Range-capable playback (used as the `<video>` source) and download. **Self-authorizing**: served when
+the request carries a valid token (`Authorization: Bearer` **or** `?token=`) OR the item is `public`.
+- Honors `Range`/`If-*` (returns `206 Partial Content`); `Content-Type` from the file extension.
+- Add `?download=1` to force a browser save (`Content-Disposition: attachment`, RFC 5987 UTF-8 filename).
+- `401` if neither token nor public; `400` if the item has no file yet; `404` if the file is missing.
 
 ### `DELETE /api/items/:id` — remove a record
 Query: `delete_file` (bool, default `false`). Removes the DB row; if `delete_file=true` and a

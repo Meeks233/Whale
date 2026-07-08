@@ -122,6 +122,28 @@ pub async fn retry(State(state): State<AppState>, Path(id): Path<i64>) -> AppRes
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PublicRequest {
+    pub public: bool,
+}
+
+/// POST /api/items/:id/public — flip an item's public (tokenless-streaming) flag.
+pub async fn set_public(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<PublicRequest>,
+) -> AppResult<Response> {
+    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    if item.status != Status::Completed || item.filepath.is_none() {
+        return Err(AppError::BadRequest(
+            "only completed items with a file can be made public".into(),
+        ));
+    }
+    state.db.set_public(id, req.public).await?;
+    let refreshed = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(refreshed).into_response())
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DeleteParams {
     #[serde(default)]
     pub delete_file: bool,

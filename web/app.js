@@ -88,6 +88,37 @@ function fmtDuration(sec) {
 
 const TERMINAL = { completed: 1, failed: 1, duplicate: 1 };
 
+// Direct media link. `download` forces a browser save; otherwise it streams
+// (used as the <video> source). Token rides in the query since <video>/<a>
+// can't send an Authorization header.
+function fileUrl(id, download) {
+  const t = encodeURIComponent(getToken());
+  return '/api/items/' + id + '/file?token=' + t + (download ? '&download=1' : '');
+}
+
+// Tokenless link — only resolves for items flagged public.
+function publicUrl(id) {
+  return location.origin + '/api/items/' + id + '/file';
+}
+
+function actionsHtml(item) {
+  if (item.status !== 'completed' || !item.filepath) return '';
+  const pub = !!item.public;
+  const copyBtn = pub
+    ? `<button class="act" data-act="copy" data-id="${item.id}">🔗 Copy link</button>`
+    : '';
+  return `
+    <div class="actions">
+      <details class="player">
+        <summary class="act">▶ Play</summary>
+        <video class="video" controls preload="none" playsinline src="${fileUrl(item.id)}"></video>
+      </details>
+      <a class="act" href="${fileUrl(item.id, true)}" download>⬇ Download</a>
+      <button class="act ${pub ? 'act-on' : ''}" data-act="public" data-id="${item.id}" data-public="${pub ? '1' : '0'}">${pub ? '🌐 Public' : '🔒 Private'}</button>
+      ${copyBtn}
+    </div>`;
+}
+
 function rowHtml(item) {
   const thumb = item.thumbnail_url
     ? `<img class="thumb" src="${esc(item.thumbnail_url)}" alt="" loading="lazy">`
@@ -109,6 +140,7 @@ function rowHtml(item) {
       </div>
       ${bar}
       ${meta}
+      ${actionsHtml(item)}
     </div>`;
 }
 
@@ -147,6 +179,13 @@ function patchRow(ev) {
     if (bar) bar.classList.add('hidden');
     if (speed) speed.textContent = '';
     if (eta) eta.textContent = '';
+    // A just-completed item gains a file: refetch to render play/download/share.
+    if (ev.status === 'completed') {
+      apiFetch('/api/items/' + ev.id)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((it) => { if (it) upsertRow(it, false); })
+        .catch(() => { /* ignore */ });
+    }
   } else if (bar && fill) {
     bar.classList.remove('hidden');
     if (ev.percent != null) fill.style.width = Math.max(0, Math.min(100, ev.percent)) + '%';
@@ -337,6 +376,35 @@ async function cookieAction(key, act, el) {
   }
 }
 
+// ---- Public toggle / share ------------------------------------------------
+async function togglePublic(id, makePublic) {
+  try {
+    const res = await apiFetch('/api/items/' + id + '/public', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ public: makePublic }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast((data && (data.message || data.error)) || 'Update failed', 'error'); return; }
+    upsertRow(data, false); // re-render row with new public state + copy button
+    toast(makePublic ? 'Public — anyone with the link can watch' : 'Now private',
+      makePublic ? 'ok' : 'info');
+  } catch (e) {
+    if (!e || !e.unauthorized) toast('Network error', 'error');
+  }
+}
+
+function copyPublicLink(id) {
+  const link = publicUrl(id);
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(link).then(
+      () => toast('Public link copied', 'ok'),
+      () => toast(link, 'info'));
+  } else {
+    toast(link, 'info');
+  }
+}
+
 // ---- Debounce -------------------------------------------------------------
 function debounce(fn, ms) {
   let h;
@@ -396,6 +464,16 @@ els.search.addEventListener('input', debounce(() => {
 }, 300));
 
 els.loadMore.addEventListener('click', () => loadItems(false));
+
+// Delegated actions on cards (public toggle, copy link). <summary> play toggle
+// is native — it carries no data-act, so it falls through here untouched.
+els.history.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const id = Number(btn.dataset.id);
+  if (btn.dataset.act === 'public') togglePublic(id, btn.dataset.public !== '1');
+  else if (btn.dataset.act === 'copy') copyPublicLink(id);
+});
 
 // ---- Share target: ?url= / ?text= -----------------------------------------
 function handleShareParam() {

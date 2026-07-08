@@ -34,6 +34,13 @@ CREATE INDEX        idx_items_status      ON items(status);
 CREATE INDEX        idx_items_created     ON items(created_at DESC, id DESC);  -- keyset paging
 ```
 
+### `migrations/0002_public.sql`
+```sql
+ALTER TABLE items ADD COLUMN public INTEGER NOT NULL DEFAULT 0;  -- 1 = streamable tokenless
+```
+When `public = 1`, `GET /api/items/:id/file` serves the media without a token (shareable
+direct link). Default `0` (private; token required).
+
 ### Optional FTS (phase 2, `migrations/0002_fts.sql`)
 ```sql
 CREATE VIRTUAL TABLE items_fts USING fts5(

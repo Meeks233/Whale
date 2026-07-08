@@ -150,6 +150,7 @@ mod tests {
             error: None,
             created_at: 0,
             completed_at: None,
+            public: false,
         }
     }
 

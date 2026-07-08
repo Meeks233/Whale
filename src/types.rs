@@ -82,6 +82,8 @@ pub struct Item {
     pub error: Option<String>,
     pub created_at: i64,
     pub completed_at: Option<i64>,
+    /// When true, the media file streams without a token (shareable direct link).
+    pub public: bool,
 }
 
 /// Result of the metadata probe (yt-dlp --dump-json).

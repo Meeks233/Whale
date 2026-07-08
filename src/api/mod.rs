@@ -4,6 +4,7 @@ pub mod auth;
 mod cookies;
 mod events;
 mod items;
+mod media;
 
 use crate::archive::Archive;
 use crate::config::Config;
@@ -29,6 +30,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/items", post(items::submit).get(items::list))
         .route("/api/items/:id", get(items::get).delete(items::delete))
         .route("/api/items/:id/retry", post(items::retry))
+        .route("/api/items/:id/public", post(items::set_public))
         .route("/api/cookies", get(cookies::list))
         .route(
             "/api/cookies/:platform",
@@ -40,9 +42,11 @@ pub fn router(state: AppState) -> Router {
         ));
 
     // Public routes: health (no auth) + SSE (auth via ?token= inside) + static UI.
+    // File streaming self-authorizes (token OR item.public), so it lives here.
     let public = Router::new()
         .route("/api/health", get(items::health))
         .route("/api/events", get(events::events))
+        .route("/api/items/:id/file", get(media::file))
         .fallback(crate::web::static_handler);
 
     Router::new()

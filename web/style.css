@@ -228,6 +228,33 @@ input:focus { outline: none; border-color: var(--accent); }
 
 .err { color: var(--err); font-size: 12px; margin-top: 6px; word-break: break-word; }
 
+/* ---- Card actions: play / download / share ---- */
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.act {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  list-style: none;
+  user-select: none;
+}
+.act::-webkit-details-marker { display: none; }
+.act:hover { border-color: var(--accent); }
+.act-on { border-color: var(--ok); color: var(--ok); }
+.player { flex: 1 0 100%; order: 9; }
+.player > .act { display: inline-block; }
+.video {
+  width: 100%;
+  margin-top: 8px;
+  border-radius: 8px;
+  background: #000;
+  max-height: 70vh;
+}
+
 .empty { text-align: center; color: var(--muted); padding: 40px 0; }
 
 .toasts {

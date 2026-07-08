@@ -53,6 +53,10 @@ impl Db {
         queries::set_completed(self, id, path, size).await
     }
 
+    pub async fn set_public(&self, id: i64, public: bool) -> anyhow::Result<()> {
+        queries::set_public(self, id, public).await
+    }
+
     pub async fn get(&self, id: i64) -> anyhow::Result<Option<Item>> {
         queries::get(self, id).await
     }
