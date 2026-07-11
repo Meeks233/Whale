@@ -1,6 +1,7 @@
 //! HTTP router assembly + shared state. See docs/API.md.
 
 pub mod auth;
+mod archive;
 mod clients;
 mod cookies;
 mod events;
@@ -37,6 +38,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/cookies/:platform",
             put(cookies::set).patch(cookies::toggle).delete(cookies::delete),
+        )
+        .route(
+            "/api/archive",
+            get(archive::list).post(archive::add).delete(archive::remove),
         )
         .route("/api/clients", get(clients::list))
         .route("/api/clients/:id/trust", post(clients::trust))

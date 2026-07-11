@@ -101,6 +101,14 @@ The URL is short-lived and bound to the server's IP — resolve it fresh each ti
 > real file on disk, `false` once the local copy is pruned. The UI shows a cloud badge and falls
 > back to `/stream-url` when it's `false`.
 
+### `GET/POST/DELETE /api/archive` — manual dedup editor (token required)
+The dedup set uses **Seal's scheme**: one `"<extractor> <id>"` key per item (identical to yt-dlp
+`--download-archive`). For ex-Seal users on top of the Seal-backup CLI import.
+- `GET` → `{ "keys": ["youtube abc123", …] }` (sorted).
+- `POST { "key": "youtube abc123" }` → add (idempotent). A future submit matching the key dedups.
+  `400` if the key isn't shaped `extractor id`.
+- `DELETE { "key": "youtube abc123" }` → remove, so that item can re-download.
+
 ### `POST /api/clients/register` — self-register a client (**no token**)
 Body `{ "passphrase": "<≥8 chars>", "label": "<optional>" }`. The client generates its own
 passphrase; the server stores only its SHA-256 hash. With `WHALE_CLIENT_TOFU=true` (default) the

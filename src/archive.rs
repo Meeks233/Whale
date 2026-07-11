@@ -68,6 +68,13 @@ impl Archive {
         self.inner.set.lock().await.contains(key)
     }
 
+    /// All dedup keys, sorted — for the manual archive editor.
+    pub async fn keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self.inner.set.lock().await.iter().cloned().collect();
+        keys.sort();
+        keys
+    }
+
     /// Add `key` to the set and append it to the file. Idempotent: inserting an existing key
     /// is a no-op and never duplicates a line.
     pub async fn insert(&self, key: &str) -> anyhow::Result<()> {
