@@ -16,6 +16,8 @@ use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde_json::json;
 use std::path::Path as FsPath;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
@@ -50,6 +52,21 @@ pub async fn public_file(
         .filter(|i| i.public)
         .ok_or(AppError::NotFound)?;
     serve_item(item, req).await
+}
+
+/// GET /api/items/:id/stream-url — resolve a direct upstream URL for online
+/// playback (token-required). Used when the local file is gone: the client plays
+/// from source without re-downloading. Returns `{ "url": "..." }`.
+pub async fn stream_url(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    let cookie = crate::cookies::resolve(&state.cookies, state.cfg.cookies.as_deref(), &item.webpage_url);
+    let url = crate::ytdlp::resolve_stream_url(&state.cfg, &item.webpage_url, cookie.as_deref())
+        .await
+        .map_err(|e| AppError::Internal(format!("stream url resolve failed: {e}")))?;
+    Ok(Json(json!({ "url": url })).into_response())
 }
 
 /// Stream `item`'s file, honoring `?download=1` for an attachment disposition.

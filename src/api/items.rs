@@ -14,6 +14,7 @@ use serde_json::json;
 /// POST /api/items — submit a URL: probe → dedup → enqueue.
 pub async fn submit(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<SubmitRequest>,
 ) -> AppResult<Response> {
     let url = req.url.trim().to_string();
@@ -21,6 +22,13 @@ pub async fn submit(
         return Err(AppError::BadRequest("missing url".into()));
     }
     let force = req.options.as_ref().and_then(|o| o.force).unwrap_or(false);
+
+    // If this request authenticated as a self-registered client (not the owner
+    // token), we tally its submissions per extractor for rate/abuse visibility.
+    let client_id = match super::auth::extract_token(&headers, "") {
+        Some(t) if t != state.cfg.token => state.db.find_trusted_client_id(&t).await.ok().flatten(),
+        _ => None,
+    };
 
     // Auto-select the platform cookie for this URL (falls back to global).
     let cookie = crate::cookies::resolve(&state.cookies, state.cfg.cookies.as_deref(), &url);
@@ -32,6 +40,9 @@ pub async fn submit(
     let mut duplicates = 0u32;
 
     for p in &probes {
+        if let Some(cid) = client_id {
+            let _ = state.db.bump_site_count(cid, &p.extractor).await;
+        }
         let key = p.archive_key();
         let existing = state.db.find_by_archive_key(&key).await?;
 

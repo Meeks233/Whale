@@ -87,6 +87,37 @@ pub struct Item {
     /// Random, unguessable slug for the public link (`/api/p/:slug`). Set the
     /// first time an item is made public; `None` until then.
     pub public_slug: Option<String>,
+    /// Computed (not stored): whether `filepath` currently points at a real file
+    /// on disk. `false` when the local copy was pruned/backed away — the UI shows
+    /// a cloud badge and falls back to upstream streaming (`/stream-url`).
+    #[serde(default)]
+    pub local_available: bool,
+}
+
+/// A self-registered client that authenticates with its own passphrase instead
+/// of the owner token. Only the passphrase hash is ever stored/returned.
+#[derive(Debug, Clone, Serialize)]
+pub struct Client {
+    pub id: i64,
+    pub label: Option<String>,
+    pub trusted: bool,
+    pub created_at: i64,
+    /// Per-extractor submission tally, most-submitted first.
+    pub sites: Vec<SiteCount>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SiteCount {
+    pub extractor: String,
+    pub count: i64,
+}
+
+/// Request body for POST /api/clients/register (self-registration).
+#[derive(Debug, Deserialize)]
+pub struct RegisterRequest {
+    pub passphrase: String,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// Result of the metadata probe (yt-dlp --dump-json).

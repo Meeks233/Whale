@@ -3,7 +3,7 @@
 mod queries;
 
 use crate::seal_import::{ImportOutcome, SealRecord};
-use crate::types::{Item, ProbeResult, Source, Status};
+use crate::types::{Client, Item, ProbeResult, Source, Status};
 use std::path::Path;
 
 /// Query parameters for listing items (keyset pagination).
@@ -83,5 +83,34 @@ impl Db {
 
     pub async fn upsert_import(&self, rec: SealRecord) -> anyhow::Result<ImportOutcome> {
         queries::upsert_import(self, rec).await
+    }
+
+    pub async fn register_client(
+        &self,
+        passphrase: &str,
+        label: Option<&str>,
+        auto_trust: bool,
+    ) -> anyhow::Result<Client> {
+        queries::register_client(self, passphrase, label, auto_trust).await
+    }
+
+    pub async fn find_trusted_client_id(&self, passphrase: &str) -> anyhow::Result<Option<i64>> {
+        queries::find_trusted_client_id(self, passphrase).await
+    }
+
+    pub async fn trust_client(&self, id: i64) -> anyhow::Result<bool> {
+        queries::trust_client(self, id).await
+    }
+
+    pub async fn delete_client(&self, id: i64) -> anyhow::Result<bool> {
+        queries::delete_client(self, id).await
+    }
+
+    pub async fn bump_site_count(&self, client_id: i64, extractor: &str) -> anyhow::Result<()> {
+        queries::bump_site_count(self, client_id, extractor).await
+    }
+
+    pub async fn list_clients(&self) -> anyhow::Result<Vec<Client>> {
+        queries::list_clients(self).await
     }
 }

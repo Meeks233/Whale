@@ -126,6 +126,7 @@ mod tests {
         Config {
             token: "secret".into(),
             token_generated: false,
+            client_tofu: true,
             bind: "0.0.0.0:8080".parse::<SocketAddr>().unwrap(),
             data_dir: PathBuf::from("/data"),
             download_dir: PathBuf::from("/downloads"),
@@ -170,6 +171,7 @@ mod tests {
             completed_at: None,
             public: false,
             public_slug: None,
+            local_available: false,
         }
     }
 

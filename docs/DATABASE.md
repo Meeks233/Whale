@@ -45,6 +45,25 @@ CREATE UNIQUE INDEX idx_items_public_slug ON items(public_slug) WHERE public_slu
 stable afterwards, so public links can't be derived from the sequential `id`. The `/api/items/:id/file`
 route always requires a token.
 
+> **Computed, not stored:** the API adds a `local_available` boolean to each item at
+> response time (whether `filepath` points at a real file on disk). It has no column.
+
+### `migrations/0004_clients.sql` — self-registered clients
+```sql
+CREATE TABLE clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    passphrase_hash TEXT NOT NULL UNIQUE,   -- SHA-256 of the client passphrase
+    label TEXT, trusted INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
+);
+CREATE TABLE client_site_counts (           -- per-extractor submission tally
+    client_id INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+    extractor TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (client_id, extractor)
+);
+```
+Clients self-register a passphrase (only its hash is stored) and, once `trusted`, authenticate
+like the owner token. `WHALE_CLIENT_TOFU` controls whether new registrations are trusted on sight.
+
 ### Optional FTS (phase 2, `migrations/0002_fts.sql`)
 ```sql
 CREATE VIRTUAL TABLE items_fts USING fts5(
