@@ -104,33 +104,45 @@ function publicUrl(slug) {
 
 function actionsHtml(item) {
   if (item.status !== 'completed' || !item.filepath) return '';
+  const local = !!item.local_available;
   const pub = !!item.public;
-  const copyBtn = pub && item.public_slug
-    ? `<button class="act" data-act="copy" data-slug="${item.public_slug}">🔗 Copy link</button>`
-    : '';
+  // Local file present: play/download it directly, and allow public sharing.
+  // Local file gone (backed away): the <video> src is resolved on demand from
+  // upstream via /stream-url (see resolveCloudVideo); no download/share.
+  const video = local
+    ? `<video class="video" controls preload="none" playsinline src="${fileUrl(item.id)}"></video>`
+    : `<video class="video" controls preload="none" playsinline data-cloud="1" data-id="${item.id}"></video>`;
+  const localActions = local
+    ? `<a class="act" href="${fileUrl(item.id, true)}" download>⬇ Download</a>
+      <button class="act ${pub ? 'act-on' : ''}" data-act="public" data-id="${item.id}" data-public="${pub ? '1' : '0'}">${pub ? '🌐 Public' : '🔒 Private'}</button>
+      ${pub && item.public_slug ? `<button class="act" data-act="copy" data-slug="${item.public_slug}">🔗 Copy link</button>` : ''}`
+    : `<span class="act act-cloud" title="Local copy is gone — plays from source">☁ Cloud only</span>`;
   return `
     <div class="actions">
       <details class="player">
         <summary class="act">▶ Play</summary>
-        <video class="video" controls preload="none" playsinline src="${fileUrl(item.id)}"></video>
+        ${video}
       </details>
-      <a class="act" href="${fileUrl(item.id, true)}" download>⬇ Download</a>
-      <button class="act ${pub ? 'act-on' : ''}" data-act="public" data-id="${item.id}" data-public="${pub ? '1' : '0'}">${pub ? '🌐 Public' : '🔒 Private'}</button>
-      ${copyBtn}
+      ${localActions}
     </div>`;
 }
+
+// Cloud-file corner badge for the thumbnail: shown when an item is completed but
+// its local copy is gone, signalling playback will stream from source.
+const CLOUD_BADGE = `<span class="cloud-badge" title="Cloud only — plays from source"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M19 18H6a4 4 0 0 1-.7-7.94A5.5 5.5 0 0 1 16.5 9H17a3.5 3.5 0 0 1 2 6.37V18Z"/></svg></span>`;
 
 function rowHtml(item) {
   const thumb = item.thumbnail_url
     ? `<img class="thumb" src="${esc(item.thumbnail_url)}" alt="" loading="lazy">`
     : `<div class="thumb thumb-empty"></div>`;
   const dur = item.duration ? `<span class="dur">${esc(fmtDuration(item.duration))}</span>` : '';
+  const cloud = item.status === 'completed' && item.filepath && !item.local_available ? CLOUD_BADGE : '';
   const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
   const active = item.status === 'queued' || item.status === 'running';
   const bar = `<div class="progress ${active ? '' : 'hidden'}"><div class="progress-fill" style="width:0%"></div></div>`;
   const meta = item.error ? `<div class="err">${esc(item.error)}</div>` : '';
   return `
-    <a class="thumb-wrap" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${thumb}${dur}</a>
+    <a class="thumb-wrap" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${thumb}${dur}${cloud}</a>
     <div class="body">
       <div class="title">${esc(item.title)}</div>
       ${uploader}
@@ -469,12 +481,34 @@ els.loadMore.addEventListener('click', () => loadItems(false));
 // Delegated actions on cards (public toggle, copy link). <summary> play toggle
 // is native — it carries no data-act, so it falls through here untouched.
 els.history.addEventListener('click', (e) => {
+  // Opening a cloud-only player: lazily resolve an upstream stream URL. The
+  // native <summary> toggle proceeds regardless (no data-act on it).
+  const summary = e.target.closest('.player > summary');
+  if (summary) resolveCloudVideo(summary);
+
   const btn = e.target.closest('[data-act]');
   if (!btn) return;
   const id = Number(btn.dataset.id);
   if (btn.dataset.act === 'public') togglePublic(id, btn.dataset.public !== '1');
   else if (btn.dataset.act === 'copy') copyPublicLink(btn.dataset.slug);
 });
+
+// For a cloud-only item (local file gone), fetch a fresh upstream stream URL and
+// set it as the <video> source. Runs once per player; no-op if already resolved.
+function resolveCloudVideo(summary) {
+  const details = summary.closest('details.player');
+  const video = details && details.querySelector('video[data-cloud]');
+  if (!video || video.src || video.dataset.loading) return;
+  video.dataset.loading = '1';
+  apiFetch('/api/items/' + video.dataset.id + '/stream-url')
+    .then((r) => (r.ok ? r.json() : null))
+    .then((d) => {
+      if (d && d.url) { video.src = d.url; video.load(); }
+      else toast('Could not resolve stream from source', 'error');
+    })
+    .catch(() => { /* auth/network handled by apiFetch */ })
+    .finally(() => { delete video.dataset.loading; });
+}
 
 // ---- Share target: ?url= / ?text= -----------------------------------------
 function handleShareParam() {

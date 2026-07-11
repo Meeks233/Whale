@@ -68,8 +68,15 @@ pub async fn require_auth(
 ) -> Result<Response, AppError> {
     let query = request.uri().query().unwrap_or("");
     let token = extract_token(request.headers(), query);
-    match token {
-        Some(t) if t == state.cfg.token => Ok(next.run(request).await),
+    let Some(t) = token else {
+        return Err(AppError::Unauthorized);
+    };
+    // Owner token OR a trusted self-registered client passphrase.
+    if t == state.cfg.token {
+        return Ok(next.run(request).await);
+    }
+    match state.db.find_trusted_client_id(&t).await {
+        Ok(Some(_)) => Ok(next.run(request).await),
         _ => Err(AppError::Unauthorized),
     }
 }

@@ -8,6 +8,7 @@ by `Config::from_env()` at startup. No config file in v1.
 | Env var | Default | Required | Meaning |
 |---|---|---|---|
 | `WHALE_TOKEN` | *(random)* | no | Static bearer token for all `/api/*` routes. If unset, a strong random 32-char token is generated at startup and logged (set it to keep a stable token). |
+| `WHALE_CLIENT_TOFU` | `true` | no | Trust-on-first-use for self-registered clients: a client that POSTs a new passphrase to `/api/clients/register` is trusted immediately (single-user / private-network default). **Set `false` if Whale is reachable from untrusted networks** — clients then land pending until the owner approves them with the token via `POST /api/clients/:id/trust`. |
 | `WHALE_BIND` | `0.0.0.0:8080` | no | Listen address. |
 | `WHALE_DATA_DIR` | `/data` | no | Holds `whale.db`, `archive.txt`, import files, sidecars. Mount a volume. |
 | `WHALE_DOWNLOAD_DIR` | `/downloads` | no | Output directory for finished media. Mount a volume. |

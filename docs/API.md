@@ -5,11 +5,15 @@ frontend and any share-shortcuts depend on it.
 
 ## Auth
 
-Single static bearer token (`WHALE_TOKEN`).
+Two accepted credentials, both sent the same way (bearer header or `?token=`):
 
-- Preferred: header `Authorization: Bearer <token>`.
-- For GET links / SSE / share shortcuts where headers are awkward: `?token=<token>`.
-- Missing/wrong token → `401 {"error":"unauthorized"}`.
+1. The owner token (`WHALE_TOKEN`).
+2. A **trusted client passphrase** — self-registered via `POST /api/clients/register`
+   (see below). Behaves exactly like the token on every `/api/*` route.
+
+- Preferred: header `Authorization: Bearer <token-or-passphrase>`.
+- For GET links / SSE / share shortcuts where headers are awkward: `?token=<...>`.
+- Missing/wrong credential → `401 {"error":"unauthorized"}`.
 
 The static UI assets (`GET /`, `/app.js`, `/manifest.webmanifest`, `/sw.js`, icons) are
 **served without auth** (they contain no data); every `/api/*` route requires the token.
@@ -86,6 +90,32 @@ surface. Use `/api/p/:slug` for tokenless public sharing.
 - Honors `Range`/`If-*` (returns `206 Partial Content`); `Content-Type` from the file extension.
 - Add `?download=1` to force a browser save (`Content-Disposition: attachment`, RFC 5987 UTF-8 filename).
 - `401` without a valid token; `400` if the item has no file yet; `404` if missing.
+
+### `GET /api/items/:id/stream-url` — resolve upstream stream URL (token required)
+For **online playback without downloading**, used when the local file is gone (backed away):
+runs `yt-dlp -g` for a progressive HTTP format and returns `{ "url": "<direct media url>" }`.
+The URL is short-lived and bound to the server's IP — resolve it fresh each time, don't cache.
+`500 {"error":"internal"}` if resolution fails (unsupported/expired/geo-blocked).
+
+> Item JSON carries a computed **`local_available`** boolean: `true` when `filepath` points at a
+> real file on disk, `false` once the local copy is pruned. The UI shows a cloud badge and falls
+> back to `/stream-url` when it's `false`.
+
+### `POST /api/clients/register` — self-register a client (**no token**)
+Body `{ "passphrase": "<≥8 chars>", "label": "<optional>" }`. The client generates its own
+passphrase; the server stores only its SHA-256 hash. With `WHALE_CLIENT_TOFU=true` (default) the
+client is trusted immediately (`200`); otherwise it's pending (`202`) until the owner approves it.
+Idempotent: re-registering the same passphrase returns the existing client. Returns the `Client`
+(`{id,label,trusted,created_at,sites:[{extractor,count}]}`).
+
+### `GET /api/clients` — list clients + per-site counts (token required)
+`{ "clients": [Client, …] }`, newest first. `sites` is the per-extractor submission tally.
+
+### `POST /api/clients/:id/trust` — approve a pending client (token required)
+`200 {"trusted": true}` or `404`.
+
+### `DELETE /api/clients/:id` — revoke a client (token required)
+Deletes the client and its counts (cascade). `200 {"deleted": true}` or `404`.
 
 ### `GET /api/p/:slug` — tokenless public stream
 Streams a public item by its random `public_slug`. **No token needed**, but only resolves while the

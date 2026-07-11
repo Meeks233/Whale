@@ -1,6 +1,7 @@
 //! HTTP router assembly + shared state. See docs/API.md.
 
 pub mod auth;
+mod clients;
 mod cookies;
 mod events;
 mod items;
@@ -31,11 +32,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/items/:id", get(items::get).delete(items::delete))
         .route("/api/items/:id/retry", post(items::retry))
         .route("/api/items/:id/public", post(items::set_public))
+        .route("/api/items/:id/stream-url", get(media::stream_url))
         .route("/api/cookies", get(cookies::list))
         .route(
             "/api/cookies/:platform",
             put(cookies::set).patch(cookies::toggle).delete(cookies::delete),
         )
+        .route("/api/clients", get(clients::list))
+        .route("/api/clients/:id/trust", post(clients::trust))
+        .route("/api/clients/:id", axum::routing::delete(clients::delete))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
@@ -45,6 +50,7 @@ pub fn router(state: AppState) -> Router {
     // File streaming self-authorizes (token OR item.public), so it lives here.
     let public = Router::new()
         .route("/api/health", get(items::health))
+        .route("/api/clients/register", post(clients::register))
         .route("/api/events", get(events::events))
         .route("/api/items/:id/file", get(media::file))
         .route("/api/p/:slug", get(media::public_file))

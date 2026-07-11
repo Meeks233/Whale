@@ -2,7 +2,7 @@
 
 use super::{Db, ListPage, ListQuery};
 use crate::seal_import::{ImportOutcome, SealRecord};
-use crate::types::{Item, ProbeResult, Source, Status};
+use crate::types::{Client, Item, ProbeResult, SiteCount, Source, Status};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Row;
 use std::path::Path;
@@ -23,6 +23,8 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         .ok_or_else(|| anyhow::anyhow!("unknown status in db: {status_str}"))?;
     let source = Source::parse(&source_str)
         .ok_or_else(|| anyhow::anyhow!("unknown source in db: {source_str}"))?;
+    let filepath: Option<String> = row.try_get("filepath")?;
+    let local_available = filepath_exists(&filepath);
 
     Ok(Item {
         id: row.try_get("id")?,
@@ -34,7 +36,6 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         webpage_url: row.try_get("webpage_url")?,
         thumbnail_url: row.try_get("thumbnail_url")?,
         duration: row.try_get("duration")?,
-        filepath: row.try_get("filepath")?,
         filesize: row.try_get("filesize")?,
         source,
         status,
@@ -43,7 +44,18 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         completed_at: row.try_get("completed_at")?,
         public: row.try_get::<i64, _>("public")? != 0,
         public_slug: row.try_get("public_slug")?,
+        filepath,
+        local_available,
     })
+}
+
+/// True when `filepath` is set and points at a real file on disk.
+fn filepath_exists(filepath: &Option<String>) -> bool {
+    filepath
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .map(|p| Path::new(p).is_file())
+        .unwrap_or(false)
 }
 
 const SELECT_COLS: &str = "id, extractor, video_id, archive_key, title, uploader, \
@@ -398,6 +410,125 @@ pub(super) async fn upsert_import(db: &Db, rec: SealRecord) -> anyhow::Result<Im
     })
 }
 
+// ---- Clients (self-registered passphrase auth) ----------------------------
+
+/// SHA-256 hex of a passphrase. We never store the passphrase itself.
+pub(crate) fn hash_passphrase(passphrase: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(passphrase.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Register (or return the existing) client by passphrase. When `auto_trust` is
+/// set (TOFU), a freshly seen passphrase is trusted immediately.
+pub(super) async fn register_client(
+    db: &Db,
+    passphrase: &str,
+    label: Option<&str>,
+    auto_trust: bool,
+) -> anyhow::Result<Client> {
+    let hash = hash_passphrase(passphrase);
+    sqlx::query(
+        "INSERT INTO clients (passphrase_hash, label, trusted, created_at) \
+         VALUES (?, ?, ?, ?) ON CONFLICT(passphrase_hash) DO NOTHING",
+    )
+    .bind(&hash)
+    .bind(label)
+    .bind(auto_trust as i64)
+    .bind(now_unix())
+    .execute(&db.pool)
+    .await?;
+
+    let row = sqlx::query("SELECT id FROM clients WHERE passphrase_hash = ?")
+        .bind(&hash)
+        .fetch_one(&db.pool)
+        .await?;
+    let id: i64 = row.try_get("id")?;
+    load_client(db, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("client vanished after insert"))
+}
+
+/// Resolve a passphrase to a *trusted* client id, or `None` if unknown/untrusted.
+pub(super) async fn find_trusted_client_id(db: &Db, passphrase: &str) -> anyhow::Result<Option<i64>> {
+    let hash = hash_passphrase(passphrase);
+    let row = sqlx::query("SELECT id FROM clients WHERE passphrase_hash = ? AND trusted = 1")
+        .bind(&hash)
+        .fetch_optional(&db.pool)
+        .await?;
+    Ok(row.map(|r| r.get::<i64, _>("id")))
+}
+
+/// Mark a client trusted. Returns false if no such client.
+pub(super) async fn trust_client(db: &Db, id: i64) -> anyhow::Result<bool> {
+    let res = sqlx::query("UPDATE clients SET trusted = 1 WHERE id = ?")
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Delete a client (and its counts via ON DELETE CASCADE). Returns false if absent.
+pub(super) async fn delete_client(db: &Db, id: i64) -> anyhow::Result<bool> {
+    let res = sqlx::query("DELETE FROM clients WHERE id = ?")
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
+    Ok(res.rows_affected() > 0)
+}
+
+/// Increment a client's per-extractor submission tally.
+pub(super) async fn bump_site_count(db: &Db, client_id: i64, extractor: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        "INSERT INTO client_site_counts (client_id, extractor, count) VALUES (?, ?, 1) \
+         ON CONFLICT(client_id, extractor) DO UPDATE SET count = count + 1",
+    )
+    .bind(client_id)
+    .bind(extractor)
+    .execute(&db.pool)
+    .await?;
+    Ok(())
+}
+
+/// All clients with their per-extractor counts, newest first.
+pub(super) async fn list_clients(db: &Db) -> anyhow::Result<Vec<Client>> {
+    let rows = sqlx::query("SELECT id FROM clients ORDER BY created_at DESC, id DESC")
+        .fetch_all(&db.pool)
+        .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        if let Some(c) = load_client(db, r.get::<i64, _>("id")).await? {
+            out.push(c);
+        }
+    }
+    Ok(out)
+}
+
+/// Load one client (metadata + site counts).
+async fn load_client(db: &Db, id: i64) -> anyhow::Result<Option<Client>> {
+    let row = sqlx::query("SELECT id, label, trusted, created_at FROM clients WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&db.pool)
+        .await?;
+    let Some(row) = row else { return Ok(None) };
+    let sites = sqlx::query(
+        "SELECT extractor, count FROM client_site_counts WHERE client_id = ? ORDER BY count DESC, extractor ASC",
+    )
+    .bind(id)
+    .fetch_all(&db.pool)
+    .await?
+    .into_iter()
+    .map(|r| SiteCount { extractor: r.get("extractor"), count: r.get("count") })
+    .collect();
+    Ok(Some(Client {
+        id: row.get("id"),
+        label: row.get("label"),
+        trusted: row.get::<i64, _>("trusted") != 0,
+        created_at: row.get("created_at"),
+        sites,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +550,40 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::connect(dir.path()).await.unwrap();
         (db, dir)
+    }
+
+    #[tokio::test]
+    async fn client_tofu_trust_and_site_counts() {
+        let (db, _dir) = temp_db().await;
+
+        // TOFU on: first registration is trusted immediately and idempotent.
+        let c = db.register_client("supersecret", Some("phone"), true).await.unwrap();
+        assert!(c.trusted);
+        let again = db.register_client("supersecret", None, true).await.unwrap();
+        assert_eq!(again.id, c.id, "same passphrase reuses the row");
+        assert_eq!(db.find_trusted_client_id("supersecret").await.unwrap(), Some(c.id));
+        assert_eq!(db.find_trusted_client_id("wrong").await.unwrap(), None);
+
+        // TOFU off: pending until explicitly trusted.
+        let p = db.register_client("pendingpass", None, false).await.unwrap();
+        assert!(!p.trusted);
+        assert_eq!(db.find_trusted_client_id("pendingpass").await.unwrap(), None);
+        assert!(db.trust_client(p.id).await.unwrap());
+        assert_eq!(db.find_trusted_client_id("pendingpass").await.unwrap(), Some(p.id));
+
+        // Per-extractor tally accrues and sorts by count desc.
+        db.bump_site_count(c.id, "youtube").await.unwrap();
+        db.bump_site_count(c.id, "youtube").await.unwrap();
+        db.bump_site_count(c.id, "twitter").await.unwrap();
+        let loaded = db.list_clients().await.unwrap();
+        let mine = loaded.iter().find(|x| x.id == c.id).unwrap();
+        assert_eq!(mine.sites[0].extractor, "youtube");
+        assert_eq!(mine.sites[0].count, 2);
+        assert_eq!(mine.sites[1].extractor, "twitter");
+
+        // Revoke removes trust and cascades counts.
+        assert!(db.delete_client(c.id).await.unwrap());
+        assert_eq!(db.find_trusted_client_id("supersecret").await.unwrap(), None);
     }
 
     #[tokio::test]

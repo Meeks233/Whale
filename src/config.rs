@@ -24,6 +24,11 @@ pub struct Config {
     pub token: String,
     /// True when `token` was randomly generated because `WHALE_TOKEN` was unset.
     pub token_generated: bool,
+    /// Trust-on-first-use for self-registered clients: when true, a client that
+    /// POSTs a new passphrase to `/api/clients/register` is trusted immediately
+    /// (single-user / private-network default). Set false to require the owner
+    /// to approve each client with the token before it can submit.
+    pub client_tofu: bool,
     pub bind: SocketAddr,
     pub data_dir: PathBuf,
     pub download_dir: PathBuf,
@@ -92,6 +97,8 @@ impl Config {
             .parse()
             .context("WHALE_CONCURRENCY must be a positive integer")?;
 
+        let client_tofu = env_bool("WHALE_CLIENT_TOFU", true);
+
         let polite = env_bool("WHALE_POLITE", true);
         let sleep_min: u64 = env_or("WHALE_SLEEP_MIN", "2")
             .parse()
@@ -142,6 +149,7 @@ impl Config {
         Ok(Config {
             token,
             token_generated,
+            client_tofu,
             bind,
             data_dir,
             download_dir,

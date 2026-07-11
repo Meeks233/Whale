@@ -188,6 +188,21 @@ input:focus { outline: none; border-color: var(--accent); }
   padding: 1px 5px;
   border-radius: 4px;
 }
+/* Cloud-only badge: bottom-right corner; slide the duration left when both show. */
+.cloud-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgba(0,0,0,.7);
+  border-radius: 4px;
+  padding: 1px 3px;
+}
+.dur:has(+ .cloud-badge) { right: 30px; }
+.act-cloud { border-style: dashed; color: var(--muted, #9aa); cursor: default; }
 
 .body { flex: 1; min-width: 0; }
 .title {
