@@ -56,6 +56,19 @@ pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<S
         args.push(rate);
     }
 
+    // Anti-batch pacing (belt-and-suspenders alongside the queue-level delay):
+    // yt-dlp's own inter-request sleep. UA is intentionally NOT overridden —
+    // yt-dlp already presents browser UAs per extractor.
+    if let Some(sr) = &cfg.sleep_requests {
+        args.push("--sleep-requests".into());
+        args.push(sr.clone());
+    }
+    // Optional TLS/client-fingerprint impersonation for sites that fingerprint it.
+    if let Some(imp) = &cfg.impersonate {
+        args.push("--impersonate".into());
+        args.push(imp.clone());
+    }
+
     args.push("--embed-metadata".into());
 
     if cfg.embed_thumbnail {
@@ -117,6 +130,11 @@ mod tests {
             data_dir: PathBuf::from("/data"),
             download_dir: PathBuf::from("/downloads"),
             concurrency: 2,
+            polite: false,
+            sleep_min: 2,
+            sleep_max: 7,
+            sleep_requests: None,
+            impersonate: None,
             concurrent_fragments: 4,
             limit_rate: Some("10M".into()),
             container: Container::Mkv,

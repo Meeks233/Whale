@@ -28,6 +28,17 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub download_dir: PathBuf,
     pub concurrency: usize,
+    /// Polite mode: serialize downloads (one at a time) and wait a random
+    /// `sleep_min..=sleep_max` seconds between them, to avoid looking like a
+    /// batch downloader. Default on. Overrides `concurrency` to 1 while active.
+    pub polite: bool,
+    /// Inclusive bounds (seconds) for the random inter-download pause in polite mode.
+    pub sleep_min: u64,
+    pub sleep_max: u64,
+    /// Passed to yt-dlp `--sleep-requests` (seconds between HTTP requests). `None` omits it.
+    pub sleep_requests: Option<String>,
+    /// Passed to yt-dlp `--impersonate` (TLS/client fingerprint, e.g. `chrome`). `None` omits it.
+    pub impersonate: Option<String>,
     /// yt-dlp `--concurrent-fragments` (multi-threaded fragment download).
     pub concurrent_fragments: usize,
     /// Total download-rate cap (e.g. `"10M"`), split across `concurrency` jobs.
@@ -81,6 +92,17 @@ impl Config {
             .parse()
             .context("WHALE_CONCURRENCY must be a positive integer")?;
 
+        let polite = env_bool("WHALE_POLITE", true);
+        let sleep_min: u64 = env_or("WHALE_SLEEP_MIN", "2")
+            .parse()
+            .context("WHALE_SLEEP_MIN must be a non-negative integer")?;
+        let sleep_max: u64 = env_or("WHALE_SLEEP_MAX", "7")
+            .parse()
+            .context("WHALE_SLEEP_MAX must be a non-negative integer")?;
+        let sleep_max = sleep_max.max(sleep_min);
+        let sleep_requests = env_opt("WHALE_SLEEP_REQUESTS");
+        let impersonate = env_opt("WHALE_IMPERSONATE");
+
         let concurrent_fragments: usize = env_or("WHALE_CONCURRENT_FRAGMENTS", "4")
             .parse()
             .context("WHALE_CONCURRENT_FRAGMENTS must be a positive integer")?;
@@ -124,6 +146,11 @@ impl Config {
             data_dir,
             download_dir,
             concurrency,
+            polite,
+            sleep_min,
+            sleep_max,
+            sleep_requests,
+            impersonate,
             concurrent_fragments,
             limit_rate,
             container,
@@ -147,13 +174,54 @@ impl Config {
         self.data_dir.join("archive.txt")
     }
 
+    /// Number of downloads allowed to run at once: forced to 1 in polite mode,
+    /// otherwise the configured `concurrency`.
+    pub fn effective_concurrency(&self) -> usize {
+        if self.polite { 1 } else { self.concurrency.max(1) }
+    }
+
     /// Per-job `--limit-rate` value in bytes/s: the configured total cap divided
-    /// across `concurrency` jobs so their combined throughput stays under it.
-    /// Returns `None` if rate limiting is disabled or the value is unparseable.
+    /// across the effective concurrent jobs so their combined throughput stays
+    /// under it. Returns `None` if rate limiting is disabled or unparseable.
     pub fn per_job_limit_rate(&self) -> Option<String> {
         let total = parse_rate(self.limit_rate.as_deref()?)?;
-        let per = total / (self.concurrency.max(1) as u64);
+        let per = total / (self.effective_concurrency() as u64);
         Some(per.max(1).to_string())
+    }
+
+    /// A random inter-download pause for polite mode, uniform in
+    /// `[sleep_min, sleep_max]` seconds. `Duration::ZERO` when polite is off.
+    pub fn polite_delay(&self) -> std::time::Duration {
+        if !self.polite {
+            return std::time::Duration::ZERO;
+        }
+        let span = self.sleep_max.saturating_sub(self.sleep_min);
+        let extra = if span == 0 { 0 } else { rand_below(span + 1) };
+        std::time::Duration::from_secs(self.sleep_min + extra)
+    }
+}
+
+/// Uniform random integer in `0..bound` (bound > 0) from OS randomness.
+/// Rejection-sampled to avoid modulo bias.
+fn rand_below(bound: u64) -> u64 {
+    if bound <= 1 {
+        return 0;
+    }
+    let zone = u64::MAX - (u64::MAX % bound);
+    loop {
+        let mut b = [0u8; 8];
+        if std::io::Read::read_exact(
+            &mut std::fs::File::open("/dev/urandom").expect("open /dev/urandom"),
+            &mut b,
+        )
+        .is_err()
+        {
+            return 0;
+        }
+        let v = u64::from_le_bytes(b);
+        if v < zone {
+            return v % bound;
+        }
     }
 }
 
@@ -200,6 +268,15 @@ mod tests {
         assert_eq!(parse_rate("1048576"), Some(1048576));
         assert_eq!(parse_rate("1.5MiB"), Some((1.5 * 1024.0 * 1024.0) as u64));
         assert_eq!(parse_rate("garbage"), None);
+    }
+
+    #[test]
+    fn rand_below_stays_in_range() {
+        for _ in 0..200 {
+            assert!(rand_below(6) < 6);
+        }
+        assert_eq!(rand_below(1), 0);
+        assert_eq!(rand_below(0), 0);
     }
 
     #[test]

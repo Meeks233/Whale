@@ -18,15 +18,26 @@ impl Queue {
     pub fn spawn(cfg: Config, db: Db, archive: Archive, cookies: CookieStore) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<i64>();
         let (events, _) = broadcast::channel::<ProgressEvent>(1024);
-        let semaphore = Arc::new(Semaphore::new(cfg.concurrency.max(1)));
+        let semaphore = Arc::new(Semaphore::new(cfg.effective_concurrency()));
 
         let worker_events = events.clone();
         tokio::spawn(async move {
+            let mut first = true;
             while let Some(id) = rx.recv().await {
                 let permit = match semaphore.clone().acquire_owned().await {
                     Ok(p) => p,
                     Err(_) => break, // semaphore closed
                 };
+                // Polite pacing: wait a random 2–7s (config) between downloads so
+                // the arrival-ordered queue doesn't look like a batch downloader.
+                // Skipped before the very first job to avoid a cold-start stall.
+                if !first {
+                    let delay = cfg.polite_delay();
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+                first = false;
                 let cfg = cfg.clone();
                 let db = db.clone();
                 let archive = archive.clone();
