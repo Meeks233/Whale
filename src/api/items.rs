@@ -17,10 +17,13 @@ pub async fn submit(
     headers: axum::http::HeaderMap,
     Json(req): Json<SubmitRequest>,
 ) -> AppResult<Response> {
-    let url = req.url.trim().to_string();
-    if url.is_empty() {
+    if req.url.trim().is_empty() {
         return Err(AppError::BadRequest("missing url".into()));
     }
+    // Canonicalize before probe/dedup: strip tracking params and fold short
+    // links / mobile hosts so the same video shared in different forms resolves
+    // (and dedupes) consistently. See url_normalize.
+    let url = crate::url_normalize::normalize(&req.url);
     let force = req.options.as_ref().and_then(|o| o.force).unwrap_or(false);
 
     // If this request authenticated as a self-registered client (not the owner

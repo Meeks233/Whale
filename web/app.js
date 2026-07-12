@@ -123,15 +123,19 @@ function publicUrl(slug) {
   return (apiBase() || location.origin) + '/api/p/' + slug;
 }
 
+// Save icon (Lucide "download"): borderless glyph, sized to sit inline on the
+// completed status row. No outer chrome — just the currentColor stroke.
+const DOWNLOAD_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>`;
+
 function actionsHtml(item) {
   if (item.status !== 'completed' || !item.filepath) return '';
   const local = !!item.local_available;
   const pub = !!item.public;
-  // Playback now lives on the thumbnail tap (see rowHtml/openPlayer); the card
-  // only carries Save + share controls. Local file present: save/share it.
-  // Local file gone (backed away): plays from upstream, no save/share.
+  // Rendered inline on the status row (see rowHtml), pushed to the right. Local
+  // file present: Save (download icon) + share controls. Local file gone (backed
+  // away): plays from upstream, no save/share.
   const localActions = local
-    ? `<a class="act" href="${fileUrl(item.id, true)}" download>⬇ Save</a>
+    ? `<a class="act act-icon act-save" href="${fileUrl(item.id, true)}" download aria-label="Save" title="Save">${DOWNLOAD_SVG}</a>
       <button class="act ${pub ? 'act-on' : ''}" data-act="public" data-id="${item.id}" data-public="${pub ? '1' : '0'}">${pub ? '🌐 Public' : '🔒 Private'}</button>
       ${pub && item.public_slug ? `<button class="act" data-act="copy" data-slug="${item.public_slug}">🔗 Copy link</button>` : ''}`
     : `<span class="act act-cloud" title="Local copy is gone — plays from source">☁ Cloud only</span>`;
@@ -157,16 +161,33 @@ function sourceLabel(extractor) {
   const NAMES = {
     youtube: 'YouTube', twitter: 'X', x: 'X', bilibili: 'Bilibili', tiktok: 'TikTok',
     instagram: 'Instagram', soundcloud: 'SoundCloud', vimeo: 'Vimeo', twitch: 'Twitch',
-    facebook: 'Facebook', reddit: 'Reddit', pornhub: 'Pornhub', generic: 'Web',
+    facebook: 'Facebook', reddit: 'Reddit', weibo: 'Weibo', niconico: 'Niconico',
+    dailymotion: 'Dailymotion', pornhub: 'Pornhub', generic: 'Web',
   };
   return NAMES[base] || (base.charAt(0).toUpperCase() + base.slice(1));
 }
 
+// Per-site logo asset (web/icons/sites/*.svg) for the extractor id. Falls back
+// to a neutral globe. Maps yt-dlp extractor bases/aliases → bundled slug.
+const SITE_ICONS = {
+  youtube: 'youtube', twitter: 'x', x: 'x', bilibili: 'bilibili', tiktok: 'tiktok',
+  instagram: 'instagram', soundcloud: 'soundcloud', vimeo: 'vimeo', twitch: 'twitch',
+  facebook: 'facebook', reddit: 'reddit', weibo: 'weibo', niconico: 'niconico',
+  nicovideo: 'niconico', dailymotion: 'dailymotion',
+};
+function sourceLogoHtml(extractor) {
+  const base = String(extractor || '').split(/[:_]/)[0].toLowerCase();
+  const slug = SITE_ICONS[base] || 'generic';
+  const name = sourceLabel(extractor) || 'Source';
+  return `<img class="src-logo" src="/icons/sites/${slug}.svg" alt="${esc(name)}" title="${esc(name)}" loading="lazy">`;
+}
+
 // Thumbnail block. Playable items become a play button (tap → fullscreen player);
-// everything else keeps the link out to the source page. Overlays: source
-// (top-left), cloud (top-right), duration (bottom-left), play (bottom-right).
-function thumbHtml(item, thumb, dur, cloud, src) {
-  const overlays = `${thumb}${dur}${cloud}${src}`;
+// everything else keeps the link out to the source page. Overlays: cloud
+// (top-right), duration (bottom-left), play (bottom-right). The source is now
+// shown as a logo before the title (see rowHtml), not on the thumbnail.
+function thumbHtml(item, thumb, dur, cloud) {
+  const overlays = `${thumb}${dur}${cloud}`;
   if (isPlayable(item)) {
     const cloudOnly = !item.local_available ? '1' : '';
     return `<div class="thumb-wrap thumb-play" role="button" tabindex="0" aria-label="Play"
@@ -181,26 +202,25 @@ function rowHtml(item) {
     : `<div class="thumb thumb-empty"></div>`;
   const dur = item.duration ? `<span class="dur">${esc(fmtDuration(item.duration))}</span>` : '';
   const cloud = item.status === 'completed' && item.filepath && !item.local_available ? CLOUD_BADGE : '';
-  const srcLabel = sourceLabel(item.extractor);
-  const src = srcLabel ? `<span class="src-badge">${esc(srcLabel)}</span>` : '';
+  const logo = sourceLogoHtml(item.extractor);
   const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
   const active = item.status === 'queued' || item.status === 'running';
   const bar = `<div class="progress ${active ? '' : 'hidden'}"><div class="progress-fill" style="width:0%"></div></div>`;
   const meta = item.error ? `<div class="err">${esc(item.error)}</div>` : '';
   return `
-    ${thumbHtml(item, thumb, dur, cloud, src)}
+    ${thumbHtml(item, thumb, dur, cloud)}
     <div class="body">
-      <div class="title">${esc(item.title)}</div>
+      <div class="title">${logo}<span>${esc(item.title)}</span></div>
       ${uploader}
       <div class="statusline">
         <span class="badge badge-${esc(item.status)}">${esc(item.status)}</span>
         <span class="phase"></span>
         <span class="speed"></span>
         <span class="eta"></span>
+        ${actionsHtml(item)}
       </div>
       ${bar}
       ${meta}
-      ${actionsHtml(item)}
     </div>`;
 }
 

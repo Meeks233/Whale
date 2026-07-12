@@ -270,8 +270,19 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
                 binds.push(Bind::Text(like));
             }
             "platform" | "site" | "extractor" => {
-                clauses.push(like_clause(negate, "extractor"));
-                binds.push(Bind::Text(like));
+                // Fold platform aliases (x→twitter, ig→instagram, …) so a search
+                // for the site the user knows matches yt-dlp's extractor naming.
+                let terms = crate::platform::extractor_search_terms(&value);
+                let terms = if terms.is_empty() { vec![value.clone()] } else { terms };
+                let parts: Vec<String> = terms
+                    .iter()
+                    .map(|t| {
+                        binds.push(Bind::Text(format!("%{t}%")));
+                        like_clause(negate, "extractor")
+                    })
+                    .collect();
+                let joiner = if negate { " AND " } else { " OR " };
+                clauses.push(format!("({})", parts.join(joiner)));
             }
             _ => {
                 let frag = if negate {
@@ -687,7 +698,11 @@ mod tests {
         let (c, _) = build_search("user:rick");
         assert_eq!(c, vec!["uploader LIKE ?"]);
         let (c, _) = build_search("platform:youtube");
-        assert_eq!(c, vec!["extractor LIKE ?"]);
+        assert_eq!(c, vec!["(extractor LIKE ?)"]);
+        // Alias folds to the canonical extractor token (x → twitter).
+        let (c, b) = build_search("platform:x");
+        assert_eq!(c, vec!["(extractor LIKE ?)"]);
+        assert!(matches!(&b[0], Bind::Text(s) if s == "%twitter%"));
         let (c, _) = build_search("hello");
         assert_eq!(c, vec!["(title LIKE ? OR uploader LIKE ?)"]);
     }
@@ -718,6 +733,14 @@ mod tests {
             .unwrap();
         assert_eq!(by_platform.items.len(), 1);
         assert_eq!(by_platform.items[0].video_id, "tw1");
+
+        // Alias search: `x` resolves to the twitter extractor.
+        let by_alias = db
+            .list(ListQuery { q: Some("platform:x".into()), limit: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(by_alias.items.len(), 1);
+        assert_eq!(by_alias.items[0].video_id, "tw1");
 
         let by_user = db
             .list(ListQuery { q: Some("user:rickc".into()), limit: 50, ..Default::default() })
