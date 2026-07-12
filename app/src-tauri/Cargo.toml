@@ -17,3 +17,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Android/iOS share-target: receives ACTION_SEND intents into a queue the
+# frontend drains. Mobile-only so desktop builds stay lean.
+[target."cfg(any(target_os = \"android\", target_os = \"ios\"))".dependencies]
+tauri-plugin-mobile-sharetarget = "2"

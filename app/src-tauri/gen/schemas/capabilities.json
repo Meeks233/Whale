@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capability for the Whale app window.","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Default capability for the Whale app window.","local":true,"windows":["main"],"permissions":["core:default"]},"mobile":{"identifier":"mobile","description":"Mobile-only permissions for the Whale app window.","local":true,"windows":["main"],"permissions":["mobile-sharetarget:default"],"platforms":["android","iOS"]}}

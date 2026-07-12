@@ -4,7 +4,17 @@
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    #[allow(unused_mut)]
+    let mut builder = tauri::Builder::default();
+
+    // Android/iOS: register the share-target plugin so shared URLs land in a
+    // queue the frontend drains on launch/focus (see web/app.js).
+    #[cfg(mobile)]
+    {
+        builder = builder.plugin(tauri_plugin_mobile_sharetarget::init());
+    }
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running Whale app");
 }
