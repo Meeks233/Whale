@@ -20,6 +20,12 @@
   </header>
 
   <section id="settings" class="settings hidden">
+    <label for="server">Server URL</label>
+    <div class="row">
+      <input id="server" type="url" inputmode="url" autocomplete="off" placeholder="https://whale.example.com (blank = this site)">
+      <button id="server-save" class="btn">Save</button>
+    </div>
+    <p class="hint">Only needed in the app. Leave blank when opening Whale in a browser.</p>
     <label for="token">API token</label>
     <div class="row">
       <input id="token" type="password" autocomplete="off" placeholder="Bearer token">

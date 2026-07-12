@@ -15,6 +15,7 @@ use crate::db::Db;
 use crate::queue::Queue;
 use axum::routing::{get, post, put};
 use axum::{middleware, Router};
+use tower_http::cors::CorsLayer;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -64,5 +65,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(protected)
         .merge(public)
+        // Allow the native app's webview origin (and browsers on other origins)
+        // to call the API. Auth is a bearer token, not cookies, so permissive
+        // (no credentials) is safe here.
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }

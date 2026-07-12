@@ -8,6 +8,19 @@ function setToken(t) {
   else localStorage.removeItem(TOKEN_KEY);
 }
 
+// ---- Server base URL ------------------------------------------------------
+// Empty in a browser (same-origin, unchanged). The native app (Tauri) sets this
+// to the remote Whale server so the identical UI can talk to it cross-origin.
+const BASE_KEY = 'whale_api_base';
+function apiBase() { return (localStorage.getItem(BASE_KEY) || '').replace(/\/+$/, ''); }
+function setApiBase(b) {
+  b = (b || '').trim().replace(/\/+$/, '');
+  if (b) localStorage.setItem(BASE_KEY, b);
+  else localStorage.removeItem(BASE_KEY);
+}
+// Prefix an app-relative path (starting with `/`) with the configured base.
+function apiUrl(path) { return apiBase() + path; }
+
 // ---- DOM refs -------------------------------------------------------------
 const els = {
   settings: document.getElementById('settings'),
@@ -18,6 +31,8 @@ const els = {
   token: document.getElementById('token'),
   tokenSave: document.getElementById('token-save'),
   tokenHint: document.getElementById('token-hint'),
+  server: document.getElementById('server'),
+  serverSave: document.getElementById('server-save'),
   submitForm: document.getElementById('submit-form'),
   url: document.getElementById('url'),
   submitBtn: document.getElementById('submit-btn'),
@@ -54,7 +69,7 @@ async function apiFetch(path, opts) {
   const headers = Object.assign({}, opts.headers, {
     'Authorization': 'Bearer ' + getToken(),
   });
-  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  const res = await fetch(apiUrl(path), Object.assign({}, opts, { headers }));
   if (res.status === 401) {
     showTokenField(true);
     throw { unauthorized: true };
@@ -93,13 +108,13 @@ const TERMINAL = { completed: 1, failed: 1, duplicate: 1 };
 // can't send an Authorization header.
 function fileUrl(id, download) {
   const t = encodeURIComponent(getToken());
-  return '/api/items/' + id + '/file?token=' + t + (download ? '&download=1' : '');
+  return apiUrl('/api/items/' + id + '/file?token=' + t + (download ? '&download=1' : ''));
 }
 
 // Tokenless public link, keyed by the item's random slug (not its id, so it
-// can't be guessed by enumeration).
+// can't be guessed by enumeration). Points at the server, not the app origin.
 function publicUrl(slug) {
-  return location.origin + '/api/p/' + slug;
+  return (apiBase() || location.origin) + '/api/p/' + slug;
 }
 
 function actionsHtml(item) {
@@ -282,7 +297,7 @@ function connectEvents() {
   const token = getToken();
   if (!token) return;
   if (es) { es.close(); es = null; }
-  es = new EventSource('/api/events?token=' + encodeURIComponent(token));
+  es = new EventSource(apiUrl('/api/events?token=' + encodeURIComponent(token)));
   es.addEventListener('progress', (e) => {
     try { patchRow(JSON.parse(e.data)); } catch (_) { /* ignore */ }
   });
@@ -431,7 +446,10 @@ function debounce(fn, ms) {
 // ---- Wire up UI -----------------------------------------------------------
 els.settingsToggle.addEventListener('click', () => {
   els.settings.classList.toggle('hidden');
-  if (!els.settings.classList.contains('hidden')) els.token.value = getToken();
+  if (!els.settings.classList.contains('hidden')) {
+    els.token.value = getToken();
+    if (els.server) els.server.value = apiBase();
+  }
 });
 
 els.cookiesToggle.addEventListener('click', () => {
@@ -456,6 +474,16 @@ els.tokenSave.addEventListener('click', () => {
   connectEvents();
   loadItems(true);
 });
+
+// Server URL (app only): persist, then reconnect the SSE + reload against it.
+if (els.serverSave) {
+  els.serverSave.addEventListener('click', () => {
+    setApiBase(els.server.value);
+    els.settings.classList.add('hidden');
+    connectEvents();
+    loadItems(true);
+  });
+}
 
 els.submitForm.addEventListener('submit', (e) => {
   e.preventDefault();
