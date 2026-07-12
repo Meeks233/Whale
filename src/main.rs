@@ -10,6 +10,7 @@ mod platform;
 mod queue;
 mod seal_import;
 mod types;
+mod url_normalize;
 mod web;
 mod ytdlp;
 

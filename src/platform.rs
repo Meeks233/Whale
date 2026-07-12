@@ -109,6 +109,51 @@ pub fn by_key(key: &str) -> Option<&'static Platform> {
     CATALOG.iter().find(|p| p.key.eq_ignore_ascii_case(key))
 }
 
+/// Resolve a user-typed platform/site search term to the extractor token(s) to
+/// match against stored `extractor` values. Case-insensitive; folds aliases so
+/// the site the user knows finds items regardless of yt-dlp's extractor naming:
+/// `x`→`twitter`, `ig`→`instagram`, `yt`→`youtube`, `fb`→`facebook`, etc.
+///
+/// Aliases are derived from the catalog itself — a platform's `key`, its hosts,
+/// and each host's first label (so `ig.me` yields `ig`, `fb.com` yields `fb`,
+/// `x.com` yields `x`) — plus a few short forms that aren't hostnames. An
+/// unknown term falls through unchanged for a plain substring match.
+pub fn extractor_search_terms(term: &str) -> Vec<String> {
+    let t = term.trim().to_ascii_lowercase();
+    if t.is_empty() {
+        return Vec::new();
+    }
+    // Common short forms that aren't hostnames.
+    let extra = match t.as_str() {
+        "yt" | "ytb" => Some("youtube"),
+        "insta" => Some("instagram"),
+        "meta" => Some("facebook"),
+        "bili" => Some("bilibili"),
+        "nico" => Some("niconico"),
+        "sc" => Some("soundcloud"),
+        _ => None,
+    };
+    if let Some(k) = extra {
+        return vec![k.to_string()];
+    }
+    for p in CATALOG {
+        if p.key == t {
+            return vec![p.key.to_string()];
+        }
+        for h in p.hosts {
+            let label = h.split('.').next().unwrap_or(h);
+            // Match the full host, or its first label as an alias (`x`→twitter,
+            // `ig`→instagram, `fb`→facebook). Skip the lone ambiguous 1-char
+            // shortener label `t` (from t.co) while keeping the real `x`.
+            let label_ok = label == t && (label.len() > 1 || label == "x");
+            if *h == t || label_ok {
+                return vec![p.key.to_string()];
+            }
+        }
+    }
+    vec![t]
+}
+
 /// Detect the platform for a URL by its host. Returns `None` for unknown sites
 /// (which then fall back to the global cookies file, if any).
 pub fn from_url(url: &str) -> Option<&'static Platform> {
