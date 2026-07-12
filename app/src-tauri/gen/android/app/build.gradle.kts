@@ -17,9 +17,11 @@ android {
     compileSdk = 36
     namespace = "com.whale.app"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
+        // Allow http:// so the app can reach a self-hosted Whale server on a LAN.
+        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "com.whale.app"
-        minSdk = 24
+        // Raised from 24 → 28: the share-target plugin requires Android 9+.
+        minSdk = 28
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")

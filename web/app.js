@@ -538,16 +538,53 @@ function resolveCloudVideo(summary) {
     .finally(() => { delete video.dataset.loading; });
 }
 
-// ---- Share target: ?url= / ?text= -----------------------------------------
+// ---- Share target: ?url= / ?text= (browser/PWA) ---------------------------
 function handleShareParam() {
   const p = new URLSearchParams(location.search);
   const shared = p.get('url') || p.get('text') || '';
   if (!shared) return;
-  els.url.value = shared;
   // Clean the URL so a reload doesn't resubmit.
   history.replaceState(null, '', location.pathname);
-  if (getToken()) submitUrl(shared);
+  handleSharedText(shared);
+}
+
+// Pull the first http(s) URL out of arbitrary shared text ("Watch this https://…").
+function extractUrl(text) {
+  const m = String(text || '').match(/https?:\/\/[^\s]+/i);
+  return m ? m[0] : (text || '').trim();
+}
+
+// Common entry for a shared URL from any source: fill the box and submit.
+function handleSharedText(shared) {
+  const url = extractUrl(shared);
+  if (!url) return;
+  els.url.value = url;
+  if (getToken()) submitUrl(url);
   else { showTokenField(false); toast('Set your token to submit', 'info'); }
+}
+
+// ---- Android/iOS share target (native app) --------------------------------
+// The mobile-sharetarget plugin queues ACTION_SEND intents; drain them on
+// launch and whenever the app regains focus. No-op outside the Tauri app.
+async function drainSharedIntents() {
+  const T = window.__TAURI__;
+  if (!T || !T.core || !T.core.invoke) return;
+  try {
+    for (let i = 0; i < 20; i++) {
+      const text = await T.core.invoke('plugin:mobile-sharetarget|pop_intent_queue_and_extract_text');
+      if (!text) break;
+      handleSharedText(text);
+    }
+  } catch (_) { /* plugin absent (desktop) or nothing queued */ }
+}
+
+function setupNativeShare() {
+  const T = window.__TAURI__;
+  if (!T || !T.event || !T.event.listen) return;
+  drainSharedIntents();
+  // Android delivers a fresh share via a focus event on the existing task.
+  T.event.listen('tauri://focus', () => drainSharedIntents());
+  T.event.listen('new-intent', () => drainSharedIntents()); // iOS
 }
 
 // ---- Service worker -------------------------------------------------------
@@ -562,3 +599,4 @@ if (!getToken()) showTokenField(false);
 connectEvents();
 loadItems(true);
 handleShareParam();
+setupNativeShare();
