@@ -3,76 +3,56 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0b1220">
+  <!-- Single theme-color meta, kept in sync with the effective theme by app.js
+       (so a manual Light/Dark override also tints the Android status bar). -->
+  <meta name="theme-color" id="theme-color-meta" content="#000000">
   <title>Whale</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/style.css">
   <link rel="icon" href="/icons/192.png">
   <link rel="apple-touch-icon" href="/icons/192.png">
+  <!-- Anti-FOUC: apply a forced Light/Dark override before first paint. Absent
+       (or "system") it falls through to the CSS prefers-color-scheme default. -->
+  <script>
+    try { var p = localStorage.getItem('whale_theme'); if (p && p !== 'system') document.documentElement.setAttribute('data-theme', p); } catch (e) {}
+  </script>
 </head>
 <body>
   <header class="topbar">
-    <h1 class="brand">🐋 Whale</h1>
+    <div class="brand-wrap">
+      <h1 class="brand">🐋 Whale</h1>
+      <!-- Server status heartbeat: green + breathing while the SSE stream is
+           live, red when it drops. Driven by the EventSource lifecycle in app.js. -->
+      <span id="server-status" class="server-status down" role="status" aria-label="Server status" data-i18n-aria="aria.serverStatus"></span>
+    </div>
     <div class="topbar-actions">
-      <button id="cookies-toggle" class="icon-btn" aria-label="Cookies" title="Cookies">🍪</button>
-      <button id="settings-toggle" class="icon-btn" aria-label="Settings" title="Settings">⚙︎</button>
+      <!-- Language picker: a topbar popover (industry-standard header menu),
+           sitting to the left of the cookies button. -->
+      <div class="menu-wrap">
+        <button id="lang-toggle" class="icon-btn" aria-label="Language" title="Language" aria-haspopup="menu" aria-expanded="false" data-i18n-aria="aria.language" data-i18n-title="aria.language"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></svg></button>
+        <div id="lang-menu" class="popover-menu hidden" role="menu"></div>
+      </div>
+      <!-- Theme toggle: follows the system by default, cycles System → Light →
+           Dark. The sun/moon glyph reflects the currently-effective theme. -->
+      <button id="theme-toggle" class="icon-btn" aria-label="Theme" title="Theme"></button>
+      <button id="cookies-toggle" class="icon-btn" aria-label="Cookies" title="Cookies" data-i18n-aria="aria.cookies" data-i18n-title="aria.cookies"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5"/><path d="M8.5 8.5v.01"/><path d="M16 15.5v.01"/><path d="M12 12v.01"/><path d="M11 17v.01"/><path d="M7 14v.01"/></svg></button>
+      <button id="settings-toggle" class="icon-btn" aria-label="Settings" title="Settings" data-i18n-aria="aria.settings" data-i18n-title="aria.settings"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/></svg></button>
     </div>
   </header>
 
-  <section id="settings" class="settings hidden">
-    <label for="server">Server URL</label>
-    <div class="row">
-      <input id="server" type="url" inputmode="url" autocomplete="off" placeholder="https://whale.example.com (blank = this site)">
-      <button id="server-save" class="btn">Save</button>
-    </div>
-    <p class="hint">Only needed in the app. Leave blank when opening Whale in a browser.</p>
-    <label for="token">API token</label>
-    <div class="row">
-      <input id="token" type="password" autocomplete="off" placeholder="Bearer token">
-      <button id="token-save" class="btn">Save</button>
-    </div>
-    <p id="token-hint" class="hint hidden">Invalid token.</p>
-
-    <hr class="sep">
-    <label for="seal-archive">Import Seal / yt-dlp history</label>
-    <p class="hint-muted">
-      Paste your Seal or yt-dlp <em>download archive</em> — one <code>extractor id</code>
-      per line (e.g. <code>youtube dQw4w9WgXcQ</code>). Whale marks these as already
-      downloaded, so they won’t re-download when submitted again.
-    </p>
-    <textarea id="seal-archive" class="ta" rows="4"
-              placeholder="youtube dQw4w9WgXcQ&#10;twitter 1466...&#10;bilibili BV1..."></textarea>
-    <button id="seal-import" class="btn wide">Import archive</button>
-  </section>
-
-  <section id="cookies" class="settings hidden">
-    <label>Platform cookies</label>
-    <p class="hint-muted">
-      Log in on a site, export its cookies with a “Get cookies.txt” browser extension,
-      then paste them here. Whale applies them automatically to every download from that
-      platform (X cookies → all x.com / twitter.com links, etc.).
-    </p>
-    <div id="cookie-list" class="cookie-list"></div>
-  </section>
-
   <section class="submit">
     <form id="submit-form" class="row">
-      <input id="url" type="url" inputmode="url" autocomplete="off" placeholder="Paste a video URL…" required>
-      <button id="submit-btn" class="btn" type="submit">Download</button>
+      <input id="url" type="url" inputmode="url" autocomplete="off" placeholder="Paste a video URL…" data-i18n-ph="ph.url" required>
+      <button id="submit-btn" class="btn" type="submit" data-i18n="btn.download">Download</button>
     </form>
   </section>
 
   <section class="controls">
-    <div id="filters" class="chips">
-      <button class="chip active" data-status="">All</button>
-      <button class="chip" data-status="queued">Queued</button>
-      <button class="chip" data-status="running">Running</button>
-      <button class="chip" data-status="completed">Completed</button>
-      <button class="chip" data-status="failed">Failed</button>
-    </div>
+    <button id="select-toggle" class="icon-btn sel-toggle" aria-label="Select multiple" title="Select multiple" data-i18n-aria="aria.selectMultiple" data-i18n-title="aria.selectMultiple"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
     <input id="search" type="search"
-           placeholder="Search…  id:42  user:rick  title:&quot;never gonna&quot;  platform:youtube  -title:live"
-           title="e621-style syntax: id: user:/uploader: title: platform:/site: — prefix a term with - to exclude. Bare words match title or uploader.">
+           placeholder="Search…  failed  twitter  user:rick  title:&quot;never gonna&quot;  -title:live"
+           data-i18n-ph="ph.search" data-i18n-title="title.search"
+           title="e621-style syntax: id: user:/uploader: title: platform:/site: status: — prefix a term with - to exclude. Bare words match title, uploader OR platform; a bare status word (queued/running/completed/failed) filters by status.">
   </section>
 
   <div id="ptr" class="ptr" aria-hidden="true">
@@ -81,19 +61,150 @@
 
   <main>
     <ul id="history" class="history"></ul>
-    <div id="empty" class="empty hidden">No items yet.</div>
-    <button id="load-more" class="btn wide hidden">Load more</button>
+    <div id="empty" class="empty hidden" data-i18n="empty">No items yet.</div>
+    <!-- Infinite-scroll sentinel: while more pages exist this spins and, once it
+         scrolls into view, pulls the next page (10 at a time). -->
+    <div id="infinite-loader" class="infinite-loader hidden" aria-hidden="true">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-loader-circle"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+    </div>
   </main>
+
+  <!-- Batch action bar: shown in multi-select mode (toolbar toggle or long-press
+       a card). Acts on the checked items — download / share / copy links. -->
+  <div id="select-bar" class="select-bar hidden" role="toolbar" aria-label="Batch actions">
+    <span id="select-count" class="select-count" data-i18n="sel.count0">Select items</span>
+    <div class="select-actions">
+      <button id="sel-download" class="btn btn-ghost" data-i18n="sel.download" disabled>Download</button>
+      <button id="sel-share" class="btn btn-ghost" data-i18n="sel.share" disabled>Share</button>
+      <button id="sel-unshare" class="btn btn-ghost" data-i18n="sel.unshare" disabled>Unshare</button>
+      <button id="sel-copy" class="btn btn-ghost" data-i18n="sel.copy" disabled>Copy links</button>
+      <button id="sel-cancel" class="btn" data-i18n="sel.done">Done</button>
+    </div>
+  </div>
+
+  <!-- Batch share dialog: the same duration picker as the single-item share,
+       applied to every selected item at once (7 / 30 days / permanent). -->
+  <div id="batch-share" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="batch-share-title">
+    <div class="modal-card">
+      <button id="batch-share-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="batch-share-title" class="modal-heading" data-i18n="batchShare.title">Share selected</h2>
+      <p id="batch-share-sub" class="hint-muted"></p>
+      <p class="share-windows-label" data-i18n="share.duration">Link duration</p>
+      <div class="share-windows" role="radiogroup" aria-label="Link duration">
+        <label class="share-opt"><input type="radio" name="batch-share-window" value="7" checked><span data-i18n="share.days7">7 days</span></label>
+        <label class="share-opt"><input type="radio" name="batch-share-window" value="30"><span data-i18n="share.days30">30 days</span></label>
+        <label class="share-opt"><input type="radio" name="batch-share-window" value="permanent"><span data-i18n="share.permanent">Permanent</span></label>
+      </div>
+      <div class="share-actions">
+        <button id="batch-share-confirm" class="btn" data-i18n="batchShare.create">Create links</button>
+      </div>
+    </div>
+  </div>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
   <!-- In-app fullscreen player. Opened by tapping a completed thumbnail; the
        Android back button pops it (see app.js) instead of exiting the app. -->
   <div id="player" class="player-overlay hidden" aria-hidden="true">
-    <button id="player-close" class="player-close" aria-label="Close">✕</button>
+    <button id="player-close" class="player-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
     <video id="player-video" class="player-video" controls playsinline autoplay></video>
   </div>
 
+  <!-- Share dialog (Baidu-netdisk style). Opened by the share icon on a
+       completed item: pick a window, create a tokenless public link, copy it. -->
+  <div id="share" class="share-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="share-title">
+    <div class="share-card">
+      <button id="share-close" class="share-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 class="share-heading" data-i18n="share.title">Share</h2>
+      <p id="share-title" class="share-name"></p>
+
+      <!-- Main view: pick a window, create / update / copy the link. -->
+      <div id="share-main">
+        <p class="share-windows-label" data-i18n="share.duration">Link duration</p>
+        <div class="share-windows" role="radiogroup" aria-label="Link duration">
+          <label class="share-opt"><input type="radio" name="share-window" value="7" checked><span data-i18n="share.days7">7 days</span></label>
+          <label class="share-opt"><input type="radio" name="share-window" value="30"><span data-i18n="share.days30">30 days</span></label>
+          <label class="share-opt"><input type="radio" name="share-window" value="permanent"><span data-i18n="share.permanent">Permanent</span></label>
+        </div>
+
+        <div id="share-link-row" class="share-link-row hidden">
+          <input id="share-link" class="share-link" type="text" readonly>
+          <button id="share-copy" class="btn" data-i18n="share.copy">Copy</button>
+        </div>
+        <p id="share-expiry" class="share-expiry"></p>
+
+        <div class="share-actions">
+          <button id="share-stop" class="btn btn-ghost hidden" data-i18n="share.stop">Stop sharing</button>
+          <button id="share-confirm" class="btn" data-i18n="share.create">Create link</button>
+        </div>
+      </div>
+
+      <!-- Undo/confirm view: reached from "Stop sharing"; makes revoking a
+           deliberate two-step so a live link isn't killed by a stray tap. -->
+      <div id="share-cancel-confirm" class="share-cancel hidden">
+        <p class="share-cancel-msg" data-i18n="share.cancelMsg">Cancel this share? The link stops working immediately for everyone.</p>
+        <div class="share-actions">
+          <button id="share-cancel-back" class="btn btn-ghost" data-i18n="share.keep">Keep sharing</button>
+          <button id="share-cancel-yes" class="btn btn-danger" data-i18n="share.cancelYes">Cancel share</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings dialog. Server URL + API token + the Seal/yt-dlp download
+       archive editor (loaded live, edited in place, saved — not just imported). -->
+  <div id="settings" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-card">
+      <button id="settings-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="settings-title" class="modal-heading" data-i18n="settings.title">Settings</h2>
+
+      <!-- App-only: hidden in browsers (same-origin), shown in the native
+           Tauri shell where the UI must be pointed at a remote server. See
+           `html:not(.app-native) #server-row` in style.css. -->
+      <div id="server-row">
+        <label for="server" data-i18n="settings.serverUrl">Server URL</label>
+        <div class="row">
+          <input id="server" type="url" inputmode="url" autocomplete="off" placeholder="https://whale.example.com (blank = this site)" data-i18n-ph="ph.server">
+          <button id="server-save" class="btn" data-i18n="btn.save">Save</button>
+        </div>
+        <p class="hint" data-i18n="settings.serverHint">Only needed in the app. Leave blank when opening Whale in a browser.</p>
+      </div>
+
+      <label for="token" data-i18n="settings.token">API token</label>
+      <div class="row">
+        <input id="token" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
+        <button id="token-save" class="btn" data-i18n="btn.save">Save</button>
+      </div>
+      <p id="token-hint" class="hint hidden" data-i18n="settings.tokenInvalid">Invalid token.</p>
+
+      <hr class="sep">
+      <label for="seal-archive" data-i18n="settings.archive">Seal / yt-dlp download archive</label>
+      <p class="hint-muted" data-i18n-html="settings.archiveHint">
+        Every entry Whale has ever recorded, one <code>extractor id</code> per line
+        (e.g. <code>youtube dQw4w9WgXcQ</code>). Edit freely — add lines to mark items
+        as already downloaded, or delete lines to let them re-download — then Save.
+      </p>
+      <textarea id="seal-archive" class="ta" rows="8"
+                placeholder="youtube dQw4w9WgXcQ&#10;twitter 1466...&#10;bilibili BV1..." data-i18n-ph="ph.archive"></textarea>
+      <button id="seal-import" class="btn wide" data-i18n="settings.archiveSave">Save archive</button>
+    </div>
+  </div>
+
+  <!-- Cookies dialog. Per-platform cookie jars, edited in a popup like Share. -->
+  <div id="cookies" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="cookies-title">
+    <div class="modal-card">
+      <button id="cookies-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="cookies-title" class="modal-heading" data-i18n="cookies.title">Platform cookies</h2>
+      <p class="hint-muted" data-i18n="cookies.hint">
+        Log in on a site, export its cookies with a “Get cookies.txt” browser extension,
+        then paste them here. Whale applies them automatically to every download from that
+        platform (X cookies → all x.com / twitter.com links, etc.).
+      </p>
+      <div id="cookie-list" class="cookie-list"></div>
+    </div>
+  </div>
+
+  <!-- Single bundled + minified script (i18n is bundled into app.js). -->
   <script src="/app.js"></script>
 </body>
 </html>

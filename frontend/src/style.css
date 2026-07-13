@@ -1,0 +1,828 @@
+/* ===========================================================================
+   Theming
+   - Browser: OLED true-black in dark mode, clean white in light mode, switched
+     purely at the CSS level via prefers-color-scheme. No dark-blue background.
+   - Android app (Tauri WebView, html.app-native): Material You "Monet" — the OS
+     accent (AccentColor) drives the accent AND tints the neutral surfaces, so
+     the whole UI picks up the system wallpaper hue. See the html.app-native
+     block below.
+   =========================================================================== */
+
+/* ---- Browser DARK (default): OLED true black ---- */
+:root {
+  --bg: #000000;
+  --surface: #0e0e11;
+  --surface-2: #1a1a1f;
+  --border: #2a2a30;
+  --text: #f2f3f7;
+  --muted: #9a9ba5;
+  --accent: #4f8cff;
+  --ok: #22c55e;
+  --warn: #f59e0b;
+  --err: #ef4444;
+  --run: #38bdf8;
+}
+
+/* ---- Browser LIGHT: clean white ----
+   Applied when the system prefers light (auto — unless the user forced dark),
+   and whenever the user explicitly picks Light via the topbar theme toggle
+   (html[data-theme="light"]). Dark is the :root default above, so forcing dark
+   needs no re-declaration — the guard below just keeps system-light from
+   overriding a manual dark choice. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #ffffff;
+    --surface: #ffffff;
+    --surface-2: #f2f4f8;
+    --border: #e2e6ee;
+    --text: #16181f;
+    --muted: #5c6270;
+    --accent: #2563eb;
+    --run: #0284c7;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --surface: #ffffff;
+  --surface-2: #f2f4f8;
+  --border: #e2e6ee;
+  --text: #16181f;
+  --muted: #5c6270;
+  --accent: #2563eb;
+  --run: #0284c7;
+}
+
+/* System accent where the engine exposes it (Android 12+ Monet, macOS/Windows
+   accent). Applies to browsers too — only the accent, never the background. */
+@supports (color: AccentColor) {
+  :root { --accent: AccentColor; --run: AccentColor; }
+}
+
+/* ---- Android app: Material You / Monet dynamic color ----
+   In the native WebView the neutral palette is derived from the system accent
+   (all Material You tonal palettes come from one source hue), so backgrounds
+   and surfaces carry the wallpaper's Monet tint instead of a flat neutral. */
+@supports (color: AccentColor) {
+  html.app-native {
+    --accent: AccentColor;
+    --run: AccentColor;
+    /* dark (default) */
+    --bg: color-mix(in oklab, AccentColor 8%, #000);
+    --surface: color-mix(in oklab, AccentColor 10%, #0c0c0f);
+    --surface-2: color-mix(in oklab, AccentColor 16%, #17171c);
+    --border: color-mix(in oklab, AccentColor 22%, #26262c);
+    --text: color-mix(in oklab, AccentColor 6%, #f2f3f7);
+    --muted: color-mix(in oklab, AccentColor 22%, #9a9ba5);
+  }
+  /* App light Monet: system-light (unless forced dark) or an explicit Light pick. */
+  @media (prefers-color-scheme: light) {
+    html.app-native:not([data-theme="dark"]) {
+      --bg: color-mix(in oklab, AccentColor 6%, #fff);
+      --surface: color-mix(in oklab, AccentColor 4%, #fff);
+      --surface-2: color-mix(in oklab, AccentColor 12%, #f2f4f8);
+      --border: color-mix(in oklab, AccentColor 20%, #e2e6ee);
+      --text: color-mix(in oklab, AccentColor 8%, #16181f);
+      --muted: color-mix(in oklab, AccentColor 26%, #5c6270);
+    }
+  }
+  html.app-native[data-theme="light"] {
+    --bg: color-mix(in oklab, AccentColor 6%, #fff);
+    --surface: color-mix(in oklab, AccentColor 4%, #fff);
+    --surface-2: color-mix(in oklab, AccentColor 12%, #f2f4f8);
+    --border: color-mix(in oklab, AccentColor 20%, #e2e6ee);
+    --text: color-mix(in oklab, AccentColor 8%, #16181f);
+    --muted: color-mix(in oklab, AccentColor 26%, #5c6270);
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* Kill the default square tap-highlight (it ignores border-radius on pills);
+   interactive elements get their own rounded :active feedback instead. */
+a, button, summary, input, textarea, [role="button"],
+.act, .btn, .icon-btn, .ck-btn {
+  -webkit-tap-highlight-color: transparent;
+}
+.act:active, .btn:active, .ck-btn:active, .icon-btn:active {
+  filter: brightness(1.3);
+}
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+body {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 0 12px calc(24px + env(safe-area-inset-bottom));
+}
+
+.hidden { display: none !important; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* Clear the Android status bar / notch (edge-to-edge WebView). */
+  padding: calc(10px + env(safe-area-inset-top)) 2px 8px;
+}
+.brand { font-size: 20px; margin: 0; }
+
+/* ---- Server status heartbeat (right of the brand) ----
+   A small dot that mirrors the SSE stream's health: green and breathing while
+   the stream is live, solid red when it's down / before a token is set. The
+   "breathing" is an expanding, fading halo (box-shadow) — the standard
+   connection-heartbeat indicator. See setServerStatus() in app.ts. */
+.brand-wrap { display: flex; align-items: center; gap: 9px; }
+.server-status {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--muted);
+  transition: background .3s ease;
+}
+.server-status.down { background: var(--err); }
+.server-status.up {
+  background: var(--ok);
+  animation: heartbeat 2.4s ease-in-out infinite;
+}
+@keyframes heartbeat {
+  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 65%, transparent); }
+  70% { box-shadow: 0 0 0 7px color-mix(in oklab, var(--ok) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 0%, transparent); }
+}
+/* Respect reduced-motion: keep the color, drop the pulsing halo. */
+@media (prefers-reduced-motion: reduce) {
+  .server-status.up { animation: none; }
+}
+
+.icon-btn {
+  background: none;
+  border: none;
+  color: var(--text);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+.icon-btn svg { display: block; }
+.icon-btn.active { color: var(--accent); }
+
+/* ---- Topbar popover menu (language picker) ----
+   A small dropdown anchored under its trigger, the standard header-menu pattern:
+   tap to open, tap an item or click away to close. */
+.topbar-actions { position: relative; }
+.menu-wrap { position: relative; display: inline-flex; }
+.popover-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 60;
+  min-width: 160px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.popover-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.popover-item:hover { background: var(--surface-2); }
+.popover-item.active { color: var(--accent); font-weight: 600; }
+/* Check mark on the active row; reserves its gutter on the others for alignment. */
+.popover-item::after { content: ""; width: 16px; text-align: center; opacity: 0; }
+.popover-item.active::after { content: "✓"; opacity: 1; }
+
+.row { display: flex; gap: 8px; }
+
+input, .btn {
+  font-size: 15px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+}
+
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text);
+}
+input::placeholder { color: var(--muted); }
+input:focus { outline: none; border-color: var(--accent); }
+
+.btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 10px 16px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:disabled { opacity: .5; cursor: default; }
+.btn.wide { display: block; width: 100%; margin: 12px 0; background: var(--surface-2); }
+
+/* ---- Settings / cookies dialogs (same popup shell as the share dialog) ---- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: rgba(0,0,0,.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.modal-card {
+  position: relative;
+  width: 100%;
+  max-width: 460px;
+  max-height: calc(100dvh - 32px);
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 22px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.35);
+}
+.modal-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.modal-heading { margin: 0 0 16px; font-size: 18px; padding-right: 32px; }
+.modal-card label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.modal-card .row { margin-bottom: 4px; }
+/* The Server URL field is only meaningful in the native Tauri shell (which
+   must point the UI at a remote server). In a browser the UI is same-origin,
+   so hide the whole row — detected via html.app-native (set from
+   window.__TAURI__), not user-agent sniffing. */
+html:not(.app-native) #server-row { display: none; }
+.hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
+.hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
+.hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: 4px; font-size: 11px; }
+.sep { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+.ta {
+  width: 100%;
+  padding: 8px 10px;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  resize: vertical;
+  margin-bottom: 8px;
+}
+.ta:focus { outline: none; border-color: var(--accent); }
+
+.topbar-actions { display: flex; gap: 2px; }
+
+/* ---- Cookies panel ---- */
+.cookie-list { display: flex; flex-direction: column; gap: 8px; }
+.cookie-item {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
+.ck-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ck-name { font-weight: 600; font-size: 14px; }
+.ck-status { font-size: 12px; }
+.ck-none { color: var(--muted); }
+.ck-on { color: var(--ok); }
+.ck-off { color: var(--warn); }
+.ck-body { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ck-btn {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+.ck-btn:hover { border-color: var(--accent); }
+.ck-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ck-danger { color: var(--err); }
+.ck-paste {
+  flex: 1 0 100%;
+  margin-top: 6px;
+  padding: 8px;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  resize: vertical;
+}
+.ck-paste-actions { flex: 1 0 100%; display: flex; gap: 6px; }
+
+.submit { margin-bottom: 12px; }
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.controls input[type=search] { flex: 1; min-width: 140px; }
+/* Multi-select toggle sits inline before the search box (no extra row). */
+.sel-toggle {
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  color: var(--muted);
+}
+.sel-toggle svg { display: block; }
+.sel-toggle.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+
+.item {
+  display: flex;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+}
+
+/* ---- Multi-select: natural card highlight (no in-card checkbox) ----
+   Selection state lives on the card surface itself — the industry-standard
+   pattern (Finder / file managers / Photos): an accent border, a soft accent
+   tint, and a crisp ring. Nothing is injected into the card's flex row, so the
+   thumbnail keeps its full size and the layout never shifts on select. */
+body.selecting .item { cursor: pointer; }
+/* In selection mode the play affordance/links must not steal the tap. */
+body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions { pointer-events: none; }
+/* Highlight applies instantly (no transition): some Android WebViews leave a
+   transitioned border-color/box-shadow stuck at its start value, which would
+   hide the accent ring — an instant swap paints reliably everywhere. */
+.item.selected {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+/* ---- Infinite-scroll loader ---- */
+.infinite-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px 0;
+  color: var(--muted);
+}
+.infinite-loader svg { display: block; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Batch action bar (fixed above the toasts in selection mode) ---- */
+.select-bar {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  padding: 8px 8px 8px 16px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.45);
+}
+.select-count { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.select-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.select-bar .btn { padding: 8px 12px; font-size: 13px; border-radius: 10px; }
+
+.thumb-wrap {
+  position: relative;
+  flex: 0 0 auto;
+  /* Don't stretch to the card's full height, and hug the image exactly (no
+     explicit height, line-height:0 kills the inline gap) so the overlays sit
+     on the thumbnail — never floating below it. */
+  align-self: flex-start;
+  width: 120px;
+  line-height: 0;
+  text-decoration: none;
+}
+.thumb-play { cursor: pointer; }
+.thumb {
+  width: 120px;
+  height: 68px;
+  object-fit: cover;
+  border-radius: 8px;
+  display: block;
+  background: var(--surface-2);
+}
+/* Portrait sources (vertical video / Shorts / Reels) keep their real
+   orientation instead of being cropped into the landscape box. The wrapper is
+   tagged .portrait by JS once the image's natural dimensions are known. */
+.thumb-wrap.portrait, .thumb-wrap.portrait .thumb { width: 68px; }
+.thumb-wrap.portrait .thumb { height: 120px; }
+.thumb-empty { background: var(--surface-2); }
+/* Duration pill: bottom-left of the thumbnail box. */
+.dur {
+  position: absolute;
+  bottom: 5px;
+  left: 5px;
+  font-size: 10.5px;
+  line-height: 1.3;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 5px;
+  color: #fff;
+  background: rgba(0,0,0,.72);
+}
+/* Cloud-only badge: top-right corner. */
+.cloud-badge {
+  position: absolute;
+  right: 5px;
+  top: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: rgba(0,0,0,.6);
+  border-radius: 5px;
+  padding: 1px 3px;
+}
+/* Play affordance: subtle, small, bottom-right of a finished thumbnail. */
+.play-badge {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: #fff;
+  background: rgba(0,0,0,.42);
+  border-radius: 999px;
+  pointer-events: none;
+  transition: background .15s ease, transform .15s ease;
+}
+.play-badge svg { width: 14px; height: 14px; margin-left: 1px; /* optical centre */ }
+.thumb-play:hover .play-badge,
+.thumb-play:focus-visible .play-badge { background: var(--accent); transform: scale(1.08); }
+.thumb-play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 8px; }
+.act-cloud { border-style: dashed; color: var(--muted, #9aa); cursor: default; }
+
+.body { flex: 1; min-width: 0; }
+.title {
+  font-weight: 600;
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+/* Title text sits next to the source logo and clamps to two lines. */
+.title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+/* Per-site logo before the title: brand glyph on a small white chip so dark
+   brand marks (X, TikTok) stay visible on the dark card. */
+.src-logo {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  box-sizing: border-box;
+  padding: 2px;
+  border-radius: 5px;
+  background: #fff;
+  object-fit: contain;
+  margin-top: 1px;
+}
+.uploader { color: var(--muted); font-size: 13px; margin-top: 2px; }
+
+.statusline { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+
+.badge {
+  text-transform: capitalize;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--muted);
+}
+.badge-queued { background: var(--warn); }
+.badge-running { background: var(--run); color: #04263a; }
+.badge-completed { background: var(--ok); }
+.badge-failed { background: var(--err); }
+.badge-duplicate { background: var(--surface-2); color: var(--muted); }
+
+.progress {
+  margin-top: 8px;
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill { height: 100%; background: var(--run); width: 0; transition: width .3s ease; }
+
+.err { color: var(--err); font-size: 12px; margin-top: 6px; word-break: break-word; }
+
+/* ---- Card actions: save / share, right-aligned on the completed status row ---- */
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: auto; }
+.act {
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  text-decoration: none;
+  list-style: none;
+  user-select: none;
+}
+.act::-webkit-details-marker { display: none; }
+.act:hover { border-color: var(--accent); }
+.act-on { border-color: var(--ok); color: var(--ok); }
+/* Icon-only action (Save): no border/background, just the glyph. */
+.act-icon {
+  border: none;
+  background: none;
+  padding: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+}
+.act-icon:hover { border: none; color: var(--accent); }
+.act-icon svg { display: block; }
+/* A live (public) share tints the share icon the Completed green, at-a-glance
+   signalling "this is shared". Beats .act-icon's neutral color by specificity. */
+.act-share.act-on { color: var(--ok); }
+
+/* External-access counter capsule, sits right after the status badge. Neutral
+   pill (deliberately not the green "on" state) so a shared item's access count
+   reads as a metric, not another status. */
+.hits {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+.hits svg { display: block; }
+.hits-n { color: var(--text); }
+
+/* Video/audio pass label next to the status badge. */
+.phase { font-weight: 600; color: var(--run); }
+.phase-audio { color: var(--warn); }
+
+/* ---- Fullscreen in-app player ---- */
+.player-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: #000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.player-video {
+  width: 100%;
+  height: 100%;
+  max-height: 100vh;
+  object-fit: contain;
+  background: #000;
+}
+.player-close {
+  position: absolute;
+  top: calc(env(safe-area-inset-top) + 10px);
+  left: 12px;
+  z-index: 2;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0,0,0,.55);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+/* Freeze the list behind the player. */
+body.player-open { overflow: hidden; }
+
+/* ---- Share dialog (Baidu-netdisk style) ---- */
+.share-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: rgba(0,0,0,.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.share-card {
+  position: relative;
+  width: 100%;
+  max-width: 420px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 22px;
+  box-shadow: 0 12px 40px rgba(0,0,0,.35);
+}
+.share-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.share-heading { margin: 0 0 4px; font-size: 18px; }
+.share-name {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.share-windows-label {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: var(--muted);
+}
+/* Segmented control (iOS/Linear style): a recessed track with an elevated
+   accent "thumb" marking the selection — replaces the old radio-circle pills. */
+.share-windows {
+  margin: 0 0 16px;
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: var(--surface-2);
+  border-radius: 12px;
+}
+.share-opt {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 6px;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+  transition: background .15s ease, color .15s ease, box-shadow .15s ease;
+}
+/* Hide the native radio circle but keep it in the DOM for a11y + keyboard nav. */
+.share-opt input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+  pointer-events: none;
+}
+.share-opt:has(input:checked) {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,.22);
+}
+.share-opt:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.share-link-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.share-link {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  border-radius: 10px;
+}
+.share-expiry { margin: 0 0 14px; font-size: 12px; color: var(--muted); min-height: 1em; }
+.share-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.share-card .btn { border-radius: 10px; }
+.btn-ghost { background: var(--surface-2); color: var(--text); }
+.btn-danger { background: var(--err); color: #fff; }
+/* Cancel-share confirmation ("undo") view. */
+.share-cancel-msg { margin: 4px 0 18px; font-size: 14px; line-height: 1.45; color: var(--text); }
+
+/* ---- Pull-to-refresh ---- */
+.ptr {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  opacity: 0;
+  pointer-events: none;
+}
+.ptr.visible { opacity: 1; }
+.ptr.ready { color: var(--accent); border-color: var(--accent); }
+.ptr .ptr-spin { display: block; }
+.ptr.spinning {
+  opacity: 1;
+  transform: translateX(-50%) translateY(56px);
+}
+.ptr.spinning .ptr-spin { animation: ptr-rot .7s linear infinite; }
+@keyframes ptr-rot { to { transform: rotate(360deg); } }
+
+.empty { text-align: center; color: var(--muted); padding: 40px 0; }
+
+.toasts {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+  width: max-content;
+  max-width: 90vw;
+}
+.toast {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 10px;
+  font-size: 14px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.4);
+  opacity: 1;
+  transition: opacity .3s ease;
+}
+.toast.leaving { opacity: 0; }
+.toast-ok { border-color: var(--ok); }
+.toast-error { border-color: var(--err); }
+.toast-info { border-color: var(--accent); }
+
+@media (max-width: 420px) {
+  .thumb-wrap, .thumb { width: 96px; }
+  .thumb { height: 54px; }
+  .thumb-wrap.portrait, .thumb-wrap.portrait .thumb { width: 60px; }
+  .thumb-wrap.portrait .thumb { height: 107px; }
+}

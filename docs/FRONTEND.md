@@ -1,21 +1,50 @@
 # Frontend (Web UI + PWA)
 
-A single, minimal, dependency-free web app served by the backend. No build step: plain
-HTML + CSS + vanilla JS, embedded into the binary via `rust-embed` and served by `web.rs`.
+A single, minimal, framework-free web app served by the backend. Sources are
+TypeScript + CSS in `frontend/src/`; a tiny esbuild step bundles + minifies them
+into `web/` (the committed artifacts), which `rust-embed` embeds into the binary
+(served by `web.rs`) and the Tauri app ships verbatim.
 Goal: submit a URL and watch/browse history from any device, installable to the home screen.
 
-## 1. Files (`web/`)
+## 1. Files
+
+Sources — `frontend/src/` (edit these):
 
 | File | Purpose |
 |---|---|
-| `index.html` | App shell: token field, submit box, history list |
-| `app.js` | API calls, SSE subscription, rendering, token persistence |
-| `style.css` | Minimal responsive styling (mobile-first) |
+| `app.ts` | API calls, SSE subscription, rendering, token persistence, multi-select, player |
+| `i18n.ts` | Localization dictionary + runtime (bundled into `app.js`) |
+| `sw.ts` | Service worker source |
+| `style.css` | Responsive styling (mobile-first) |
+
+Built artifacts — `web/` (generated, committed, do **not** hand-edit the `.js`/`.css`):
+
+| File | Purpose |
+|---|---|
+| `index.html` | App shell (hand-authored; loads the single bundled `app.js`) |
+| `app.js` | Bundled + minified `app.ts` + `i18n.ts` (one request) |
+| `style.css` | Minified stylesheet |
 | `manifest.webmanifest` | PWA metadata, `share_target`, icons |
-| `sw.js` | Service worker: cache app shell, enable install/offline shell |
+| `sw.js` | Built service worker: cache app shell, enable install/offline shell |
 | `icons/` | PWA icons (192, 512) |
 
 Served: `GET /` → `index.html`; `GET /<asset>` → matching file (auth-free, see API.md).
+
+## 1a. Build
+
+The Docker image and the Tauri app both consume `web/` directly — there is **no
+build step in Docker/CI**, so the `web/` artifacts are committed. After editing
+anything under `frontend/src/`, rebuild them:
+
+```
+cd frontend
+npm install       # first time only (esbuild + typescript)
+npm run check     # tsc --noEmit typecheck, then bundle/minify into ../web
+# or: npm run build (bundle only) / npm run typecheck (types only)
+```
+
+`build.mjs` emits `web/app.js`, `web/sw.js`, `web/style.css`. Commit the updated
+sources **and** the regenerated `web/` artifacts together.
 
 ## 2. Token handling
 

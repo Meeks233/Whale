@@ -2,3 +2,15 @@
 /docker-compose.local.yml
 /data
 /downloads
+
+# Local dev/test containers — never part of the repo
+/docker-compose.dev.yml
+
+# Local Claude Code automation harness (rebuild/verify/push) — local-only
+/CLAUDE.md
+/.claude/
+/scripts/
+.cc-*
+
+# Frontend build tooling deps (esbuild/typescript) — output in web/ is committed
+/frontend/node_modules
