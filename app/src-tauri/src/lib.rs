@@ -2,11 +2,30 @@
 //! this Tauri wrapper just hosts it in a native WebView (Android/desktop) and,
 //! on mobile, will bridge the Android share intent into a URL submission.
 
+use tauri::Manager;
+
+/// Mirror the server base URL + token from the WebView's localStorage into a
+/// file the native `ShareActivity` can read (`<app_data_dir>/whale_share_creds.json`).
+///
+/// The "Quick Download" share target must submit to the backend WITHOUT opening
+/// the WebView, so it can't read localStorage. The frontend calls this whenever
+/// the creds change (and on launch) so a headless share always has fresh creds.
+#[tauri::command]
+fn save_share_creds(app: tauri::AppHandle, base: String, token: String) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let body = serde_json::json!({ "base": base, "token": token }).to_string();
+        let _ = std::fs::write(dir.join("whale_share_creds.json"), body);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
-    let mut builder =
-        tauri::Builder::default().plugin(tauri_plugin_notification::init());
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_process::init())
+        .invoke_handler(tauri::generate_handler![save_share_creds]);
 
     // Android/iOS: register the share-target plugin so shared URLs land in a
     // queue the frontend drains on launch/focus (see web/app.js).

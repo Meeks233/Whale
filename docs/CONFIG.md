@@ -10,6 +10,7 @@ by `Config::from_env()` at startup. No config file in v1.
 | `WHALE_TOKEN` | *(random)* | no | Static bearer token for all `/api/*` routes. If unset, a strong random 32-char token is generated at startup and logged (set it to keep a stable token). |
 | `WHALE_CLIENT_TOFU` | `true` | no | Trust-on-first-use for self-registered clients: a client that POSTs a new passphrase to `/api/clients/register` is trusted immediately (single-user / private-network default). **Set `false` if Whale is reachable from untrusted networks** — clients then land pending until the owner approves them with the token via `POST /api/clients/:id/trust`. |
 | `WHALE_BIND` | `0.0.0.0:8080` | no | Listen address. |
+| `WHALE_PUBLIC_URL` | — | no | Canonical public base URL the server is reachable at (e.g. `https://whale.example.com`). Used to build share links so they carry the real domain regardless of the origin the UI was loaded from. Unset → links use the UI's own origin. Trailing slashes are trimmed. |
 | `WHALE_DATA_DIR` | `/data` | no | Holds `whale.db`, `archive.txt`, import files, sidecars. Mount a volume. |
 | `WHALE_DOWNLOAD_DIR` | `/downloads` | no | Output directory for finished media. Mount a volume. |
 | `WHALE_CONCURRENCY` | `2` | no | Max simultaneous downloads (semaphore permits). Ignored while `WHALE_POLITE` is on (forced to 1). |
@@ -29,7 +30,6 @@ by `Config::from_env()` at startup. No config file in v1.
 | `WHALE_EMBED_THUMBNAIL` | `true` | no | `--embed-thumbnail`. |
 | `WHALE_COOKIES` | — | no | Path to a cookies.txt for auth-gated sites. |
 | `WHALE_YTDLP_PATH` | `yt-dlp` | no | Path/name of the yt-dlp binary. |
-| `WHALE_FFMPEG_LOCATION` | — | no | `--ffmpeg-location` if ffmpeg isn't on PATH. |
 | `WHALE_LOG` | `info` | no | `tracing` filter (`RUST_LOG`-style also honored). |
 
 ## `Config` struct (shape for `config.rs`)

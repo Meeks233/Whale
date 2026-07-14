@@ -196,7 +196,7 @@ fn segment_after<'a>(s: &'a str, marker: &str) -> Option<&'a str> {
     let idx = s.find(marker)?;
     let rest = &s[idx + marker.len()..];
     let end = rest
-        .find(|c| matches!(c, '/' | '?' | '&' | '#'))
+        .find(['/', '?', '&', '#'])
         .unwrap_or(rest.len());
     let tok = &rest[..end];
     (!tok.is_empty()).then_some(tok)

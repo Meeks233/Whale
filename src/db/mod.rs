@@ -53,8 +53,23 @@ impl Db {
         queries::set_completed(self, id, path, size).await
     }
 
-    pub async fn set_public(&self, id: i64, public: bool) -> anyhow::Result<()> {
-        queries::set_public(self, id, public).await
+    pub async fn set_public(
+        &self,
+        id: i64,
+        public: bool,
+        until: Option<i64>,
+    ) -> anyhow::Result<()> {
+        queries::set_public(self, id, public, until).await
+    }
+
+    /// Flip lapsed public shares back to private (disaster-recovery sweep).
+    pub async fn expire_public_shares(&self) -> anyhow::Result<u64> {
+        queries::expire_public_shares(self).await
+    }
+
+    /// Record one external access to a public link (best-effort).
+    pub async fn bump_public_hits(&self, id: i64) -> anyhow::Result<()> {
+        queries::bump_public_hits(self, id).await
     }
 
     pub async fn find_by_public_slug(&self, slug: &str) -> anyhow::Result<Option<Item>> {

@@ -1,0 +1,51 @@
+# Automated dependency updates + security alerts for every ecosystem in the repo.
+# Dependabot security updates are enabled repo-wide by these entries; version
+# bumps arrive as PRs that run through the CI gate before they can merge.
+#
+# `cooldown.default-days: 7` holds off on a newly published version for a week —
+# a supply-chain guard so a freshly compromised release isn't proposed on day 0.
+version: 2
+updates:
+  # Rust backend
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+
+  # Web UI TypeScript toolchain (esbuild, eslint, tsc, …)
+  - package-ecosystem: npm
+    directory: "/frontend"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+
+  # Tauri Android shell (Rust workspace)
+  - package-ecosystem: cargo
+    directory: "/app/src-tauri"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+
+  # Gradle build for the Android app
+  - package-ecosystem: gradle
+    directory: "/app/src-tauri/gen/android"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 10
+
+  # Pinned GitHub Actions
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

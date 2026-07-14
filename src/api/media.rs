@@ -35,7 +35,7 @@ pub async fn file(
         return Err(AppError::Unauthorized);
     }
     let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
-    serve_item(item, req).await
+    serve_item(&state.cfg.download_dir, item, req).await
 }
 
 /// GET /api/p/:slug — tokenless public stream, keyed by the item's random slug.
@@ -49,9 +49,34 @@ pub async fn public_file(
         .db
         .find_by_public_slug(&slug)
         .await?
-        .filter(|i| i.public)
         .ok_or(AppError::NotFound)?;
-    serve_item(item, req).await
+    // Enforce expiry: a lapsed share 404s even before the periodic sweep runs.
+    // Lazily flip it private on access so the DB record reflects reality.
+    if item.public && !crate::types::is_public_live(&item) {
+        let _ = state.db.set_public(item.id, false, None).await;
+    }
+    if !crate::types::is_public_live(&item) {
+        return Err(AppError::NotFound);
+    }
+    // Tally external access so the owner can spot an abused link. Count a fresh
+    // load or download once; skip seek/range continuations (a single video play
+    // fires many partial requests) so the number tracks views, not chunks.
+    // Best-effort: a DB failure here must not block serving.
+    if is_fresh_access(&req) {
+        let _ = state.db.bump_public_hits(item.id).await;
+    }
+    serve_item(&state.cfg.download_dir, item, req).await
+}
+
+/// True when a public request is a fresh load rather than a range continuation:
+/// no `Range` header (download / initial fetch) or a range that starts at byte
+/// 0 (the first request a media element makes). Later chunks (`bytes=N-`, N>0)
+/// don't recount the same view.
+fn is_fresh_access(req: &Request) -> bool {
+    match req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()) {
+        None => true,
+        Some(r) => r.trim().replace(' ', "").starts_with("bytes=0-"),
+    }
 }
 
 /// GET /api/items/:id/stream-url — resolve a direct upstream URL for online
@@ -62,6 +87,11 @@ pub async fn stream_url(
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
     let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    // Defense in depth: re-validate the stored page URL before yt-dlp fetches it,
+    // in case a poisoned row (e.g. via import) carries an internal target.
+    crate::net_guard::guard(&item.webpage_url)
+        .await
+        .map_err(|r| AppError::BadRequest(r.reason().into()))?;
     let cookie = crate::cookies::resolve(&state.cookies, state.cfg.cookies.as_deref(), &item.webpage_url);
     let url = crate::ytdlp::resolve_stream_url(&state.cfg, &item.webpage_url, cookie.as_deref())
         .await
@@ -70,15 +100,17 @@ pub async fn stream_url(
 }
 
 /// Stream `item`'s file, honoring `?download=1` for an attachment disposition.
-async fn serve_item(item: Item, req: Request) -> Result<Response, AppError> {
+/// `root` is the configured download directory: the file is served only if it
+/// canonicalizes to a real file inside it (path-traversal guard).
+async fn serve_item(root: &FsPath, item: Item, req: Request) -> Result<Response, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
-    let path = match item.filepath.as_deref() {
-        Some(p) if !p.is_empty() => p.to_string(),
+    let stored = match item.filepath.as_deref() {
+        Some(p) if !p.is_empty() => p,
         _ => return Err(AppError::BadRequest("item has no downloaded file".into())),
     };
-    if !FsPath::new(&path).is_file() {
-        return Err(AppError::NotFound);
-    }
+    // Confine to the download root: rejects `..`, absolute paths elsewhere, and
+    // symlinks escaping the root (e.g. an imported Seal `videoPath` of /etc/passwd).
+    let path = crate::safepath::confined_file(root, stored).ok_or(AppError::NotFound)?;
 
     let download = query.split('&').any(|p| p == "download=1");
 
@@ -90,7 +122,7 @@ async fn serve_item(item: Item, req: Request) -> Result<Response, AppError> {
 
     let (mut parts, body) = served.into_parts();
     if download {
-        if let Some(name) = FsPath::new(&path).file_name().and_then(|n| n.to_str()) {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
             if let Ok(val) = content_disposition(name).parse() {
                 parts.headers.insert(header::CONTENT_DISPOSITION, val);
             }
