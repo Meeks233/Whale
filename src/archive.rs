@@ -64,6 +64,9 @@ impl Archive {
         })
     }
 
+    /// Membership check. Only the tests observe the in-memory set directly;
+    /// production dedup goes through the DB, so this is test-only.
+    #[cfg(test)]
     pub async fn contains(&self, key: &str) -> bool {
         self.inner.set.lock().await.contains(key)
     }

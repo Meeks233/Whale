@@ -5,21 +5,93 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least-privilege default for every job below.
+permissions:
+  contents: read
+
 jobs:
-  test:
+  # Rust: format, lint (warnings are errors), build, test.
+  rust:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Third-party actions are pinned to a full commit SHA (supply-chain guard),
+      # matching the SHAs already vetted in android.yml.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: clippy
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Build
         run: cargo build --locked --verbose
 
       - name: Test
         run: cargo test --locked --verbose
+
+  # Rust dependency vulnerability scan (RustSec advisory DB). cargo-audit is
+  # installed from crates.io rather than via a third-party action so there is no
+  # extra unpinned action in the supply chain.
+  cargo-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit backend dependencies
+        run: cargo audit --deny warnings
+      - name: Audit Android app dependencies
+        working-directory: app/src-tauri
+        run: cargo audit --deny warnings
+
+  # Web UI: strict typecheck, ESLint (incl. eslint-plugin-security), npm audit.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (tsc --noEmit, strict)
+        run: npm run typecheck
+
+      - name: Lint (ESLint + security rules)
+        run: npm run lint
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high
+
+      # Fail if the committed web/ bundle is stale vs. the TS sources, so the
+      # linted/typechecked source is always what actually ships.
+      - name: Verify committed build is up to date
+        run: |
+          npm run build
+          if ! git diff --quiet -- ../web; then
+            echo "::error::web/ is out of date — run 'npm run build' in frontend/ and commit the result."
+            git --no-pager diff --stat -- ../web
+            exit 1
+          fi

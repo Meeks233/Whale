@@ -1,13 +1,20 @@
 //! Whale — self-hosted yt-dlp cloud downloader. CLI dispatch: `serve` | `import`.
 
+// The whole crate handles untrusted input (URLs, response headers, filenames,
+// file contents); there is no reason to reach for `unsafe`. Forbid it outright
+// so any future `unsafe` block is a hard compile error, not a review miss.
+#![forbid(unsafe_code)]
+
 mod api;
 mod archive;
 mod config;
 mod cookies;
 mod db;
 mod error;
+mod net_guard;
 mod platform;
 mod queue;
+mod safepath;
 mod seal_import;
 mod types;
 mod url_normalize;
@@ -78,8 +85,14 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
 
     let db = db::Db::connect(&cfg.data_dir).await?;
 
-    // Startup recovery: reset running -> queued, seed archive from DB keys.
+    // Startup recovery: reset running -> queued, seed archive from DB keys, and
+    // sweep any public shares that lapsed while the server was down.
     let requeue = db.reset_running_to_queued().await?;
+    match db.expire_public_shares().await {
+        Ok(n) if n > 0 => tracing::info!("expired {n} lapsed public share(s) on startup"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("public-share expiry sweep failed: {e}"),
+    }
     let seed = db.all_archive_keys().await?;
     let archive = archive::Archive::load(&cfg.archive_path(), seed).await?;
 
@@ -91,6 +104,23 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
     let queue = queue::Queue::spawn(cfg.clone(), db.clone(), archive.clone(), cookie_store.clone());
     for id in requeue {
         queue.enqueue(id).await;
+    }
+
+    // Periodic disaster-recovery sweep: flip lapsed public shares to private so
+    // expired links stop serving even without an access to trigger lazy expiry.
+    {
+        let db = db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match db.expire_public_shares().await {
+                    Ok(n) if n > 0 => tracing::info!("expired {n} lapsed public share(s)"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("public-share expiry sweep failed: {e}"),
+                }
+            }
+        });
     }
 
     let state = api::AppState {

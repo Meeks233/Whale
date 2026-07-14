@@ -62,6 +62,16 @@ function getToken(): string { return localStorage.getItem(TOKEN_KEY) || ''; }
 function setToken(tok: string): void {
   if (tok) localStorage.setItem(TOKEN_KEY, tok);
   else localStorage.removeItem(TOKEN_KEY);
+  mirrorShareCreds();
+}
+
+// Push the server base + token to native storage so the headless "Quick
+// Download" ShareActivity can POST to the backend without opening the WebView.
+// No-op outside the Tauri app.
+function mirrorShareCreds(): void {
+  const T = window.__TAURI__;
+  if (!T || !T.core || !T.core.invoke) return;
+  try { T.core.invoke('save_share_creds', { base: apiBase(), token: getToken() }); } catch (_) { /* desktop / not ready */ }
 }
 
 // ---- Server base URL ------------------------------------------------------
@@ -73,6 +83,7 @@ function setApiBase(b: string): void {
   b = (b || '').trim().replace(/\/+$/, '');
   if (b) localStorage.setItem(BASE_KEY, b);
   else localStorage.removeItem(BASE_KEY);
+  mirrorShareCreds();
 }
 // Prefix an app-relative path (starting with `/`) with the configured base.
 function apiUrl(path: string): string { return apiBase() + path; }
@@ -259,10 +270,13 @@ const SHARE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18
 // Eye glyph (Lucide "eye") for the external-access counter capsule.
 const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>`;
 
-// Access-count capsule shown after the status badge once a share has been hit
-// externally. Persists even after unsharing (public_hits is kept) so an abused
-// link stays visible. Styled as a neutral pill (not the green "on" state).
+// Access-count capsule shown after the status badge once a live share has been
+// hit externally. Scoped to the current share window: the backend zeroes the
+// count on unshare/expiry, and we also require the share to be live here so the
+// capsule vanishes the moment sharing stops. Styled as a neutral pill (not the
+// green "on" state).
 function hitsHtml(item: Item): string {
+  if (!item.public) return '';
   const n = item.public_hits || 0;
   if (n <= 0) return '';
   return `<span class="hits" title="External link accesses">${EYE_SVG}<span class="hits-n">${n}</span></span>`;
@@ -945,7 +959,7 @@ els.history.addEventListener('click', (e) => {
     return;
   }
   const play = target.closest('.thumb-play') as HTMLElement | null;
-  if (play) { e.preventDefault(); openPlayer(Number(play.dataset.id), play.dataset.cloud === '1'); return; }
+  if (play) { e.preventDefault(); openPlayer(Number(play.dataset.id), play.dataset.cloud === '1', thumbSrc(play)); return; }
 
   const btn = target.closest('[data-act]') as HTMLElement | null;
   if (!btn) return;
@@ -1150,7 +1164,7 @@ els.history.addEventListener('keydown', (e) => {
   const play = (e.target as HTMLElement).closest('.thumb-play') as HTMLElement | null;
   if (!play) return;
   e.preventDefault();
-  openPlayer(Number(play.dataset.id), play.dataset.cloud === '1');
+  openPlayer(Number(play.dataset.id), play.dataset.cloud === '1', thumbSrc(play));
 });
 
 // ---- Fullscreen in-app player ---------------------------------------------
@@ -1158,8 +1172,18 @@ els.history.addEventListener('keydown', (e) => {
 // away (a new page/tab fights the mobile app's single-task model). We push a
 // history entry so the Android back button pops the player back to the list
 // rather than exiting the app.
-function openPlayer(id: number, cloud: boolean): void {
+// The tapped card's already-loaded thumbnail image, used as the player poster.
+function thumbSrc(play: HTMLElement): string | undefined {
+  const img = play.querySelector('img.thumb') as HTMLImageElement | null;
+  return img?.currentSrc || img?.src || undefined;
+}
+
+function openPlayer(id: number, cloud: boolean, poster?: string): void {
   const v = els.playerVideo;
+  // Show the source thumbnail as the poster so the load gap (especially the
+  // cloud stream-url round-trip) reads as the still frame instead of Chrome's
+  // default gray media placeholder. Cleared again in closePlayer.
+  if (poster) v.poster = poster; else v.removeAttribute('poster');
   els.player.classList.remove('hidden');
   els.player.setAttribute('aria-hidden', 'false');
   document.body.classList.add('player-open');
@@ -1192,6 +1216,7 @@ function closePlayer(pop: boolean): void {
   const v = els.playerVideo;
   v.pause();
   v.removeAttribute('src');
+  v.removeAttribute('poster');
   v.load();
   els.player.classList.add('hidden');
   els.player.setAttribute('aria-hidden', 'true');
@@ -1246,7 +1271,7 @@ if (isNativeApp) {
   // exits the activity anyway — a safe fallback, just one extra press.
   const exitApp = () => {
     const T = window.__TAURI__;
-    try { T && T.core && T.core.invoke('plugin:process|exit', { code: 0 }); } catch (_) { /* fall through */ }
+    try { if (T?.core) T.core.invoke('plugin:process|exit', { code: 0 }); } catch (_) { /* fall through */ }
   };
 
   // Seed the sentinel so the first Back always yields a popstate to catch.
@@ -1328,6 +1353,9 @@ function drainSoon(): void {
 function setupNativeShare(): void {
   const T = window.__TAURI__;
   if (!T || !T.core || !T.core.invoke) return; // desktop / plugin absent
+  // Keep native creds fresh for the headless Quick Download share target,
+  // including for installs configured before this bridge existed.
+  mirrorShareCreds();
   drainSoon();
   if (T.event && T.event.listen) {
     // Android delivers a fresh share via focus/resume on the existing task.

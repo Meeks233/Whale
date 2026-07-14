@@ -22,7 +22,11 @@ android {
         applicationId = "com.whale.app"
         // Raised from 24 → 28: the share-target plugin requires Android 9+.
         minSdk = 28
-        targetSdk = 36
+        // Kept at 34 (matching Seal): Android 16 / targetSdk 36 enforces
+        // "safer intents" intent-filter matching that blocks the system share
+        // sheet from launching our share target (startActivityAsCaller →
+        // ActivityNotFoundException). 34 restores working share-to-download.
+        targetSdk = 34
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
     }

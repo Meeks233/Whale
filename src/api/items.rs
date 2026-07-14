@@ -24,6 +24,12 @@ pub async fn submit(
     // links / mobile hosts so the same video shared in different forms resolves
     // (and dedupes) consistently. See url_normalize.
     let url = crate::url_normalize::normalize(&req.url);
+    // SSRF guard: reject non-http(s) schemes and hosts that are/resolve to
+    // private, loopback, or link-local addresses before handing the URL to
+    // yt-dlp (whose generic extractor would otherwise fetch them).
+    crate::net_guard::guard(&url)
+        .await
+        .map_err(|r| AppError::BadRequest(r.reason().into()))?;
     let force = req.options.as_ref().and_then(|o| o.force).unwrap_or(false);
 
     // If this request authenticated as a self-registered client (not the owner
@@ -138,9 +144,18 @@ pub async fn retry(State(state): State<AppState>, Path(id): Path<i64>) -> AppRes
 #[derive(Debug, Deserialize)]
 pub struct PublicRequest {
     pub public: bool,
+    /// How long the share stays live: 7 or 30 days, or `null`/omitted for a
+    /// permanent share (Baidu-netdisk style). Only read when `public` is true.
+    #[serde(default)]
+    pub expires_in_days: Option<i64>,
 }
 
+/// Share durations we offer the user. Anything else is rejected so a caller
+/// can't set an arbitrary window.
+const ALLOWED_SHARE_DAYS: [i64; 2] = [7, 30];
+
 /// POST /api/items/:id/public — flip an item's public (tokenless-streaming) flag.
+/// When making public, `expires_in_days` (7 | 30 | null) sets the auto-expiry.
 pub async fn set_public(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -152,7 +167,20 @@ pub async fn set_public(
             "only completed items with a file can be made public".into(),
         ));
     }
-    state.db.set_public(id, req.public).await?;
+    // Resolve the expiry timestamp. Reject out-of-range windows rather than
+    // silently clamping so the stored record always matches what the user chose.
+    let until = match req.expires_in_days {
+        Some(days) => {
+            if !ALLOWED_SHARE_DAYS.contains(&days) {
+                return Err(AppError::BadRequest(
+                    "expires_in_days must be 7, 30, or null (permanent)".into(),
+                ));
+            }
+            Some(crate::types::now_unix() + days * 86_400)
+        }
+        None => None,
+    };
+    state.db.set_public(id, req.public, until).await?;
     let refreshed = state.db.get(id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(refreshed).into_response())
 }
@@ -173,8 +201,12 @@ pub async fn delete(
     // Free the dedup key so a future submit can re-download.
     let _ = state.archive.remove(&removed.archive_key).await;
     if params.delete_file {
-        if let Some(path) = &removed.filepath {
-            let _ = std::fs::remove_file(path);
+        // Only delete a file that canonicalizes inside the download root, so a
+        // poisoned `filepath` (e.g. an imported /etc/passwd) can't be removed.
+        if let Some(stored) = &removed.filepath {
+            if let Some(path) = crate::safepath::confined_file(&state.cfg.download_dir, stored) {
+                let _ = std::fs::remove_file(path);
+            }
         }
     }
     Ok(Json(json!({ "deleted": true })).into_response())
@@ -186,6 +218,9 @@ pub async fn health(State(state): State<AppState>) -> Response {
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "ytdlp": state.ytdlp_version,
+        // Canonical public domain for share links; null when the operator
+        // hasn't declared WHALE_PUBLIC_URL (UI falls back to its own origin).
+        "public_url": state.cfg.public_url,
     }))
     .into_response()
 }

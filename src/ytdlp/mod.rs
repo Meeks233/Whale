@@ -45,7 +45,8 @@ pub async fn resolve_stream_url(
     if let Some(c) = cookies {
         cmd.arg("--cookies").arg(c);
     }
-    cmd.arg(url);
+    // End-of-options: a URL starting with `-` must not be read as a flag.
+    cmd.arg("--").arg(url);
 
     let out = cmd
         .output()

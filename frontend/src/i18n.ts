@@ -27,7 +27,9 @@ declare global {
   interface Window {
     i18n: I18n;
     // Tauri injects this synchronously (withGlobalTauri). Loosely typed — the
-    // app only pokes a handful of plugin invoke paths off it.
+    // app only pokes a handful of plugin invoke paths off it, so `any` is
+    // load-bearing here rather than worth a full interface for the foreign global.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     __TAURI__?: any;
   }
 }

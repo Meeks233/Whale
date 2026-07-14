@@ -58,7 +58,11 @@ pub struct Config {
     pub embed_thumbnail: bool,
     pub cookies: Option<PathBuf>,
     pub ytdlp_path: String,
-    pub ffmpeg_location: Option<PathBuf>,
+    /// Canonical public base URL the server is reachable at (e.g.
+    /// `https://whale.example.com`), declared by the operator. Used to build
+    /// share links so they carry the real domain instead of whatever origin
+    /// the UI happens to be loaded from. `None` falls back to the UI origin.
+    pub public_url: Option<String>,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -144,7 +148,10 @@ impl Config {
         let embed_thumbnail = env_bool("WHALE_EMBED_THUMBNAIL", true);
         let cookies = env_opt("WHALE_COOKIES").map(PathBuf::from);
         let ytdlp_path = env_or("WHALE_YTDLP_PATH", "yt-dlp");
-        let ffmpeg_location = env_opt("WHALE_FFMPEG_LOCATION").map(PathBuf::from);
+        // Strip trailing slashes so it concatenates cleanly with `/api/p/:slug`.
+        let public_url = env_opt("WHALE_PUBLIC_URL")
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty());
 
         Ok(Config {
             token,
@@ -170,12 +177,8 @@ impl Config {
             embed_thumbnail,
             cookies,
             ytdlp_path,
-            ffmpeg_location,
+            public_url,
         })
-    }
-
-    pub fn db_path(&self) -> PathBuf {
-        self.data_dir.join("whale.db")
     }
 
     pub fn archive_path(&self) -> PathBuf {

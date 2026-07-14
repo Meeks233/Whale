@@ -116,6 +116,6 @@ See DATABASE.md §4: reset `running`→`queued`, seed archive, re-enqueue. Becau
 
 ## 6. yt-dlp / ffmpeg presence
 
-- Paths from `WHALE_YTDLP_PATH` (default `yt-dlp`) and `WHALE_FFMPEG_LOCATION` (optional).
+- Path from `WHALE_YTDLP_PATH` (default `yt-dlp`).
 - On `serve` startup, run `yt-dlp --version` once; log it and expose via `/api/health`. Fail
   fast with a clear error if yt-dlp is missing.

@@ -21,6 +21,8 @@ pub fn probe_args(cfg: &Config, url: &str, cookies: Option<&Path>) -> Vec<String
         args.push("--cookies".into());
         args.push(cookies.display().to_string());
     }
+    // End-of-options: a URL starting with `-` must not be read as a flag.
+    args.push("--".into());
     args.push(url.to_string());
     args
 }
@@ -112,6 +114,8 @@ pub fn download_args(cfg: &Config, item: &Item, cookies: Option<&Path>) -> Vec<S
         args.push("--write-auto-subs".into());
     }
 
+    // End-of-options: a URL starting with `-` must not be read as a flag.
+    args.push("--".into());
     args.push(item.webpage_url.clone());
     args
 }
@@ -128,6 +132,7 @@ mod tests {
         Config {
             token: "secret".into(),
             token_generated: false,
+            public_url: None,
             client_tofu: true,
             bind: "0.0.0.0:8080".parse::<SocketAddr>().unwrap(),
             data_dir: PathBuf::from("/data"),
@@ -149,7 +154,6 @@ mod tests {
             embed_thumbnail: true,
             cookies: None,
             ytdlp_path: "yt-dlp".into(),
-            ffmpeg_location: None,
         }
     }
 
@@ -173,6 +177,8 @@ mod tests {
             completed_at: None,
             public: false,
             public_slug: None,
+            public_until: None,
+            public_hits: 0,
             local_available: false,
         }
     }

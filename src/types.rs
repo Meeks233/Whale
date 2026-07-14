@@ -4,6 +4,21 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Current Unix time in seconds (wall clock). Shared by the API (share expiry)
+/// and the DB layer so timestamps are computed identically everywhere.
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// True while `item` is publicly reachable: flagged public and not past its
+/// expiry (a `None` expiry means the share is permanent).
+pub fn is_public_live(item: &Item) -> bool {
+    item.public && item.public_until.is_none_or(|until| until > now_unix())
+}
+
 /// Lifecycle status of an item (also the DB `status` column).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -87,6 +102,13 @@ pub struct Item {
     /// Random, unguessable slug for the public link (`/api/p/:slug`). Set the
     /// first time an item is made public; `None` until then.
     pub public_slug: Option<String>,
+    /// Unix timestamp when the public share auto-expires. `None` while public
+    /// means a permanent share; ignored when `public` is false.
+    pub public_until: Option<i64>,
+    /// Count of external (tokenless) accesses to the public link. Persists across
+    /// unshare/re-share so the owner can spot an abused link even after revoking.
+    #[serde(default)]
+    pub public_hits: i64,
     /// Computed (not stored): whether `filepath` currently points at a real file
     /// on disk. `false` when the local copy was pruned/backed away — the UI shows
     /// a cloud badge and falls back to upstream streaming (`/stream-url`).
@@ -163,7 +185,6 @@ pub struct SubmitRequest {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SubmitOptions {
-    pub audio_only: Option<bool>,
     pub force: Option<bool>,
 }
 

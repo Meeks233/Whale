@@ -44,6 +44,8 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         completed_at: row.try_get("completed_at")?,
         public: row.try_get::<i64, _>("public")? != 0,
         public_slug: row.try_get("public_slug")?,
+        public_until: row.try_get("public_until")?,
+        public_hits: row.try_get("public_hits")?,
         filepath,
         local_available,
     })
@@ -60,7 +62,7 @@ fn filepath_exists(filepath: &Option<String>) -> bool {
 
 const SELECT_COLS: &str = "id, extractor, video_id, archive_key, title, uploader, \
     webpage_url, thumbnail_url, duration, filepath, filesize, source, status, error, \
-    created_at, completed_at, public, public_slug";
+    created_at, completed_at, public, public_slug, public_until, public_hits";
 
 /// Generate a 24-char (96-bit) hex slug from OS randomness — unguessable, so
 /// public links can't be derived from the sequential item id.
@@ -154,21 +156,63 @@ pub(super) async fn set_completed(db: &Db, id: i64, path: &str, size: i64) -> an
     Ok(())
 }
 
-pub(super) async fn set_public(db: &Db, id: i64, public: bool) -> anyhow::Result<()> {
+/// Flip an item's public flag. `until` is the Unix timestamp when the share
+/// should auto-expire (`None` = permanent); it's only meaningful when `public`
+/// is true. Going private clears the expiry and zeroes the access tally (the
+/// hit count is scoped to the current share window, not cumulative) but keeps
+/// the slug stable so a later re-share resolves to the same link.
+pub(super) async fn set_public(
+    db: &Db,
+    id: i64,
+    public: bool,
+    until: Option<i64>,
+) -> anyhow::Result<()> {
     if public {
         // Assign a slug the first time; keep it stable on re-share (COALESCE).
-        sqlx::query("UPDATE items SET public = 1, public_slug = COALESCE(public_slug, ?) WHERE id = ?")
-            .bind(random_slug()?)
-            .bind(id)
-            .execute(&db.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE items SET public = 1, public_slug = COALESCE(public_slug, ?), \
+             public_until = ? WHERE id = ?",
+        )
+        .bind(random_slug()?)
+        .bind(until)
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
     } else {
-        sqlx::query("UPDATE items SET public = 0 WHERE id = ?")
-            .bind(id)
-            .execute(&db.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE items SET public = 0, public_until = NULL, public_hits = 0 WHERE id = ?",
+        )
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
     }
     Ok(())
+}
+
+/// Record one external access to a public link. Best-effort: a failure here
+/// must never block serving the file, so callers ignore the error.
+pub(super) async fn bump_public_hits(db: &Db, id: i64) -> anyhow::Result<()> {
+    sqlx::query("UPDATE items SET public_hits = public_hits + 1 WHERE id = ?")
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
+/// Disaster-recovery sweep: flip lapsed shares back to private so an expired
+/// link 404s even if it's never accessed. Returns the number of shares expired.
+/// Run at startup and on a periodic timer; the slug is preserved for re-share.
+/// Zeroes the access tally like an explicit unshare — the count is scoped to the
+/// live share window, so an expired share drops its capsule.
+pub(super) async fn expire_public_shares(db: &Db) -> anyhow::Result<u64> {
+    let res = sqlx::query(
+        "UPDATE items SET public = 0, public_until = NULL, public_hits = 0 \
+         WHERE public = 1 AND public_until IS NOT NULL AND public_until <= ?",
+    )
+    .bind(now_unix())
+    .execute(&db.pool)
+    .await?;
+    Ok(res.rows_affected())
 }
 
 pub(super) async fn find_by_public_slug(db: &Db, slug: &str) -> anyhow::Result<Option<Item>> {
@@ -199,7 +243,7 @@ enum Bind {
 fn is_field(f: &str) -> bool {
     matches!(
         f.to_ascii_lowercase().as_str(),
-        "id" | "user" | "uploader" | "title" | "platform" | "site" | "extractor"
+        "id" | "user" | "uploader" | "title" | "platform" | "site" | "extractor" | "status"
     )
 }
 
@@ -236,7 +280,10 @@ fn like_clause(negate: bool, col: &str) -> String {
 
 /// Parse an e621-style query into SQL clauses (`AND`-joined) and ordered binds.
 /// Supported prefixes: `id:`, `user:`/`uploader:`, `title:`, `platform:`/`site:`/
-/// `extractor:`. A leading `-` negates a term. Bare words match title OR uploader.
+/// `extractor:`, `status:`. A leading `-` negates a term. A bare word that is
+/// exactly a status keyword (`queued`/`running`/`completed`/`failed`/`duplicate`)
+/// filters by status; every other bare word fuzzily matches title OR uploader OR
+/// platform (alias-folded, so `x`/`twitter` both surface the twitter extractor).
 fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
     let mut clauses = Vec::new();
     let mut binds = Vec::new();
@@ -248,6 +295,12 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
         };
         let (field, value) = match tok.split_once(':') {
             Some((f, v)) if is_field(f) && !v.is_empty() => (f.to_ascii_lowercase(), v.to_string()),
+            // A lone status word (e.g. `failed`) acts as a status filter so the
+            // old status chips fold into the search syntax; anything else is a
+            // fuzzy term.
+            _ if Status::parse(&tok.to_ascii_lowercase()).is_some() => {
+                ("status".to_string(), tok.clone())
+            }
             _ => ("any".to_string(), tok.clone()),
         };
         let like = format!("%{value}%");
@@ -260,6 +313,14 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
                 }
                 // Non-numeric id can never match.
                 Err(_) => clauses.push("1=0".into()),
+            },
+            "status" => match Status::parse(&value.to_ascii_lowercase()) {
+                Some(s) => {
+                    clauses.push(if negate { "status <> ?".into() } else { "status = ?".into() });
+                    binds.push(Bind::Text(s.as_str().to_string()));
+                }
+                // An unknown status can never match.
+                None => clauses.push("1=0".into()),
             },
             "user" | "uploader" => {
                 clauses.push(like_clause(negate, "uploader"));
@@ -285,14 +346,34 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
                 clauses.push(format!("({})", parts.join(joiner)));
             }
             _ => {
-                let frag = if negate {
-                    "(title NOT LIKE ? AND (uploader IS NULL OR uploader NOT LIKE ?))"
+                // Bare word: fuzzy match across title, uploader AND platform. The
+                // extractor term is alias-folded so `x`/`twitter` both hit the
+                // twitter extractor without an explicit `platform:` prefix.
+                let terms = crate::platform::extractor_search_terms(&value);
+                let ext_terms = if terms.is_empty() { vec![value.clone()] } else { terms };
+                if negate {
+                    let mut parts = vec![
+                        "title NOT LIKE ?".to_string(),
+                        "(uploader IS NULL OR uploader NOT LIKE ?)".to_string(),
+                    ];
+                    binds.push(Bind::Text(like.clone()));
+                    binds.push(Bind::Text(like.clone()));
+                    for t in &ext_terms {
+                        parts.push("(extractor IS NULL OR extractor NOT LIKE ?)".to_string());
+                        binds.push(Bind::Text(format!("%{t}%")));
+                    }
+                    clauses.push(format!("({})", parts.join(" AND ")));
                 } else {
-                    "(title LIKE ? OR uploader LIKE ?)"
-                };
-                clauses.push(frag.into());
-                binds.push(Bind::Text(like.clone()));
-                binds.push(Bind::Text(like));
+                    let mut parts =
+                        vec!["title LIKE ?".to_string(), "uploader LIKE ?".to_string()];
+                    binds.push(Bind::Text(like.clone()));
+                    binds.push(Bind::Text(like.clone()));
+                    for t in &ext_terms {
+                        parts.push("extractor LIKE ?".to_string());
+                        binds.push(Bind::Text(format!("%{t}%")));
+                    }
+                    clauses.push(format!("({})", parts.join(" OR ")));
+                }
             }
         }
     }
@@ -703,8 +784,33 @@ mod tests {
         let (c, b) = build_search("platform:x");
         assert_eq!(c, vec!["(extractor LIKE ?)"]);
         assert!(matches!(&b[0], Bind::Text(s) if s == "%twitter%"));
+        // Bare word now also fuzzily matches the platform/extractor column.
         let (c, _) = build_search("hello");
-        assert_eq!(c, vec!["(title LIKE ? OR uploader LIKE ?)"]);
+        assert_eq!(c, vec!["(title LIKE ? OR uploader LIKE ? OR extractor LIKE ?)"]);
+        // A bare platform name (no prefix) folds into the extractor branch.
+        let (c, b) = build_search("twitter");
+        assert_eq!(c, vec!["(title LIKE ? OR uploader LIKE ? OR extractor LIKE ?)"]);
+        assert!(matches!(&b[2], Bind::Text(s) if s == "%twitter%"));
+        // Bare `x` alias-folds to the twitter extractor term.
+        let (_, b) = build_search("x");
+        assert!(matches!(&b[2], Bind::Text(s) if s == "%twitter%"));
+    }
+
+    #[test]
+    fn build_search_status_syntax() {
+        // Bare status word folds into a status filter (the old chips).
+        let (c, b) = build_search("failed");
+        assert_eq!(c, vec!["status = ?"]);
+        assert!(matches!(&b[0], Bind::Text(s) if s == "failed"));
+        // Explicit prefix works too.
+        let (c, _) = build_search("status:completed");
+        assert_eq!(c, vec!["status = ?"]);
+        // Negation flips to <>.
+        let (c, _) = build_search("-failed");
+        assert_eq!(c, vec!["status <> ?"]);
+        // Unknown status never matches.
+        let (c, _) = build_search("status:bogus");
+        assert_eq!(c, vec!["1=0"]);
     }
 
     #[test]
@@ -742,6 +848,26 @@ mod tests {
         assert_eq!(by_alias.items.len(), 1);
         assert_eq!(by_alias.items[0].video_id, "tw1");
 
+        // Bare platform word (no prefix) folds to the extractor: `x` → twitter.
+        let bare = db
+            .list(ListQuery { q: Some("x".into()), limit: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(bare.items.len(), 1);
+        assert_eq!(bare.items[0].video_id, "tw1");
+
+        // Bare status word filters by status (both items are queued on insert).
+        let queued = db
+            .list(ListQuery { q: Some("queued".into()), limit: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(queued.items.len(), 2);
+        let failed = db
+            .list(ListQuery { q: Some("failed".into()), limit: 50, ..Default::default() })
+            .await
+            .unwrap();
+        assert!(failed.items.is_empty());
+
         let by_user = db
             .list(ListQuery { q: Some("user:rickc".into()), limit: 50, ..Default::default() })
             .await
@@ -765,9 +891,11 @@ mod tests {
         assert!(!item.public);
         assert!(item.public_slug.is_none());
 
-        db.set_public(item.id, true).await.unwrap();
+        // Permanent share (no expiry).
+        db.set_public(item.id, true, None).await.unwrap();
         let pubd = db.get(item.id).await.unwrap().unwrap();
         assert!(pubd.public);
+        assert!(pubd.public_until.is_none());
         let slug = pubd.public_slug.clone().expect("slug assigned");
         assert_eq!(slug.len(), 24);
         assert!(slug.chars().all(|c| c.is_ascii_hexdigit()));
@@ -777,20 +905,80 @@ mod tests {
         assert_eq!(found.id, item.id);
 
         // Going private keeps the slug stable but the item is no longer public.
-        db.set_public(item.id, false).await.unwrap();
+        db.set_public(item.id, false, None).await.unwrap();
         let priv_again = db.get(item.id).await.unwrap().unwrap();
         assert!(!priv_again.public);
         assert_eq!(priv_again.public_slug.as_deref(), Some(slug.as_str()));
 
-        // Re-sharing reuses the same slug (COALESCE).
-        db.set_public(item.id, true).await.unwrap();
-        assert_eq!(
-            db.get(item.id).await.unwrap().unwrap().public_slug.as_deref(),
-            Some(slug.as_str())
-        );
+        // Re-sharing with an expiry reuses the same slug (COALESCE) and records it.
+        let until = now_unix() + 7 * 86400;
+        db.set_public(item.id, true, Some(until)).await.unwrap();
+        let reshared = db.get(item.id).await.unwrap().unwrap();
+        assert_eq!(reshared.public_slug.as_deref(), Some(slug.as_str()));
+        assert_eq!(reshared.public_until, Some(until));
 
         // Unknown slug → None.
         assert!(db.find_by_public_slug("deadbeef").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn public_hits_increment_and_reset_on_unshare() {
+        let (db, _dir) = temp_db().await;
+        let item = db
+            .insert_probe(&probe("youtube", "hits", "Counted"), Source::Download)
+            .await
+            .unwrap();
+        assert_eq!(db.get(item.id).await.unwrap().unwrap().public_hits, 0);
+
+        db.set_public(item.id, true, None).await.unwrap();
+        db.bump_public_hits(item.id).await.unwrap();
+        db.bump_public_hits(item.id).await.unwrap();
+        assert_eq!(db.get(item.id).await.unwrap().unwrap().public_hits, 2);
+
+        // Unsharing zeroes the tally — the count is scoped to the live share
+        // window, so the capsule disappears once sharing stops.
+        db.set_public(item.id, false, None).await.unwrap();
+        assert_eq!(db.get(item.id).await.unwrap().unwrap().public_hits, 0);
+
+        // Re-sharing starts a fresh count.
+        db.set_public(item.id, true, None).await.unwrap();
+        assert_eq!(db.get(item.id).await.unwrap().unwrap().public_hits, 0);
+    }
+
+    #[tokio::test]
+    async fn expire_public_shares_flips_lapsed_only() {
+        let (db, _dir) = temp_db().await;
+
+        // Already-lapsed share.
+        let lapsed = db
+            .insert_probe(&probe("youtube", "old", "Lapsed"), Source::Download)
+            .await
+            .unwrap();
+        db.set_public(lapsed.id, true, Some(now_unix() - 10)).await.unwrap();
+        db.bump_public_hits(lapsed.id).await.unwrap();
+
+        // Future-dated and permanent shares must survive the sweep.
+        let future = db
+            .insert_probe(&probe("youtube", "fut", "Future"), Source::Download)
+            .await
+            .unwrap();
+        db.set_public(future.id, true, Some(now_unix() + 86400)).await.unwrap();
+        let forever = db
+            .insert_probe(&probe("youtube", "perm", "Forever"), Source::Download)
+            .await
+            .unwrap();
+        db.set_public(forever.id, true, None).await.unwrap();
+
+        let expired = db.expire_public_shares().await.unwrap();
+        assert_eq!(expired, 1);
+        assert!(!db.get(lapsed.id).await.unwrap().unwrap().public);
+        assert!(db.get(future.id).await.unwrap().unwrap().public);
+        assert!(db.get(forever.id).await.unwrap().unwrap().public);
+
+        // Slug preserved on the expired item for a future re-share.
+        assert!(db.get(lapsed.id).await.unwrap().unwrap().public_slug.is_some());
+        // Access tally zeroed on expiry — capsule drops once the share lapses.
+        assert_eq!(db.get(lapsed.id).await.unwrap().unwrap().public_hits, 0);
     }
 
     #[tokio::test]
