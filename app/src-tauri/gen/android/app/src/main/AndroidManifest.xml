@@ -3,6 +3,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Seal-style download-progress notifications (Android 13+ runtime prompt). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Keep background download-progress polling alive when the screen is off:
+         request an exemption from battery optimizations (prompted on launch). -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- AndroidTV support -->
     <uses-feature android:name="android.software.leanback" android:required="false" />
@@ -32,12 +36,20 @@
              HyperOS/MIUI (ActivityNotFoundException), so shares went nowhere.
              This singleInstance, excluded-from-recents activity launches
              cleanly and forwards the shared link into MainActivity. -->
+        <!-- NOTE: intentionally NO translucent/transparent theme. HyperOS/MIUI's
+             background-activity-launch guard denies a share-sheet
+             (startActivityAsCaller) launch of a TRANSLUCENT activity as an
+             overlay-phishing attempt — AMS returns result -92 and the chooser
+             throws ActivityNotFoundException, so the X share silently vanished
+             (ShareActivity never ran: no toast, no POST, no cookie). Seal's
+             working QuickDownloadActivity is opaque (no theme override); we match
+             it. ShareActivity finishes in onCreate(), so the opaque window that
+             briefly appears is momentary. -->
         <activity
             android:name=".ShareActivity"
             android:exported="true"
             android:launchMode="singleInstance"
-            android:excludeFromRecents="true"
-            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            android:excludeFromRecents="true">
             <intent-filter android:label="@string/share_target_label">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

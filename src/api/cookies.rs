@@ -48,7 +48,7 @@ pub async fn set(
     let p = known_platform(&key)?;
     state
         .cookies
-        .set(p.key, &body.cookies)
+        .set(p.key, &body.cookies, p.hosts.first().copied())
         .map_err(AppError::BadRequest)?;
     Ok(Json(status_json(&state, p.key)).into_response())
 }
@@ -102,5 +102,6 @@ fn status_json(state: &AppState, key: &str) -> serde_json::Value {
         "enabled": st.enabled,
         "bytes": st.bytes,
         "updated_at": st.updated_at,
+        "expires_at": st.expires_at,
     })
 }

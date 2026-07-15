@@ -32,6 +32,7 @@ pub struct WebsiteBody {
     /// Per-site resolution cap; `0`/negative clears it (follow global).
     pub max_height: Option<i64>,
     pub no_download: Option<bool>,
+    pub blur: Option<bool>,
     pub sort: Option<i64>,
 }
 
@@ -52,6 +53,7 @@ pub async fn upsert(
         enabled: true,
         max_height: None,
         no_download: false,
+        blur: false,
         sort: 999,
         cookie: None,
     });
@@ -71,6 +73,7 @@ pub async fn upsert(
             None => base.max_height,
         },
         no_download: body.no_download.unwrap_or(base.no_download),
+        blur: body.blur.unwrap_or(base.blur),
         sort: body.sort.unwrap_or(base.sort),
         cookie: None,
     };
@@ -98,9 +101,18 @@ pub async fn set_cookies(
     Json(body): Json<CookieBody>,
 ) -> AppResult<Response> {
     let key = safe_key(&key)?;
+    // The site's primary host lets a bare `name=value; …` header paste (which
+    // carries no domain) attach to the right site.
+    let default_domain = state
+        .db
+        .get_website(&key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|w| w.hosts.into_iter().next());
     state
         .cookies
-        .set(&key, &body.cookies)
+        .set(&key, &body.cookies, default_domain.as_deref())
         .map_err(AppError::BadRequest)?;
     Ok(Json(json!({ "key": key, "cookie": cookie_status(&state, &key) })).into_response())
 }
@@ -241,6 +253,7 @@ fn cookie_status(state: &AppState, key: &str) -> CookieStatus {
         enabled: st.enabled,
         bytes: st.bytes,
         updated_at: st.updated_at,
+        expires_at: st.expires_at,
     }
 }
 

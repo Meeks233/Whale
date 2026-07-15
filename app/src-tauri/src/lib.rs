@@ -20,13 +20,26 @@ fn save_share_creds(app: tauri::AppHandle, base: String, token: String) {
     }
 }
 
+/// Re-arm the Android launch-time permission prompt from the in-app Settings, for
+/// a user who previously chose "Don't ask again" but changed their mind. Drops a
+/// sentinel file `MainActivity` picks up in `onResume` (same app-data-dir bridge
+/// as `save_share_creds`); it clears the opt-out and re-shows the prompt. No-op
+/// on desktop, where these Android runtime permissions don't apply.
+#[tauri::command]
+fn reset_permission_prompt(app: tauri::AppHandle) {
+    if let Ok(dir) = app.path().app_data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("whale_perm_request"), b"1");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![save_share_creds]);
+        .invoke_handler(tauri::generate_handler![save_share_creds, reset_permission_prompt]);
 
     // Android/iOS: register the share-target plugin so shared URLs land in a
     // queue the frontend drains on launch/focus (see web/app.js).

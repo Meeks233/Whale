@@ -319,6 +319,8 @@ input:focus { outline: none; border-color: var(--accent); }
    so hide the whole row — detected via html.app-native (set from
    window.__TAURI__), not user-agent sniffing. */
 html:not(.app-native) #server-row { display: none; }
+/* Permission re-prompt row is Android-only (no runtime permissions in a browser). */
+html:not(.app-native) #perm-row { display: none; }
 .hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
 .hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
 .hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: 4px; font-size: 11px; }
@@ -352,6 +354,11 @@ html:not(.app-native) #server-row { display: none; }
 .ck-none { color: var(--muted); }
 .ck-on { color: var(--ok); }
 .ck-off { color: var(--warn); }
+/* Cookie-expiry reminder chips (see cookieExpiryChipHtml). Amber for "soon",
+   a slightly stronger red-ish tint once actually expired — but greedy: this is
+   only a nudge, downloads are never blocked on it. */
+.ck-expiring { color: var(--warn); font-weight: 600; }
+.ck-expired { color: var(--err); font-weight: 600; }
 .ck-body { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .ck-btn {
   font-size: 12px;
@@ -427,6 +434,31 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   border-color: var(--accent);
   background: color-mix(in oklab, var(--accent) 14%, var(--surface));
   box-shadow: 0 0 0 1px var(--accent) inset;
+}
+
+/* ---- Per-site privacy blur ----
+   Cards from a site with blur enabled hide their thumbnail + title behind a soft
+   blur (industry "sensitive content" pattern). Web reveals on hover; the native
+   app reveals on tap (JS adds .revealed for a few seconds). Only the visual
+   content is blurred — status/actions stay usable so downloads still work. */
+.item.blurred .thumb,
+.item.blurred .thumb-wrap,
+.item.blurred .title span,
+.item.blurred .uploader {
+  filter: blur(9px);
+  transition: filter .18s ease;
+}
+.item.blurred .title span,
+.item.blurred .uploader { user-select: none; }
+.item.blurred:hover .thumb,
+.item.blurred:hover .thumb-wrap,
+.item.blurred:hover .title span,
+.item.blurred:hover .uploader,
+.item.blurred.revealed .thumb,
+.item.blurred.revealed .thumb-wrap,
+.item.blurred.revealed .title span,
+.item.blurred.revealed .uploader {
+  filter: none;
 }
 
 /* ---- Playlist folds (multi-video posts) ----
@@ -1050,17 +1082,11 @@ body.player-open { overflow: hidden; }
   flex-direction: column;
   gap: 10px;
 }
-/* A site with an active cookie reads as "in use" — accent ring + tint, mirroring
-   the resolution-picker / multi-select selected state. */
-.website-card:has(.ck-on) {
-  border-color: var(--accent);
-  background: color-mix(in oklab, var(--accent) 7%, var(--surface));
-  box-shadow: 0 0 0 1px var(--accent) inset;
-}
+/* An active cookie is conveyed by the green "Cookie Active" badge alone — no card
+   ring/tint, which was visually noisy across a long site list. */
 /* Disabled site: greyed and de-emphasised (mature "inactive" pattern), but its
    controls stay reachable so it can be re-enabled. */
 .website-card.disabled { opacity: .55; filter: grayscale(0.6); }
-.website-card.disabled:has(.ck-on) { box-shadow: none; border-color: var(--border); background: var(--surface); }
 
 /* Header row: toggle · (name + status, domains) · overflow menu. */
 .site-main { display: flex; align-items: flex-start; gap: 10px; }
@@ -1100,6 +1126,18 @@ body.player-open { overflow: hidden; }
 }
 .site-menu-item:hover { background: var(--surface); }
 .site-menu-item.danger { color: var(--err); }
+/* Checkbox-style menu row (blur toggle): a leading check that fills in when on. */
+.site-menu-check { display: flex; align-items: center; gap: 8px; }
+.site-menu-check::before {
+  content: ""; flex-shrink: 0; width: 15px; height: 15px; border-radius: 4px;
+  border: 1.5px solid var(--border); background: var(--surface);
+}
+.site-menu-check.on::before {
+  border-color: var(--accent); background: var(--accent);
+  /* white check mark */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: center;
+}
 
 /* Controls row: the max-resolution dropdown + the cookie action button. */
 .site-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
@@ -1121,7 +1159,6 @@ body.player-open { overflow: hidden; }
   background: color-mix(in oklab, var(--accent) 14%, var(--surface));
   box-shadow: 0 0 0 1px var(--accent) inset;
 }
-.website-card.selected:has(.ck-on) { background: color-mix(in oklab, var(--accent) 14%, var(--surface)); }
 
 /* Batch action bar, docked at the bottom of the sites modal. */
 .site-select-bar {

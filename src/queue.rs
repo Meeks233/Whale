@@ -148,6 +148,7 @@ async fn resolve_max_height(
         .filter(|h| *h > 0)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_job(
     cfg: &Config,
     db: &Db,

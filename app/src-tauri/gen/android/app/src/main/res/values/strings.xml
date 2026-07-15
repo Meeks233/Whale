@@ -2,4 +2,11 @@
     <string name="app_name">"Whale"</string>
     <string name="main_activity_title">"Whale"</string>
     <string name="share_target_label">"Quick Download"</string>
+    <string name="perm_title">Let Whale run reliably</string>
+    <string name="perm_intro">Whale downloads on your server and reports progress. To keep that working while the app is in the background, it needs:</string>
+    <string name="perm_reason_notifications">• Notifications — to show live download progress and results.</string>
+    <string name="perm_reason_battery">• Unrestricted background power — so downloads and progress aren\'t frozen when the screen is off.</string>
+    <string name="perm_allow">Allow</string>
+    <string name="perm_not_now">Not now</string>
+    <string name="perm_never">Don\'t ask again</string>
 </resources>

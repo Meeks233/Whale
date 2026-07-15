@@ -35,7 +35,10 @@ pub async fn file(
 ) -> Result<Response, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
     let token = super::auth::extract_token(req.headers(), &query);
-    if token.as_deref() != Some(state.cfg.token.as_str()) {
+    if !token
+        .as_deref()
+        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
+    {
         return Err(AppError::Unauthorized);
     }
     let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
@@ -108,7 +111,10 @@ pub async fn stream(
 ) -> Result<Response, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
     let token = super::auth::extract_token(req.headers(), &query);
-    if token.as_deref() != Some(state.cfg.token.as_str()) {
+    if !token
+        .as_deref()
+        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
+    {
         return Err(AppError::Unauthorized);
     }
     let item = state.db.find_by_public_slug(&slug).await?.ok_or(AppError::NotFound)?;

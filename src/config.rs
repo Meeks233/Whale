@@ -99,6 +99,22 @@ impl Config {
             None => (random_token()?, true),
         };
 
+        // Refuse to boot with a weak operator-set token. A generated token is
+        // always 128-bit random and skips the check; a hand-picked one is run
+        // through an industry-style weak-password screen (length, character
+        // diversity, and a common-credential blocklist) so a guessable token
+        // can't silently protect a server that streams cookies. The
+        // `WHALE_ALLOW_WEAK_TOKEN` escape hatch exists only for local dev.
+        if !token_generated && !env_bool("WHALE_ALLOW_WEAK_TOKEN", false) {
+            if let Err(reason) = token_strength(&token) {
+                return Err(anyhow!(
+                    "WHALE_TOKEN is too weak: {reason}. Choose a longer, random \
+                     token (e.g. `openssl rand -hex 24`), or set \
+                     WHALE_ALLOW_WEAK_TOKEN=1 for local development only."
+                ));
+            }
+        }
+
         let bind: SocketAddr = env_or("WHALE_BIND", "0.0.0.0:8080")
             .parse()
             .context("WHALE_BIND must be a valid socket address")?;
@@ -307,6 +323,66 @@ fn parse_rate(s: &str) -> Option<u64> {
     Some((value * mult) as u64)
 }
 
+/// Industry-style weak-secret screen for an operator-supplied `WHALE_TOKEN`,
+/// modelled on password-strength guidance (NIST SP 800-63B: length first, plus a
+/// breached/common-credential blocklist). The bearer token is the *only* thing
+/// standing between the internet and a server that streams saved cookies, so a
+/// guessable one is refused at boot rather than silently accepted.
+///
+/// A high-entropy token also defeats offline/rainbow-table attacks on any leaked
+/// token hash: the point of a precomputed table is to invert *guessable* inputs,
+/// and these rules force the token out of that space.
+///
+/// Returns `Err(reason)` describing the first failed rule.
+fn token_strength(token: &str) -> Result<(), String> {
+    // 1. Length: the single biggest factor in resisting guessing. 12 is the
+    //    floor; a generated token is 32 hex chars, so this only bites hand-picks.
+    if token.chars().count() < 12 {
+        return Err("it is shorter than 12 characters".to_string());
+    }
+
+    // 2. Common-credential blocklist (compile-time). Lowercased before compare so
+    //    "Password1" and "PASSWORD1" are both caught. Kept small but covers the
+    //    obvious dev placeholders and perennial top-of-the-breach-list entries.
+    const WEAK: &[&str] = &[
+        "test-token",
+        "testtoken",
+        "changeme",
+        "password",
+        "password1",
+        "passw0rd",
+        "letmein",
+        "secret",
+        "default",
+        "admin",
+        "administrator",
+        "whale",
+        "whaletoken",
+        "token",
+        "bearer",
+        "12345678",
+        "123456789",
+        "1234567890",
+        "qwertyui",
+        "qwerty123",
+        "iloveyou",
+    ];
+    let low = token.to_ascii_lowercase();
+    if WEAK.contains(&low.as_str()) {
+        return Err("it is a commonly-used / placeholder value".to_string());
+    }
+
+    // 3. Character variety: reject low-entropy strings that pass on length alone
+    //    (e.g. "aaaaaaaaaaaa" or "abababababab"). Require at least 5 distinct
+    //    characters, which every random hex/base64 token comfortably clears.
+    let distinct = low.chars().collect::<std::collections::BTreeSet<_>>().len();
+    if distinct < 5 {
+        return Err("it repeats too few distinct characters".to_string());
+    }
+
+    Ok(())
+}
+
 /// Generate a 32-character (128-bit) hex token from OS randomness.
 fn random_token() -> anyhow::Result<String> {
     let mut bytes = [0u8; 16];
@@ -354,6 +430,22 @@ mod tests {
             capped_format("bestvideo+bestaudio", true, Some(720)),
             "bestvideo+bestaudio"
         );
+    }
+
+    #[test]
+    fn token_strength_flags_weak_and_accepts_strong() {
+        // Too short.
+        assert!(token_strength("short").is_err());
+        // Common / placeholder values (case-insensitive).
+        assert!(token_strength("test-token").is_err());
+        assert!(token_strength("ChangeMe").is_err());
+        assert!(token_strength("password1").is_err());
+        // Long but low-variety.
+        assert!(token_strength("aaaaaaaaaaaaaaaa").is_err());
+        assert!(token_strength("abababababababab").is_err());
+        // A generated-style token and a decent passphrase pass.
+        assert!(token_strength(&random_token().unwrap()).is_ok());
+        assert!(token_strength("correct-horse-battery-staple-42").is_ok());
     }
 
     #[test]

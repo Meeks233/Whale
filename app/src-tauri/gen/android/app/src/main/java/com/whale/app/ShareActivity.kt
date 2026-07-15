@@ -9,6 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.widget.Toast
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -39,25 +43,36 @@ class ShareActivity : Activity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
 
+    dumpIntent(intent)
     val url = extractUrl(extractSharedText(intent))
     if (url == null) {
+      Log.w(TAG, "no URL extracted from intent — finishing silently")
+      toast(applicationContext, "Whale · no link found in share")
       finish()
       return
     }
+    Log.i(TAG, "extracted url=$url")
 
     val creds = readCreds()
     if (creds == null) {
       // Not configured yet: open the full app so the user can set token/server,
       // handing the link over the way the WebView drain path expects.
+      Log.w(TAG, "no creds — forwarding into MainActivity")
+      toast(applicationContext, "Whale · open the app to set server/token")
       startActivity(openAppWithUrl(this, url))
       finish()
       return
     }
+    Log.i(TAG, "creds ok base=${creds.first}")
 
     // Fire the download in the background, notify the result, and exit
     // immediately with no visible UI — this is the "Quick Download" behaviour.
     val appCtx = applicationContext
     val (base, token) = creds
+    // Headless quick download is otherwise invisible (a background notification is
+    // easy to miss). Show an immediate on-screen Toast over the sharing app so the
+    // user always sees the share was received and is being sent.
+    toast(appCtx, "Whale · sending…")
     Thread { submitAndNotify(appCtx, base, token, url) }.start()
     finish()
   }
@@ -92,8 +107,28 @@ class ShareActivity : Activity() {
     return m?.value ?: text.trim().ifEmpty { null }
   }
 
+  /** Diagnostic dump of the raw incoming share intent — action, type, data URI,
+   *  every string extra and any ClipData items. Lets us see EXACTLY what the X
+   *  app delivers when a real share "silently" does nothing. */
+  private fun dumpIntent(i: Intent?) {
+    if (i == null) { Log.w(TAG, "intent is null"); return }
+    Log.i(TAG, "intent action=${i.action} type=${i.type} data=${i.dataString}")
+    val ex = i.extras
+    if (ex != null) for (k in ex.keySet()) {
+      Log.i(TAG, "  extra[$k]=${ex.get(k)}")
+    }
+    val cd = i.clipData
+    if (cd != null) for (n in 0 until cd.itemCount) {
+      Log.i(TAG, "  clip[$n] text=${cd.getItemAt(n).text} uri=${cd.getItemAt(n).uri}")
+    }
+  }
+
   companion object {
+    private const val TAG = "WhaleShare"
     private const val CHANNEL_ID = "quick_download"
+    // Notification-id base for per-item progress notifications, keyed by item id
+    // so each download owns one updatable notification.
+    private const val NOTIF_BASE = 200000
 
     /** An intent that opens MainActivity (the WebView) with `url` prefilled so
      *  the frontend's drain path re-submits it and shows the real error toast. */
@@ -109,6 +144,8 @@ class ShareActivity : Activity() {
       var title = "Whale"
       var body: String
       var ok = false
+      var itemId = -1
+      var duplicate = false
       try {
         val conn = (URL("$base/api/items").openConnection() as HttpURLConnection).apply {
           requestMethod = "POST"
@@ -120,16 +157,20 @@ class ShareActivity : Activity() {
         }
         val payload = JSONObject().put("url", url).put("options", JSONObject()).toString()
         conn.outputStream.use { it.write(payload.toByteArray()) }
+        Log.i(TAG, "POST $base/api/items payload=$payload")
         val code = conn.responseCode
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val respText = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        Log.i(TAG, "response code=$code body=${respText.take(300)}")
         val resp = try { JSONObject(respText) } catch (e: Exception) { JSONObject() }
         body = when {
           code in 200..299 -> {
             ok = true
             val item = resp.optJSONObject("item")
+            itemId = item?.optInt("id", -1) ?: -1
             title = item?.optString("title")?.takeIf { it.isNotEmpty() } ?: "Link"
-            if (resp.optBoolean("duplicate")) "Already downloaded" else "Download queued ✓"
+            duplicate = resp.optBoolean("duplicate")
+            if (duplicate) "Already downloaded" else "Download queued ✓"
           }
           code == 422 || resp.optString("error") == "probe_failed" ->
             resp.optString("message").ifEmpty { "Couldn't read that link" }
@@ -138,14 +179,82 @@ class ShareActivity : Activity() {
         }
         conn.disconnect()
       } catch (e: Exception) {
+        Log.e(TAG, "POST failed", e)
         body = "Can't reach the Whale server"
       }
-      // Success → plain notification (stays in the background). Failure → tappable
-      // notification that opens the app with the URL so the error is never lost.
-      notifyResult(ctx, title, body, if (ok) null else url)
+      // Visible result over the sharing app: success/duplicate/error all surface
+      // as a Toast so the quick channel is never silent, plus the notification.
+      toast(ctx, "Whale · $body")
+      // One notification per item, keyed by a stable id so progress updates
+      // REPLACE it in place instead of stacking. Failure → tappable to reopen.
+      val notifId = if (itemId >= 0) NOTIF_BASE + itemId else (System.currentTimeMillis() % 100000).toInt()
+      val active = ok && !duplicate && itemId >= 0
+      postNotif(ctx, notifId, title, body, if (ok) null else url, ongoing = active, indeterminate = active)
+      // Best-effort: follow the cloud download and refresh the SAME notification
+      // silently (setOnlyAlertOnce → no repeated sound) until it finishes.
+      if (active) pollProgress(ctx, base, token, itemId, notifId, title)
     }
 
-    private fun notifyResult(ctx: Context, title: String, body: String, retryUrl: String?) {
+    /** Poll the server for this item's status and update its notification in
+     *  place until it finishes. Silent (no new sound) thanks to onlyAlertOnce.
+     *  Bounded (~10 min) so a stuck download can't spin forever; best-effort —
+     *  the process may be reclaimed while backgrounded, which is fine. */
+    private fun pollProgress(ctx: Context, base: String, token: String, itemId: Int, notifId: Int, titleIn: String) {
+      var title = titleIn
+      var tries = 0
+      while (tries < 200) {
+        tries++
+        try { Thread.sleep(3000) } catch (e: InterruptedException) { return }
+        try {
+          val conn = (URL("$base/api/items/$itemId").openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15000
+            readTimeout = 20000
+            setRequestProperty("Authorization", "Bearer $token")
+          }
+          val code = conn.responseCode
+          if (code !in 200..299) { conn.disconnect(); continue }
+          val txt = conn.inputStream.bufferedReader().use { it.readText() }
+          conn.disconnect()
+          val item = JSONObject(txt)
+          item.optString("title").takeIf { it.isNotEmpty() }?.let { title = it }
+          when (item.optString("status")) {
+            "completed" -> { postNotif(ctx, notifId, title, "Download complete ✓", null, ongoing = false, indeterminate = false); return }
+            "failed" -> {
+              val msg = item.optString("error").ifEmpty { "Download failed" }
+              postNotif(ctx, notifId, title, msg, null, ongoing = false, indeterminate = false)
+              return
+            }
+            "running" -> postNotif(ctx, notifId, title, "Downloading…", null, ongoing = true, indeterminate = true)
+            "queued" -> postNotif(ctx, notifId, title, "Queued…", null, ongoing = true, indeterminate = true)
+            else -> return // deleted/unknown — stop quietly
+          }
+        } catch (e: Exception) {
+          // Transient network hiccup; keep trying within the bound.
+        }
+      }
+    }
+
+    /** Show a Toast from any thread (Toasts must be posted on the main looper). */
+    private fun toast(ctx: Context, msg: String) {
+      Handler(Looper.getMainLooper()).post {
+        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+      }
+    }
+
+    /** Post/replace a notification by a stable id. `ongoing` keeps it pinned while
+     *  the download runs; `indeterminate` shows a moving progress bar. Always
+     *  `onlyAlertOnce` so replacing it for progress never plays a new sound — the
+     *  fix for the "queued, then repeated buzzing" complaint. */
+    private fun postNotif(
+      ctx: Context,
+      notifId: Int,
+      title: String,
+      body: String,
+      retryUrl: String?,
+      ongoing: Boolean,
+      indeterminate: Boolean,
+    ) {
       try {
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         val builder: Notification.Builder
@@ -163,7 +272,10 @@ class ShareActivity : Activity() {
           .setContentTitle(title)
           .setContentText(body)
           .setStyle(Notification.BigTextStyle().bigText(body))
-          .setAutoCancel(true)
+          .setOnlyAlertOnce(true)
+          .setOngoing(ongoing)
+          .setAutoCancel(!ongoing)
+        if (indeterminate) builder.setProgress(0, 0, true)
         // On failure, tapping the notification reopens the app with the link so
         // the user can read the full error / retry with cookies.
         if (retryUrl != null) {
@@ -174,7 +286,7 @@ class ShareActivity : Activity() {
           )
           builder.setContentIntent(pi)
         }
-        nm.notify((System.currentTimeMillis() % 100000).toInt(), builder.build())
+        nm.notify(notifId, builder.build())
       } catch (e: Exception) {
         // Notifications are best-effort; the download was still submitted.
       }

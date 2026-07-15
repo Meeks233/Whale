@@ -14,7 +14,10 @@ use tokio::sync::broadcast;
 pub async fn events(State(state): State<AppState>, RawQuery(query): RawQuery) -> Response {
     let q = query.unwrap_or_default();
     let token = super::auth::extract_token(&axum::http::HeaderMap::new(), &q);
-    if token.as_deref() != Some(state.cfg.token.as_str()) {
+    if !token
+        .as_deref()
+        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
+    {
         return AppError::Unauthorized.into_response();
     }
 

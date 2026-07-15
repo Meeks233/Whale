@@ -10,7 +10,7 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/style.css">
   <link rel="icon" href="/icons/192.png">
-  <link rel="apple-touch-icon" href="/icons/192.png">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-180.png">
   <!-- Anti-FOUC: apply a forced Light/Dark override before first paint. Absent
        (or "system") it falls through to the CSS prefers-color-scheme default. -->
   <script>
@@ -191,6 +191,17 @@
         <p class="hint" data-i18n="settings.serverHint">Only needed in the app. Leave blank when opening Whale in a browser.</p>
       </div>
 
+      <!-- App-only: re-open the launch-time permission prompt (notifications +
+           unrestricted background power) for a user who dismissed it. Hidden in
+           browsers via `html:not(.app-native) #perm-row` in style.css. -->
+      <div id="perm-row">
+        <label data-i18n="settings.permissions">App permissions</label>
+        <div class="row">
+          <button id="perm-request" class="btn" data-i18n="settings.permGrant">Grant background &amp; notifications</button>
+        </div>
+        <p class="hint-muted" data-i18n="settings.permHint">Re-open the prompt for notifications and unrestricted background power. Takes effect next time the app starts.</p>
+      </div>
+
       <label for="token" data-i18n="settings.token">API token</label>
       <div class="row">
         <input id="token" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
@@ -258,13 +269,13 @@
           </select>
           <button id="max-res-save" class="btn" data-i18n="btn.save">Save</button>
         </div>
-        <p id="max-res-hint" class="hint" data-i18n="settings.maxResHint">Caps the quality yt-dlp downloads. Highest picks the best available.</p>
+        <p id="max-res-hint" class="hint-muted" data-i18n="settings.maxResHint">Caps the quality yt-dlp downloads. Highest picks the best available.</p>
         <p id="max-res-locked" class="hint hidden" data-i18n="settings.maxResLocked">Pinned by the WHALE_MAX_HEIGHT environment variable.</p>
       </div>
 
       <div class="sites-toolbar">
-        <button id="site-sel-toggle" class="sel-toggle" type="button" aria-label="Select" data-i18n-aria="sites.select" title="Select">
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+        <button id="site-sel-toggle" class="icon-btn sel-toggle" type="button" aria-label="Select" data-i18n-aria="sites.select" title="Select">
+          <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
         </button>
         <input id="site-search" type="search" class="input" data-i18n-ph="ph.siteSearch" placeholder="Search sites…" autocomplete="off">
         <button id="sites-add" class="btn" data-i18n="sites.add">Add site</button>

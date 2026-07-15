@@ -101,6 +101,43 @@ function setApiBase(b: string): void {
 // Prefix an app-relative path (starting with `/`) with the configured base.
 function apiUrl(path: string): string { return apiBase() + path; }
 
+// True when `host` is a routable PUBLIC IP literal (v4 or v6) — i.e. NOT loopback,
+// RFC-1918, CGNAT, or link/unique-local. Mirrors src/net_guard.rs's classification.
+// Hostnames (non-literals) return false: we can't resolve them client-side.
+function isPublicIpHost(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, '').toLowerCase(); // strip IPv6 brackets
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const o = m.slice(1).map(Number);
+    if (o.some((n) => n > 255)) return false;      // malformed → treat as hostname
+    const [a, b] = o;
+    if (a === 0 || a === 10 || a === 127) return false;
+    if (a === 169 && b === 254) return false;      // link-local 169.254/16
+    if (a === 192 && b === 168) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false; // CGNAT 100.64/10
+    return true;                                   // public IPv4
+  }
+  if (h.includes(':')) {
+    if (h === '::1' || h === '::') return false;   // loopback / unspecified
+    if (/^fe[89ab]/.test(h)) return false;         // link-local fe80::/10
+    if (/^f[cd]/.test(h)) return false;            // unique-local fc00::/7
+    return true;                                   // public IPv6
+  }
+  return false;
+}
+
+// A remote base that would leak the token + cookies in the clear: plain http://
+// pointing at a public IP address. https is always fine; private/LAN/loopback
+// http (a home server) is fine. Blocked from the frontend before it's ever saved.
+function isInsecurePublicBase(raw: string): boolean {
+  const s = (raw || '').trim();
+  if (!s) return false;
+  let u: URL;
+  try { u = new URL(s.includes('://') ? s : 'http://' + s); } catch (_) { return false; }
+  return u.protocol === 'http:' && isPublicIpHost(u.hostname);
+}
+
 // Canonical public domain the operator declared via WHALE_PUBLIC_URL, fetched
 // from /api/health on boot. Empty until loaded (or if unset) — publicUrl()
 // then falls back to the server base / current origin.
@@ -145,6 +182,7 @@ const els = {
   tokenHint: byId('token-hint'),
   server: byId<HTMLInputElement>('server'),
   serverSave: byId<HTMLButtonElement>('server-save'),
+  permRequest: byId<HTMLButtonElement>('perm-request'),
   maxRes: byId<HTMLSelectElement>('max-res'),
   maxResSave: byId<HTMLButtonElement>('max-res-save'),
   maxResHint: byId('max-res-hint'),
@@ -230,7 +268,7 @@ const state = {
   groups: new Map<string, { li: HTMLLIElement; body: HTMLUListElement }>(),
   // Latest SSE progress per item id (percent/speed/status), so a playlist fold
   // header can show its aggregate download progress + the live download speed.
-  progress: new Map<number, { percent: number | null; speed: string; status: string }>(),
+  progress: new Map<number, { percent: number | null; speed: string; status: string; shown: number }>(),
   // Folds the user has expanded, by key. Survives list resets (manual / 5-min
   // auto refresh) so a re-render restores the open/closed state.
   expandedGroups: new Set<string>(),
@@ -625,6 +663,7 @@ function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
     li.innerHTML = html;
     rowSig.set(li, html);
   }
+  li.classList.toggle('blurred', isItemBlurred(item));
   if (gkey) updateGroupHeader(gkey);
   els.empty.classList.add('hidden');
   return li;
@@ -756,7 +795,9 @@ function updateGroupProgress(gkey: string): void {
     if (st === 'completed') { sum += 100; continue; }
     if (st === 'running') {
       const pr = state.progress.get(it.id);
-      const pct = pr && pr.percent != null ? Math.max(0, Math.min(100, pr.percent)) : 0;
+      // Use the monotonic shown percent so the fold's aggregate bar never dips
+      // when a child restarts its second (audio) pass.
+      const pct = pr ? pr.shown : 0;
       sum += pct;
       if (!curSpeed && pr && pr.speed) curSpeed = pr.speed;
     }
@@ -823,8 +864,19 @@ function playGroup(gkey: string): void {
 // Patch a row in place from a ProgressEvent (does not rebuild full row).
 function patchRow(ev: ProgressEv): void {
   notifyProgress(ev); // native download notification (mobile only; no-op elsewhere)
+  // Compute a MONOTONIC display percent. A `bv*+ba` download runs two 0→100%
+  // passes (video, then audio), so the raw tick percent legitimately jumps back
+  // to 0 mid-download — which read as the bar "going backwards". We clamp the
+  // shown value to its running max, resetting only when a brand-new job starts
+  // (the synthetic Running tick carries percent=null) or the item is re-queued.
+  const prevP = state.progress.get(ev.id);
+  let shown = prevP ? prevP.shown : 0;
+  const cur = ev.percent == null ? null : Math.max(0, Math.min(100, ev.percent));
+  if (ev.status === 'queued' || (ev.status === 'running' && ev.percent == null)) shown = 0;
+  else if (cur != null) shown = Math.max(shown, cur);
+  if (ev.status === 'completed') shown = 100;
   // Record the latest tick so a playlist fold can aggregate progress + speed.
-  state.progress.set(ev.id, { percent: ev.percent ?? null, speed: ev.speed || '', status: ev.status });
+  state.progress.set(ev.id, { percent: ev.percent ?? null, speed: ev.speed || '', status: ev.status, shown });
   const li = state.rows.get(ev.id);
   if (!li) return; // unknown row; will appear on next list load
   const badge = li.querySelector('.badge');
@@ -865,7 +917,7 @@ function patchRow(ev: ProgressEv): void {
     }
   } else if (bar && fill) {
     bar.classList.remove('hidden');
-    if (ev.percent != null) fill.style.width = Math.max(0, Math.min(100, ev.percent)) + '%';
+    fill.style.width = shown + '%';
   }
   // Roll this tick up into the fold header (total progress + live speed).
   const it = state.items.get(ev.id);
@@ -1011,7 +1063,7 @@ function fmtBytes(n: number | undefined): string {
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
-interface CookieStatus { present: boolean; enabled: boolean; bytes: number; updated_at: number; }
+interface CookieStatus { present: boolean; enabled: boolean; bytes: number; updated_at: number; expires_at?: number | null; }
 interface Website {
   key: string;
   name: string;
@@ -1020,11 +1072,45 @@ interface Website {
   enabled: boolean;
   max_height: number | null;
   no_download: boolean;
+  blur: boolean;
   sort: number;
   cookie?: CookieStatus;
 }
 
 let websitesLoaded: Website[] = [];
+// Host suffixes belonging to sites with privacy-blur on, recomputed whenever the
+// registry loads/changes. Home-list rows whose source host matches are blurred.
+let blurredHosts: string[] = [];
+function recomputeBlurredHosts(): void {
+  blurredHosts = websitesLoaded.filter((w) => w.blur).flatMap((w) => w.hosts);
+}
+// Lowercased host of a URL (scheme/userinfo/port tolerant, leading www. stripped).
+function hostOfUrl(url?: string | null): string {
+  if (!url) return '';
+  let s = String(url).trim();
+  const scheme = s.indexOf('://');
+  if (scheme >= 0) s = s.slice(scheme + 3);
+  s = s.split(/[/?#]/)[0];
+  const at = s.lastIndexOf('@');
+  if (at >= 0) s = s.slice(at + 1);
+  s = s.split(':')[0].toLowerCase().replace(/\.$/, '');
+  return s.startsWith('www.') ? s.slice(4) : s;
+}
+function isItemBlurred(item: Item): boolean {
+  if (!blurredHosts.length) return false;
+  const host = hostOfUrl(item.webpage_url);
+  if (!host) return false;
+  return blurredHosts.some((suf) => host === suf || host.endsWith('.' + suf));
+}
+// Reapply the blurred class across already-rendered home rows (after a blur
+// toggle or a fresh website load), without a full list rebuild.
+function applyBlurToRows(): void {
+  recomputeBlurredHosts();
+  state.rows.forEach((li, id) => {
+    const it = state.items.get(id);
+    if (it) li.classList.toggle('blurred', isItemBlurred(it));
+  });
+}
 // Client-side filter query (name / domains / key) and batch-select state, mirroring
 // the home list's search + multi-select so the two screens feel like one system.
 let siteQuery = '';
@@ -1049,10 +1135,27 @@ function siteResSelectHtml(w: Website): string {
 
 function cookieChipHtml(w: Website): string {
   const c = w.cookie;
-  if (!c || !c.present) return `<span class="ck-status ck-none">${esc(t('cookie.notSet'))}</span>`;
-  return c.enabled
-    ? `<span class="ck-status ck-on">${esc(t('cookie.active', { size: fmtBytes(c.bytes) }))}</span>`
-    : `<span class="ck-status ck-off">${esc(t('cookie.disabled', { size: fmtBytes(c.bytes) }))}</span>`;
+  // No cookie → render nothing. The old "Not set" label was pure noise on the
+  // many sites that never need cookies.
+  if (!c || !c.present) return '';
+  const size = fmtBytes(c.bytes);
+  const chip = c.enabled
+    ? `<span class="ck-status ck-on">${esc(t('cookie.active', { size }))}</span>`
+    : `<span class="ck-status ck-off">${esc(t('cookie.disabled', { size }))}</span>`;
+  return chip + cookieExpiryChipHtml(c);
+}
+
+// A reminder chip when an *enabled* cookie is expired or within 7 days of it.
+// Greedy by design: we never block a download on this (some sites — e.g. YouTube
+// — keep serving past a cookie's nominal expiry), we only nudge; a real failure
+// still gets the "add cookies" hint from the backend.
+function cookieExpiryChipHtml(c: CookieStatus): string {
+  if (!c.enabled || !c.expires_at) return '';
+  const now = Date.now() / 1000;
+  if (c.expires_at <= now) return `<span class="ck-status ck-expired">${esc(t('cookie.expired'))}</span>`;
+  const days = Math.floor((c.expires_at - now) / 86400);
+  if (days <= 7) return `<span class="ck-status ck-expiring">${esc(t('cookie.expiring', { days: Math.max(1, days) }))}</span>`;
+  return '';
 }
 
 // Kebab overflow menu: everything that isn't an everyday control (login, test,
@@ -1065,6 +1168,9 @@ function siteMenuHtml(w: Website): string {
     items.push(`<a class="site-menu-item" href="${esc(w.login_url)}" target="_blank" rel="noopener">${esc(t('cookie.login'))}</a>`);
   items.push(`<button class="site-menu-item" data-act="edit">${esc(t('sites.editDomains'))}</button>`);
   items.push(`<button class="site-menu-item" data-act="validate">${esc(t('sites.validate'))}</button>`);
+  // Privacy blur toggle: a check-marked menu item (industry-standard toggle row)
+  // so it reads as an on/off setting, not a one-shot action.
+  items.push(`<button class="site-menu-item site-menu-check${w.blur ? ' on' : ''}" data-act="blur" role="menuitemcheckbox" aria-checked="${w.blur}">${esc(t('sites.blur'))}</button>`);
   if (present) {
     items.push(`<button class="site-menu-item" data-act="ck-toggle" data-enabled="${w.cookie!.enabled ? 'false' : 'true'}">${esc(w.cookie!.enabled ? t('cookie.disable') : t('cookie.enable'))}</button>`);
     items.push(`<button class="site-menu-item danger" data-act="ck-delete">${esc(t('cookie.delete'))}</button>`);
@@ -1111,6 +1217,7 @@ async function loadWebsites(): Promise<void> {
     if (!res.ok) { toast(t('toast.loadCookiesFail'), 'error'); return; }
     const data = await res.json();
     websitesLoaded = (data.websites || []) as Website[];
+    applyBlurToRows();
     renderWebsites();
   } catch (e) {
     if (!e || !e.unauthorized) toast('Network error', 'error');
@@ -1177,6 +1284,11 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
   switch (act) {
     case 'enable':
       await saveWebsite(key, { enabled: !w.enabled });
+      return;
+    case 'blur':
+      // Toggle the privacy blur; saveWebsite refreshes the card and the home
+      // list's blur state is recomputed on the next render.
+      if (await saveWebsite(key, { blur: !w.blur })) applyBlurToRows();
       return;
     case 'res': {
       // The card's maximum-resolution dropdown (change event).
@@ -1562,16 +1674,33 @@ els.tokenSave.addEventListener('click', () => {
   connectEvents();
   loadItems(true);
   loadStats();
+  if (getToken()) loadWebsites();
 });
 
 // Server URL (app only): persist, then reconnect the SSE + reload against it.
 if (els.serverSave) {
   els.serverSave.addEventListener('click', () => {
+    // Refuse a plain-http public-IP server: it would ship the token + cookies in
+    // the clear over the internet. Use https, or a private/LAN address.
+    if (isInsecurePublicBase(els.server.value)) {
+      toast(t('toast.insecureServer'), 'error');
+      return;
+    }
     setApiBase(els.server.value);
     closeModal(els.settings);
     loadServerConfig();
     connectEvents();
     loadItems(true);
+  });
+}
+
+// App-only: re-arm the native launch-time permission prompt (notifications +
+// unrestricted background power) for a user who tapped "Don't ask again".
+if (els.permRequest) {
+  els.permRequest.addEventListener('click', () => {
+    const T = window.__TAURI__;
+    try { T?.core?.invoke('reset_permission_prompt'); } catch (_) { /* desktop / not ready */ }
+    toast(t('toast.permReset'), 'ok');
   });
 }
 
@@ -1935,6 +2064,18 @@ els.history.addEventListener('click', (e) => {
     const li = target.closest('.item') as HTMLElement | null;
     if (li) { e.preventDefault(); toggleSelect(Number(li.dataset.id)); }
     return;
+  }
+  // Native app: the first tap on a blurred (privacy) card reveals it temporarily
+  // instead of activating whatever was under the finger. On the web the card
+  // reveals on :hover (CSS), so this only matters for touch.
+  if (isNativeApp) {
+    const bl = target.closest('.item.blurred:not(.revealed)') as HTMLElement | null;
+    if (bl) {
+      e.preventDefault();
+      bl.classList.add('revealed');
+      setTimeout(() => bl.classList.remove('revealed'), 6000); // "temporary" peek
+      return;
+    }
   }
   if (head) {
     // Whole-list actions on the fold header take priority over expand/collapse.
@@ -2828,6 +2969,7 @@ loadServerConfig();
 connectEvents();
 loadItems(true);
 loadStats();
+if (getToken()) loadWebsites(); // populate per-site privacy-blur state for the home list
 handleShareParam();
 setupNativeShare();
 setupNotifications();

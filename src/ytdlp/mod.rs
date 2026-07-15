@@ -83,33 +83,6 @@ fn looks_like_auth_required(raw: &str) -> bool {
     NEEDLES.iter().any(|n| low.contains(n))
 }
 
-#[cfg(test)]
-mod explain_tests {
-    use super::*;
-
-    #[test]
-    fn x_gated_video_gets_cookie_hint() {
-        let raw = "ERROR: [twitter] 2076991813915656399: No video could be found in this tweet";
-        let msg = explain_error("https://x.com/i/status/2076991813915656399", raw);
-        assert!(msg.starts_with(raw));
-        assert!(msg.contains("X / Twitter"));
-        assert!(msg.contains("Cookies"));
-    }
-
-    #[test]
-    fn ordinary_error_is_unchanged() {
-        let raw = "ERROR: Unable to download webpage: HTTP Error 500";
-        assert_eq!(explain_error("https://x.com/i/status/9", raw), raw);
-    }
-
-    #[test]
-    fn unknown_host_falls_back_to_generic_site_label() {
-        let raw = "ERROR: Sign in to confirm you're not a bot";
-        let msg = explain_error("https://example.com/v/1", raw);
-        assert!(msg.contains("this site"));
-    }
-}
-
 /// Resolve a direct, playable upstream URL for online streaming without
 /// downloading (`yt-dlp -g`). Used when the local file is gone (backed away) and
 /// the client wants to play from source.
@@ -178,4 +151,31 @@ pub async fn version(cfg: &Config) -> anyhow::Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[cfg(test)]
+mod explain_tests {
+    use super::*;
+
+    #[test]
+    fn x_gated_video_gets_cookie_hint() {
+        let raw = "ERROR: [twitter] 2076991813915656399: No video could be found in this tweet";
+        let msg = explain_error("https://x.com/i/status/2076991813915656399", raw);
+        assert!(msg.starts_with(raw));
+        assert!(msg.contains("X / Twitter"));
+        assert!(msg.contains("Cookies"));
+    }
+
+    #[test]
+    fn ordinary_error_is_unchanged() {
+        let raw = "ERROR: Unable to download webpage: HTTP Error 500";
+        assert_eq!(explain_error("https://x.com/i/status/9", raw), raw);
+    }
+
+    #[test]
+    fn unknown_host_falls_back_to_generic_site_label() {
+        let raw = "ERROR: Sign in to confirm you're not a bot";
+        let msg = explain_error("https://example.com/v/1", raw);
+        assert!(msg.contains("this site"));
+    }
 }

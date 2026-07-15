@@ -374,6 +374,7 @@ fn row_to_website(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Website> {
         enabled: row.try_get::<i64, _>("enabled")? != 0,
         max_height: row.try_get("max_height")?,
         no_download: row.try_get::<i64, _>("no_download")? != 0,
+        blur: row.try_get::<i64, _>("blur")? != 0,
         sort: row.try_get("sort")?,
         cookie: None,
     })
@@ -382,7 +383,7 @@ fn row_to_website(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Website> {
 /// All websites, in display order (then name).
 pub(super) async fn list_websites(db: &Db) -> anyhow::Result<Vec<Website>> {
     let rows = sqlx::query(
-        "SELECT key, name, hosts, login_url, enabled, max_height, no_download, sort \
+        "SELECT key, name, hosts, login_url, enabled, max_height, no_download, blur, sort \
          FROM websites ORDER BY sort, name",
     )
     .fetch_all(&db.pool)
@@ -394,12 +395,12 @@ pub(super) async fn list_websites(db: &Db) -> anyhow::Result<Vec<Website>> {
 pub(super) async fn upsert_website(db: &Db, w: &Website) -> anyhow::Result<()> {
     let hosts = crate::websites::hosts_to_csv(&w.hosts);
     sqlx::query(
-        "INSERT INTO websites (key, name, hosts, login_url, enabled, max_height, no_download, sort, created_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO websites (key, name, hosts, login_url, enabled, max_height, no_download, blur, sort, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(key) DO UPDATE SET \
            name = excluded.name, hosts = excluded.hosts, login_url = excluded.login_url, \
            enabled = excluded.enabled, max_height = excluded.max_height, \
-           no_download = excluded.no_download, sort = excluded.sort",
+           no_download = excluded.no_download, blur = excluded.blur, sort = excluded.sort",
     )
     .bind(&w.key)
     .bind(&w.name)
@@ -408,6 +409,7 @@ pub(super) async fn upsert_website(db: &Db, w: &Website) -> anyhow::Result<()> {
     .bind(w.enabled as i64)
     .bind(w.max_height)
     .bind(w.no_download as i64)
+    .bind(w.blur as i64)
     .bind(w.sort)
     .bind(now_unix())
     .execute(&db.pool)
@@ -418,7 +420,7 @@ pub(super) async fn upsert_website(db: &Db, w: &Website) -> anyhow::Result<()> {
 /// Fetch one website by key.
 pub(super) async fn get_website(db: &Db, key: &str) -> anyhow::Result<Option<Website>> {
     let row = sqlx::query(
-        "SELECT key, name, hosts, login_url, enabled, max_height, no_download, sort \
+        "SELECT key, name, hosts, login_url, enabled, max_height, no_download, blur, sort \
          FROM websites WHERE key = ?",
     )
     .bind(key)

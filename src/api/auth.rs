@@ -30,6 +30,24 @@ pub fn extract_token(headers: &HeaderMap, query: &str) -> Option<String> {
     None
 }
 
+/// Constant-time string equality for secret comparison. A naive `==` returns as
+/// soon as it hits a differing byte, leaking — through response timing — how much
+/// of a guessed token was correct, which an attacker can walk into a full match
+/// (and use to shrink a rainbow-table / brute-force search). This compares every
+/// byte regardless of where the first mismatch is. Token length is not secret, so
+/// a length mismatch may short-circuit.
+pub fn ct_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Minimal percent-decoding for the `?token=` query value.
 fn urldecode(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -72,7 +90,7 @@ pub async fn require_auth(
         return Err(AppError::Unauthorized);
     };
     // Owner token OR a trusted self-registered client passphrase.
-    if t == state.cfg.token {
+    if ct_eq(&t, &state.cfg.token) {
         return Ok(next.run(request).await);
     }
     match state.db.find_trusted_client_id(&t).await {

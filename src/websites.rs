@@ -76,6 +76,7 @@ mod tests {
             enabled: true,
             max_height: None,
             no_download: false,
+            blur: false,
             sort: 0,
             cookie: None,
         }

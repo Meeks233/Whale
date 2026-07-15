@@ -172,6 +172,10 @@ pub struct Website {
     /// Per-site stream-only default (no local downloads for this site).
     #[serde(default)]
     pub no_download: bool,
+    /// Per-site privacy blur: when set, this site's cards are blurred by default
+    /// in the history and revealed on hover (web) / tap (app).
+    #[serde(default)]
+    pub blur: bool,
     #[serde(default)]
     pub sort: i64,
     /// Computed (not stored): cookie presence/state for this site, merged in by
@@ -187,6 +191,10 @@ pub struct CookieStatus {
     pub enabled: bool,
     pub bytes: u64,
     pub updated_at: i64,
+    /// Earliest non-session cookie expiry (unix seconds), or `None` if the jar is
+    /// all session cookies. The UI reminds the user near/after this time.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
 }
 
 /// One downloaded resolution variant of an item (see `item_resolutions`).
