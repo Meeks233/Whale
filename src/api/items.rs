@@ -148,7 +148,14 @@ pub async fn submit(
         } else {
             StatusCode::ACCEPTED
         };
-        Ok((status, Json(SubmitResponse { item, duplicate })).into_response())
+        // Tag the item with its site's privacy-blur flag so the headless
+        // share-target notifications (ShareActivity) can mask a blurred site's
+        // real title. Additive field on the item object; harmless to other clients.
+        let blur = site.map(|w| w.blur).unwrap_or(false);
+        let mut v = serde_json::to_value(SubmitResponse { item, duplicate })
+            .unwrap_or_else(|_| json!({}));
+        v["item"]["blur"] = json!(blur);
+        Ok((status, Json(v)).into_response())
     } else {
         Ok((
             StatusCode::ACCEPTED,
@@ -188,10 +195,18 @@ pub async fn list(
     Ok(Json(json!({ "items": page.items, "next_cursor": page.next_cursor })).into_response())
 }
 
-/// GET /api/items/:id — one item.
+/// GET /api/items/:id — one item. Carries a computed `blur` flag (its site's
+/// privacy-blur setting) so the headless share-target notification poller
+/// (ShareActivity) can mask a blurred site's real title.
 pub async fn get(State(state): State<AppState>, Path(id): Path<i64>) -> AppResult<Response> {
     let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
-    Ok(Json(item).into_response())
+    let sites = state.db.list_websites().await.unwrap_or_default();
+    let blur = crate::websites::detect(&sites, &item.webpage_url)
+        .map(|w| w.blur)
+        .unwrap_or(false);
+    let mut v = serde_json::to_value(&item).unwrap_or_else(|_| json!({}));
+    v["blur"] = json!(blur);
+    Ok(Json(v).into_response())
 }
 
 /// POST /api/items/:id/retry — re-queue a failed item.

@@ -146,6 +146,7 @@ class ShareActivity : Activity() {
       var ok = false
       var itemId = -1
       var duplicate = false
+      var blur = false
       try {
         val conn = (URL("$base/api/items").openConnection() as HttpURLConnection).apply {
           requestMethod = "POST"
@@ -170,6 +171,9 @@ class ShareActivity : Activity() {
             itemId = item?.optInt("id", -1) ?: -1
             title = item?.optString("title")?.takeIf { it.isNotEmpty() } ?: "Link"
             duplicate = resp.optBoolean("duplicate")
+            // A privacy-blurred site's real title must never land in a persistent
+            // notification the user has to clear by hand — mask it with the id.
+            blur = item?.optBoolean("blur", false) ?: false
             if (duplicate) "Already downloaded" else "Download queued ✓"
           }
           code == 422 || resp.optString("error") == "probe_failed" ->
@@ -183,24 +187,39 @@ class ShareActivity : Activity() {
         body = "Can't reach the Whale server"
       }
       // Visible result over the sharing app: success/duplicate/error all surface
-      // as a Toast so the quick channel is never silent, plus the notification.
+      // as a Toast so the quick channel is never silent.
       toast(ctx, "Whale · $body")
       // One notification per item, keyed by a stable id so progress updates
-      // REPLACE it in place instead of stacking. Failure → tappable to reopen.
+      // REPLACE it in place instead of stacking (one slot per item, never two).
       val notifId = if (itemId >= 0) NOTIF_BASE + itemId else (System.currentTimeMillis() % 100000).toInt()
       val active = ok && !duplicate && itemId >= 0
-      postNotif(ctx, notifId, title, body, if (ok) null else url, ongoing = active, indeterminate = active)
-      // Best-effort: follow the cloud download and refresh the SAME notification
-      // silently (setOnlyAlertOnce → no repeated sound) until it finishes.
-      if (active) pollProgress(ctx, base, token, itemId, notifId, title)
+      if (active) {
+        // Deliberately NO "queued" notification here: the Toast above already
+        // acknowledged the queue, and echoing it into the persistent channel was
+        // the redundant buzz. The system notification first appears once the
+        // download is actually running and then updates that SAME notification
+        // through to completion (see pollProgress) — silent (onlyAlertOnce).
+        pollProgress(ctx, base, token, itemId, notifId, title, blur)
+      } else if (!ok) {
+        // A real failure still needs a tappable notification (the Toast is easy to
+        // miss) so the user can reopen the app and retry with the actual error.
+        postNotif(ctx, notifId, notifTitle(title, blur, itemId), body, url, ongoing = false, indeterminate = false)
+      }
+      // success + duplicate: Toast only — it's already downloaded, nothing to track.
     }
+
+    /** Notification title, masking a privacy-blurred site's real name (which would
+     *  otherwise sit in a persistent notification the user must clear by hand). */
+    private fun notifTitle(title: String, blur: Boolean, itemId: Int): String =
+      if (blur) (if (itemId >= 0) "Item #$itemId" else "Download") else title
 
     /** Poll the server for this item's status and update its notification in
      *  place until it finishes. Silent (no new sound) thanks to onlyAlertOnce.
      *  Bounded (~10 min) so a stuck download can't spin forever; best-effort —
      *  the process may be reclaimed while backgrounded, which is fine. */
-    private fun pollProgress(ctx: Context, base: String, token: String, itemId: Int, notifId: Int, titleIn: String) {
+    private fun pollProgress(ctx: Context, base: String, token: String, itemId: Int, notifId: Int, titleIn: String, blurIn: Boolean) {
       var title = titleIn
+      var blur = blurIn
       var tries = 0
       while (tries < 200) {
         tries++
@@ -218,15 +237,19 @@ class ShareActivity : Activity() {
           conn.disconnect()
           val item = JSONObject(txt)
           item.optString("title").takeIf { it.isNotEmpty() }?.let { title = it }
+          blur = item.optBoolean("blur", blur) // may flip if the site setting changed
+          val shown = notifTitle(title, blur, itemId)
           when (item.optString("status")) {
-            "completed" -> { postNotif(ctx, notifId, title, "Download complete ✓", null, ongoing = false, indeterminate = false); return }
+            "completed" -> { postNotif(ctx, notifId, shown, "Download complete ✓", null, ongoing = false, indeterminate = false); return }
             "failed" -> {
               val msg = item.optString("error").ifEmpty { "Download failed" }
-              postNotif(ctx, notifId, title, msg, null, ongoing = false, indeterminate = false)
+              postNotif(ctx, notifId, shown, msg, null, ongoing = false, indeterminate = false)
               return
             }
-            "running" -> postNotif(ctx, notifId, title, "Downloading…", null, ongoing = true, indeterminate = true)
-            "queued" -> postNotif(ctx, notifId, title, "Queued…", null, ongoing = true, indeterminate = true)
+            "running" -> postNotif(ctx, notifId, shown, "Downloading…", null, ongoing = true, indeterminate = true)
+            // Still queued: keep polling but post NOTHING — the Toast already
+            // acknowledged the queue; a persistent "Queued…" here was the redundant buzz.
+            "queued" -> { /* no notification while queued */ }
             else -> return // deleted/unknown — stop quietly
           }
         } catch (e: Exception) {

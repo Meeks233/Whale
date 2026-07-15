@@ -1095,17 +1095,21 @@ body.player-open { overflow: hidden; }
 .site-name { font-weight: 600; font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-domains-list { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Enable/disable pill switch. */
-.site-toggle {
+/* Enable/disable + privacy-blur pill switches (one shared switch style). */
+.site-toggle,
+.site-blur-toggle {
   position: relative; width: 40px; height: 22px; border-radius: 999px; flex-shrink: 0; margin-top: 1px;
   border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; padding: 0;
 }
-.site-toggle .knob {
+.site-toggle .knob,
+.site-blur-toggle .knob {
   position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
   background: var(--muted); transition: left .15s, background .15s;
 }
-.site-toggle.on { background: color-mix(in oklab, var(--accent) 30%, var(--surface-2)); border-color: var(--accent); }
-.site-toggle.on .knob { left: 20px; background: var(--accent); }
+.site-toggle.on,
+.site-blur-toggle.on { background: color-mix(in oklab, var(--accent) 30%, var(--surface-2)); border-color: var(--accent); }
+.site-toggle.on .knob,
+.site-blur-toggle.on .knob { left: 20px; background: var(--accent); }
 
 /* Overflow (kebab) menu: collapses the rarely-used per-site actions. */
 .site-menu-wrap { position: relative; flex-shrink: 0; }
@@ -1126,30 +1130,26 @@ body.player-open { overflow: hidden; }
 }
 .site-menu-item:hover { background: var(--surface); }
 .site-menu-item.danger { color: var(--err); }
-/* Checkbox-style menu row (blur toggle): a leading check that fills in when on. */
-.site-menu-check { display: flex; align-items: center; gap: 8px; }
-.site-menu-check::before {
-  content: ""; flex-shrink: 0; width: 15px; height: 15px; border-radius: 4px;
-  border: 1.5px solid var(--border); background: var(--surface);
-}
-.site-menu-check.on::before {
-  border-color: var(--accent); background: var(--accent);
-  /* white check mark */
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 6 9 17l-5-5'/%3E%3C/svg%3E");
-  background-repeat: no-repeat; background-position: center;
-}
 
-/* Controls row: the max-resolution dropdown + the cookie action button. */
-.site-controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.site-res-field { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+/* Controls row: max-resolution dropdown · cookie status · cookie action button.
+   The cookie status chip rides here (next to Replace/Paste) rather than in the
+   title row, so a long "Cookie Active · N KB" never squeezes the site name. */
+.site-controls { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; }
+.site-res-field { display: flex; align-items: center; gap: 8px; flex: 1 1 180px; min-width: 0; }
 .site-res-label { font-size: 12px; color: var(--muted); flex-shrink: 0; }
 .site-res-select { flex: 1 1 auto; min-width: 0; }
+.site-controls .ck-status { flex-shrink: 0; }
 .site-cookie-btn {
   flex-shrink: 0; font-size: 13px; padding: 8px 14px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer;
 }
 .site-cookie-btn:hover { border-color: var(--accent); }
 .site-cookie-btn.has { border-style: dashed; }
+
+/* Privacy-blur row: label on the left, pill switch on the right (iOS-settings
+   pattern), sitting directly under the max-resolution control. */
+.site-privacy { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.site-privacy-label { font-size: 13px; color: var(--muted); }
 
 /* Selection mode: whole card is the tap target; inner controls stand down. */
 .sites-selecting .website-card { cursor: pointer; }

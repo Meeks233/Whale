@@ -179,24 +179,57 @@ fn bool_flag(b: bool) -> &'static str {
     }
 }
 
-/// Earliest non-session cookie expiry (unix seconds) in a Netscape jar, or `None`
-/// if every cookie is a session cookie (expiry `0`) or nothing parses. The 5th
-/// tab field (index 4) is the expiry epoch.
+/// Cookie names (case-insensitive) that actually gate a logged-in session across
+/// the platforms Whale targets. The expiry warning keys off these: a jar's
+/// throwaway CSRF/tracking cookies are short-lived by design and must NOT make a
+/// still-valid login read as "expired" — the false positive users hit on X, whose
+/// long-lived `auth_token` outlives its `ct0` / `guest_id` companions.
+fn is_auth_cookie(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    // Substring signals covering the common auth/session cookie families…
+    const NEEDLES: [&str; 6] = ["auth", "session", "sess", "login", "secure-", "sapisid"];
+    if NEEDLES.iter().any(|s| n.contains(s)) {
+        return true;
+    }
+    // …plus exact names that carry none of the above substrings (Google/X/LinkedIn).
+    const EXACT: [&str; 6] = ["sid", "hsid", "ssid", "apisid", "twid", "li_at"];
+    EXACT.contains(&n.as_str())
+}
+
+/// Cookie-jar expiry (unix seconds) that drives the UI's "expiring/expired"
+/// reminder, or `None` when nothing persistent parses. Cautious by design to
+/// avoid false positives: we report the earliest expiry **among the auth cookies**
+/// (the login depends on all of those), since a short-lived tracker expiring is
+/// harmless. If the jar exposes no recognizable auth cookie, we fall back to the
+/// LATEST persistent expiry — the jar's most durable cookie — so a stray
+/// short-lived cookie can never trip a false "expired" warning. Session cookies
+/// (expiry `0`) are ignored throughout. The 5th tab field (index 4) is the expiry
+/// epoch; the 6th (index 5) is the cookie name.
 fn earliest_expiry(contents: &str) -> Option<i64> {
-    contents
-        .lines()
-        .filter_map(|l| {
-            let l = l.trim();
-            if l.is_empty() || l.starts_with('#') {
-                return None;
-            }
-            let fields: Vec<&str> = l.split('\t').collect();
-            if fields.len() < 7 {
-                return None;
-            }
-            fields[4].trim().parse::<i64>().ok().filter(|e| *e > 0)
-        })
-        .min()
+    let mut auth: Vec<i64> = Vec::new();
+    let mut all: Vec<i64> = Vec::new();
+    for l in contents.lines() {
+        let l = l.trim();
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = l.split('\t').collect();
+        if fields.len() < 7 {
+            continue;
+        }
+        let Some(exp) = fields[4].trim().parse::<i64>().ok().filter(|e| *e > 0) else {
+            continue;
+        };
+        all.push(exp);
+        if is_auth_cookie(fields[5]) {
+            auth.push(exp);
+        }
+    }
+    if !auth.is_empty() {
+        auth.into_iter().min()
+    } else {
+        all.into_iter().max()
+    }
 }
 
 /// Detect the paste format and normalize to a yt-dlp Netscape `cookies.txt`.
@@ -441,11 +474,18 @@ mod tests {
     }
 
     #[test]
-    fn earliest_expiry_picks_min_nonzero() {
-        let body = ".a.com\tTRUE\t/\tFALSE\t2000000000\tA\t1\n\
-                    .a.com\tTRUE\t/\tFALSE\t0\tSESS\t2\n\
-                    .a.com\tTRUE\t/\tFALSE\t1900000000\tB\t3";
-        assert_eq!(earliest_expiry(body), Some(1900000000));
+    fn expiry_keys_off_auth_cookie_not_short_trackers() {
+        // X-shaped jar: the long-lived auth_token drives the warning; the
+        // shorter-lived ct0 (a CSRF token, not auth) must NOT trip a false expiry.
+        let x = ".x.com\tTRUE\t/\tFALSE\t2000000000\tauth_token\t1\n\
+                 .x.com\tTRUE\t/\tFALSE\t1000000000\tct0\t2\n\
+                 .x.com\tTRUE\t/\tFALSE\t0\tSESS\t3";
+        assert_eq!(earliest_expiry(x), Some(2000000000));
+        // No recognizable auth cookie → fall back to the most durable (max) expiry,
+        // never the short-lived tracker (avoids the false-positive "expired").
+        let trackers = ".a.com\tTRUE\t/\tFALSE\t1000000000\tguest_id\t1\n\
+                        .a.com\tTRUE\t/\tFALSE\t2000000000\tpersonalization_id\t2";
+        assert_eq!(earliest_expiry(trackers), Some(2000000000));
         // All-session jar → no expiry.
         assert_eq!(earliest_expiry(".a.com\tTRUE\t/\tFALSE\t0\tSESS\t2"), None);
     }

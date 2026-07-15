@@ -51,6 +51,8 @@ Behavior: probe → dedup → enqueue (see ARCHITECTURE §3).
 ```
 - If already known: `200 OK`, same shape, `"duplicate": true`, `item` = the existing record
   (no new download). A queued/running in-flight item also returns `duplicate:true`.
+- `item.blur` (bool): the source site's privacy-blur setting, so headless clients
+  (the Android share-target notifier) can mask a blurred site's real title.
 - Probe failure: `422 {"error":"probe_failed","message":"<yt-dlp stderr summary>"}`.
 - **Playlists**: a playlist URL yields multiple `ProbeResult`s. Response is
   `202` with `{ "items": [Item, …], "duplicates": <n> }` (array form). Clients should accept
@@ -72,7 +74,8 @@ Query params:
 `next_cursor` is `null` when the last page was reached.
 
 ### `GET /api/items/:id` — one item
-`200` → `Item`, or `404`.
+`200` → `Item` (plus an additive `blur` bool — the source site's privacy-blur
+setting, used by the share-target notification poller to mask blurred titles), or `404`.
 
 ### `POST /api/items/:id/retry` — re-queue a failed item
 Only valid when `status = failed`. Resets to `queued` and enqueues. `200` → `Item`.

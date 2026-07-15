@@ -1168,9 +1168,6 @@ function siteMenuHtml(w: Website): string {
     items.push(`<a class="site-menu-item" href="${esc(w.login_url)}" target="_blank" rel="noopener">${esc(t('cookie.login'))}</a>`);
   items.push(`<button class="site-menu-item" data-act="edit">${esc(t('sites.editDomains'))}</button>`);
   items.push(`<button class="site-menu-item" data-act="validate">${esc(t('sites.validate'))}</button>`);
-  // Privacy blur toggle: a check-marked menu item (industry-standard toggle row)
-  // so it reads as an on/off setting, not a one-shot action.
-  items.push(`<button class="site-menu-item site-menu-check${w.blur ? ' on' : ''}" data-act="blur" role="menuitemcheckbox" aria-checked="${w.blur}">${esc(t('sites.blur'))}</button>`);
   if (present) {
     items.push(`<button class="site-menu-item" data-act="ck-toggle" data-enabled="${w.cookie!.enabled ? 'false' : 'true'}">${esc(w.cookie!.enabled ? t('cookie.disable') : t('cookie.enable'))}</button>`);
     items.push(`<button class="site-menu-item danger" data-act="ck-delete">${esc(t('cookie.delete'))}</button>`);
@@ -1190,7 +1187,6 @@ function websiteCardHtml(w: Website): string {
       <div class="site-info">
         <div class="site-titlerow">
           <span class="site-name">${esc(w.name)}</span>
-          ${cookieChipHtml(w)}
         </div>
         <div class="site-domains-list">${esc(w.hosts.join(', ') || '—')}</div>
       </div>
@@ -1201,7 +1197,12 @@ function websiteCardHtml(w: Website): string {
         <span class="site-res-label">${esc(t('sites.maxRes'))}</span>
         ${siteResSelectHtml(w)}
       </label>
+      ${cookieChipHtml(w)}
       <button class="site-cookie-btn${present ? ' has' : ''}" data-act="ck-import">${esc(present ? t('cookie.replace') : t('cookie.paste'))}</button>
+    </div>
+    <div class="site-privacy">
+      <span class="site-privacy-label">${esc(t('sites.blur'))}</span>
+      <button class="site-blur-toggle ${w.blur ? 'on' : 'off'}" data-act="blur" role="switch" aria-checked="${w.blur}" title="${esc(t('sites.blur'))}"><span class="knob"></span></button>
     </div>
     <textarea class="ck-paste hidden" placeholder="${esc(t('ph.cookiePaste'))}" rows="4"></textarea>
     <div class="ck-paste-actions hidden">
@@ -2052,6 +2053,33 @@ const loaderObserver = new IntersectionObserver((entries) => {
 }, { rootMargin: '300px' });
 loaderObserver.observe(els.loader);
 
+// Native "tap-to-peek" for privacy-blurred cards. Industry spoiler pattern:
+// a tap reveals briefly, but re-blurs the instant the user's attention moves on
+// (a tap anywhere outside the card, a scroll) — and after a short fallback timeout
+// — rather than lingering revealed. Only one card peeks at a time.
+let revealedPeek: { el: HTMLElement; timer: number } | null = null;
+function reblurNow(): void {
+  if (!revealedPeek) return;
+  clearTimeout(revealedPeek.timer);
+  revealedPeek.el.classList.remove('revealed');
+  revealedPeek = null;
+  document.removeEventListener('pointerdown', onOutsidePeek, true);
+  window.removeEventListener('scroll', reblurNow, true);
+}
+function onOutsidePeek(e: Event): void {
+  if (revealedPeek && !revealedPeek.el.contains(e.target as Node)) reblurNow();
+}
+function revealBlurred(el: HTMLElement): void {
+  reblurNow(); // collapse any prior peek first
+  el.classList.add('revealed');
+  const timer = window.setTimeout(reblurNow, 2500); // short fallback auto-hide
+  revealedPeek = { el, timer };
+  // The reveal fired on `click`, so this next-pointerdown listener only catches
+  // the FOLLOWING interaction — a tap elsewhere (or a scroll) re-blurs at once.
+  document.addEventListener('pointerdown', onOutsidePeek, true);
+  window.addEventListener('scroll', reblurNow, true);
+}
+
 // Delegated actions on cards: in select mode a tap toggles the row; otherwise
 // thumbnail play / share dialog as before.
 els.history.addEventListener('click', (e) => {
@@ -2072,8 +2100,7 @@ els.history.addEventListener('click', (e) => {
     const bl = target.closest('.item.blurred:not(.revealed)') as HTMLElement | null;
     if (bl) {
       e.preventDefault();
-      bl.classList.add('revealed');
-      setTimeout(() => bl.classList.remove('revealed'), 6000); // "temporary" peek
+      revealBlurred(bl);
       return;
     }
   }
@@ -2726,8 +2753,13 @@ function notifyProgress(ev: ProgressEv): void {
   const N = window.__TAURI__ && window.__TAURI__.notification;
   if (!N || !notif.granted) return;
   const li = state.rows.get(ev.id);
+  // Privacy blur: a blurred site's real title must not leak into a persistent
+  // (ongoing) notification the user has to clear by hand — use the opaque item id.
+  const item = state.items.get(ev.id);
   const titleEl = li && li.querySelector('.title');
-  const title = (titleEl && titleEl.textContent) || ('Item #' + ev.id);
+  const title = (item && isItemBlurred(item))
+    ? ('Item #' + ev.id)
+    : ((titleEl && titleEl.textContent) || ('Item #' + ev.id));
   try {
     if (ev.status === 'completed') {
       N.sendNotification({ id: ev.id, icon: 'ic_notification', title, body: '✓ Download complete', ongoing: false, autoCancel: true });
