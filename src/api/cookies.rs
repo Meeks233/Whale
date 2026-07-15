@@ -1,6 +1,6 @@
 //! Cookie management handlers: list platforms + set/toggle/delete per-platform
 //! cookies. All routes require the bearer token (wired in `api::router`).
-//! See docs/COOKIES.md.
+//! See docs/USER_GUIDE.md.
 
 use super::AppState;
 use crate::error::{AppError, AppResult};
@@ -76,10 +76,7 @@ pub async fn toggle(
 }
 
 /// DELETE /api/cookies/:platform — remove stored cookies for a platform.
-pub async fn delete(
-    State(state): State<AppState>,
-    Path(key): Path<String>,
-) -> AppResult<Response> {
+pub async fn delete(State(state): State<AppState>, Path(key): Path<String>) -> AppResult<Response> {
     let p = known_platform(&key)?;
     state
         .cookies

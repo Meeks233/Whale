@@ -68,7 +68,11 @@ pub async fn run_import(
             // Synthetic key so the record still stores + shows in history (won't dedup variants).
             rec.video_id = Some(format!("url:{}", normalize_url(&rec.url)));
         }
-        let archive_key = format!("{} {}", rec.extractor, rec.video_id.as_deref().unwrap_or(""));
+        let archive_key = format!(
+            "{} {}",
+            rec.extractor,
+            rec.video_id.as_deref().unwrap_or("")
+        );
 
         let outcome = db.upsert_import(rec).await?;
         agg.imported += outcome.imported;
@@ -195,9 +199,7 @@ fn normalize_url(url: &str) -> String {
 fn segment_after<'a>(s: &'a str, marker: &str) -> Option<&'a str> {
     let idx = s.find(marker)?;
     let rest = &s[idx + marker.len()..];
-    let end = rest
-        .find(['/', '?', '&', '#'])
-        .unwrap_or(rest.len());
+    let end = rest.find(['/', '?', '&', '#']).unwrap_or(rest.len());
     let tok = &rest[..end];
     (!tok.is_empty()).then_some(tok)
 }

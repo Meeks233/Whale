@@ -26,7 +26,9 @@ const TRACKING: &[&str] = &[
 /// can't be parsed as `scheme://host…`.
 pub fn normalize(url: &str) -> String {
     // Drop trailing punctuation that often clings to a shared/pasted link.
-    let trimmed = url.trim().trim_end_matches(&['.', ',', ';', '!', ']', ')'][..]);
+    let trimmed = url
+        .trim()
+        .trim_end_matches(&['.', ',', ';', '!', ']', ')'][..]);
     let Some(parts) = split(trimmed) else {
         return trimmed.to_string();
     };
@@ -60,7 +62,10 @@ impl Parts {
         self.path.split('/').filter(|s| !s.is_empty()).collect()
     }
     fn query_get(&self, key: &str) -> Option<&str> {
-        self.query.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+        self.query
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -77,7 +82,10 @@ fn split(url: &str) -> Option<Parts> {
     let after = &rest[auth_end..];
 
     // host = authority without userinfo and port.
-    let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
     if host.is_empty() {
         return None;
@@ -116,14 +124,23 @@ fn strip_query(p: &Parts) -> String {
 /// Keep everything but the known tracking params. Drops the `?` when nothing
 /// meaningful remains.
 fn strip_tracking(p: &Parts) -> String {
-    let kept: Vec<&(String, String)> =
-        p.query.iter().filter(|(k, _)| !TRACKING.contains(&k.as_str())).collect();
+    let kept: Vec<&(String, String)> = p
+        .query
+        .iter()
+        .filter(|(k, _)| !TRACKING.contains(&k.as_str()))
+        .collect();
     if kept.is_empty() {
         return strip_query(p);
     }
     let q = kept
         .iter()
-        .map(|(k, v)| if v.is_empty() { k.clone() } else { format!("{k}={v}") })
+        .map(|(k, v)| {
+            if v.is_empty() {
+                k.clone()
+            } else {
+                format!("{k}={v}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("&");
     format!("{}://{}{}?{}", p.scheme, p.host, p.path, q)
@@ -180,20 +197,38 @@ mod tests {
 
     #[test]
     fn youtube_short_and_shorts_and_watch() {
-        assert_eq!(normalize("https://youtu.be/dQw4w9WgXcQ?si=abc"), "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
-        assert_eq!(normalize("https://www.youtube.com/shorts/aqz-KE-bpKQ"), "https://www.youtube.com/watch?v=aqz-KE-bpKQ");
+        assert_eq!(
+            normalize("https://youtu.be/dQw4w9WgXcQ?si=abc"),
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        );
+        assert_eq!(
+            normalize("https://www.youtube.com/shorts/aqz-KE-bpKQ"),
+            "https://www.youtube.com/watch?v=aqz-KE-bpKQ"
+        );
         assert_eq!(
             normalize("https://m.youtube.com/watch?v=9bZkp7q19f0&feature=share&t=10"),
             "https://www.youtube.com/watch?v=9bZkp7q19f0"
         );
-        assert_eq!(normalize("https://www.youtube.com/embed/abc123"), "https://www.youtube.com/watch?v=abc123");
+        assert_eq!(
+            normalize("https://www.youtube.com/embed/abc123"),
+            "https://www.youtube.com/watch?v=abc123"
+        );
     }
 
     #[test]
     fn twitter_and_x_status() {
-        assert_eq!(normalize("https://x.com/user/status/123?s=20"), "https://twitter.com/i/status/123");
-        assert_eq!(normalize("https://twitter.com/user/status/123"), "https://twitter.com/i/status/123");
-        assert_eq!(normalize("https://mobile.twitter.com/foo/status/9/photo/1"), "https://twitter.com/i/status/9");
+        assert_eq!(
+            normalize("https://x.com/user/status/123?s=20"),
+            "https://twitter.com/i/status/123"
+        );
+        assert_eq!(
+            normalize("https://twitter.com/user/status/123"),
+            "https://twitter.com/i/status/123"
+        );
+        assert_eq!(
+            normalize("https://mobile.twitter.com/foo/status/9/photo/1"),
+            "https://twitter.com/i/status/9"
+        );
     }
 
     #[test]
@@ -219,9 +254,15 @@ mod tests {
             "https://example.com/watch?id=5"
         );
         // Nothing but tracking → query dropped.
-        assert_eq!(normalize("https://example.com/v?utm_medium=a"), "https://example.com/v");
+        assert_eq!(
+            normalize("https://example.com/v?utm_medium=a"),
+            "https://example.com/v"
+        );
         // No query, unknown host → untouched (but trailing punctuation stripped).
-        assert_eq!(normalize("https://example.com/video/1)."), "https://example.com/video/1");
+        assert_eq!(
+            normalize("https://example.com/video/1)."),
+            "https://example.com/video/1"
+        );
     }
 
     #[test]

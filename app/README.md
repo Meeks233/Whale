@@ -4,7 +4,8 @@ A native Android/desktop shell that **reuses the exact `web/` UI** the Whale ser
 serves — one frontend codebase for browser, PWA, and app. The shell adds only:
 
 - **Server URL** setting (`whale_api_base`) so the same UI talks to a remote Whale
-  server cross-origin (server sends permissive CORS; auth is a bearer token).
+  server cross-origin. Authenticated JSON traffic uses token-derived AES-GCM;
+  media streams retain bearer/query authentication.
 - **Android share sheet** integration: shared URLs are submitted to the server.
 
 There is no separate app UI to maintain — edit `web/`, and both the browser and the app get it.
@@ -13,7 +14,7 @@ There is no separate app UI to maintain — edit `web/`, and both the browser an
 
 | Tool | Version used | Notes |
 |---|---|---|
-| Rust + `rustup` | 1.96 | targets: `aarch64/armv7/i686/x86_64-linux-android` |
+| Rust + `rustup` | 1.97 | targets: `aarch64/armv7/i686/x86_64-linux-android` |
 | `cargo-tauri` | 2.x | `cargo install tauri-cli --version "^2.0.0" --locked` |
 | Android SDK | platform-tools, `platforms;android-34/35/36`, `build-tools;35.0.0` | via `sdkmanager` |
 | Android NDK | `27.2.12479018` (r27c) | `sdkmanager "ndk;27.2.12479018"` |

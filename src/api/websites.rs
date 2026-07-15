@@ -63,7 +63,10 @@ pub async fn upsert(
     };
     let w = Website {
         key: key.clone(),
-        name: body.name.filter(|s| !s.trim().is_empty()).unwrap_or(base.name),
+        name: body
+            .name
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(base.name),
         hosts,
         login_url: body.login_url.unwrap_or(base.login_url),
         enabled: body.enabled.unwrap_or(base.enabled),
@@ -132,7 +135,10 @@ pub async fn toggle_cookies(
     if !state.cookies.status(&key).present {
         return Err(AppError::NotFound);
     }
-    state.cookies.set_enabled(&key, body.enabled).map_err(internal)?;
+    state
+        .cookies
+        .set_enabled(&key, body.enabled)
+        .map_err(internal)?;
     Ok(Json(json!({ "key": key, "cookie": cookie_status(&state, &key) })).into_response())
 }
 
@@ -209,9 +215,14 @@ pub async fn validate(
     Json(body): Json<ValidateBody>,
 ) -> AppResult<Response> {
     let url = crate::url_normalize::normalize(&body.url);
-    if crate::net_guard::guard(&url).is_err() {
-        return Ok(Json(json!({ "ok": false, "error": "URL is not allowed (blocked host/scheme)" }))
-            .into_response());
+    if crate::net_guard::guard(&url, state.cfg.allow_private_dns)
+        .await
+        .is_err()
+    {
+        return Ok(Json(
+            json!({ "ok": false, "error": "URL is not allowed (blocked host/scheme)" }),
+        )
+        .into_response());
     }
     let cookie = crate::cookies::resolve(&state.cookies, state.cfg.cookies.as_deref(), &url);
     match crate::ytdlp::probe(&state.cfg, &url, cookie.as_deref()).await {
@@ -225,7 +236,9 @@ pub async fn validate(
             }))
             .into_response())
         }
-        Ok(_) => Ok(Json(json!({ "ok": false, "error": "no media found at that URL" })).into_response()),
+        Ok(_) => {
+            Ok(Json(json!({ "ok": false, "error": "no media found at that URL" })).into_response())
+        }
         Err(e) => {
             let msg = crate::ytdlp::explain_error(&url, &e.to_string());
             Ok(Json(json!({ "ok": false, "error": msg })).into_response())
@@ -239,7 +252,11 @@ pub async fn validate(
 /// Guards against path traversal since the key becomes a cookie filename stem.
 fn safe_key(key: &str) -> Result<String, AppError> {
     let k = key.trim().to_ascii_lowercase();
-    if !k.is_empty() && k.len() <= 40 && k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+    if !k.is_empty()
+        && k.len() <= 40
+        && k.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
         Ok(k)
     } else {
         Err(AppError::BadRequest(format!("invalid website key '{key}'")))
@@ -304,5 +321,8 @@ fn folder_name(name: &str, key: &str) -> String {
         return "Other".to_string();
     }
     let mut chars = cleaned.chars();
-    chars.next().map(|f| f.to_ascii_uppercase().to_string() + chars.as_str()).unwrap_or_else(|| "Other".to_string())
+    chars
+        .next()
+        .map(|f| f.to_ascii_uppercase().to_string() + chars.as_str())
+        .unwrap_or_else(|| "Other".to_string())
 }

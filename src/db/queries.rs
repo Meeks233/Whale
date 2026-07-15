@@ -28,6 +28,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
 
     Ok(Item {
         id: row.try_get("id")?,
+        slug: row.try_get("resource_slug")?,
         extractor: row.try_get("extractor")?,
         video_id: row.try_get("video_id")?,
         archive_key: row.try_get("archive_key")?,
@@ -45,7 +46,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         created_at: row.try_get("created_at")?,
         completed_at: row.try_get("completed_at")?,
         public: row.try_get::<i64, _>("public")? != 0,
-        public_slug: row.try_get("public_slug")?,
+        public_slug: row.try_get("share_slug")?,
         public_until: row.try_get("public_until")?,
         public_hits: row.try_get("public_hits")?,
         playlist_index: row.try_get("playlist_index")?,
@@ -64,21 +65,21 @@ fn filepath_exists(filepath: &Option<String>) -> bool {
         .unwrap_or(false)
 }
 
-const SELECT_COLS: &str = "id, extractor, video_id, archive_key, title, uploader, \
+const SELECT_COLS: &str =
+    "id, public_slug AS resource_slug, extractor, video_id, archive_key, title, uploader, \
     webpage_url, thumbnail_url, duration, filepath, filesize, height, source_max_height, source, \
-    status, error, created_at, completed_at, public, public_slug, public_until, public_hits, \
+    status, error, created_at, completed_at, public, share_slug, public_until, public_hits, \
     playlist_index, \
     COALESCE((SELECT SUM(filesize) FROM item_resolutions WHERE item_id = items.id), filesize, 0) \
       AS total_filesize";
 
-/// Generate a 24-char (96-bit) hex slug from OS randomness — unguessable, so
-/// public links can't be derived from the sequential item id.
+/// Generate a 32-char (128-bit) hex slug from OS randomness.
 fn random_slug() -> anyhow::Result<String> {
     use std::io::Read;
-    let mut bytes = [0u8; 12];
+    let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")
         .and_then(|mut f| f.read_exact(&mut bytes))
-        .map_err(|e| anyhow::anyhow!("cannot read randomness for public slug: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("cannot read randomness for item slug: {e}"))?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
@@ -102,8 +103,8 @@ pub(super) async fn insert_probe(db: &Db, p: &ProbeResult, source: Source) -> an
     // empty string ("probed, none reported"); distinguishes from NULL (never probed).
     let heights_csv = heights_to_csv(&p.available_heights);
 
-    // Assign the unguessable slug up front so owner media URLs can be keyed by it
-    // (never by the enumerable sequential id). Sharing later reuses this same slug.
+    // Assign the unguessable private resource slug up front. Public sharing uses
+    // a separate rotating capability (`share_slug`).
     let slug = random_slug()?;
 
     let result = sqlx::query(
@@ -184,7 +185,11 @@ pub(super) async fn set_completed(
 
 /// Serialize a height list to the stored CSV form ("1080,720,360").
 fn heights_to_csv(heights: &[i64]) -> String {
-    heights.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(",")
+    heights
+        .iter()
+        .map(|h| h.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Parse the stored CSV back into a height list, dropping any non-numeric junk.
@@ -202,7 +207,9 @@ pub(super) async fn get_available_heights(db: &Db, id: i64) -> anyhow::Result<Op
         .bind(id)
         .fetch_optional(&db.pool)
         .await?;
-    Ok(row.and_then(|r| r.get::<Option<String>, _>("available_heights")).map(|csv| heights_from_csv(&csv)))
+    Ok(row
+        .and_then(|r| r.get::<Option<String>, _>("available_heights"))
+        .map(|csv| heights_from_csv(&csv)))
 }
 
 /// Cache the source's available heights (CSV) discovered by a (re-)probe.
@@ -221,15 +228,11 @@ pub(super) async fn set_available_heights(db: &Db, id: i64, heights: &[i64]) -> 
 /// against nulling the primary out — see the EXISTS clause).
 pub(super) async fn repoint_primary(db: &Db, id: i64) -> anyhow::Result<()> {
     sqlx::query(
-        "UPDATE items SET \
-           filepath = (SELECT filepath FROM item_resolutions WHERE item_id = ? ORDER BY height DESC LIMIT 1), \
-           filesize = (SELECT filesize FROM item_resolutions WHERE item_id = ? ORDER BY height DESC LIMIT 1), \
-           height   = (SELECT height   FROM item_resolutions WHERE item_id = ? ORDER BY height DESC LIMIT 1) \
-         WHERE id = ? AND EXISTS (SELECT 1 FROM item_resolutions WHERE item_id = ?)",
+        "UPDATE items SET filepath = best.filepath, filesize = best.filesize, height = best.height \
+         FROM (SELECT filepath, filesize, height FROM item_resolutions \
+               WHERE item_id = ? ORDER BY height DESC LIMIT 1) AS best \
+         WHERE items.id = ?",
     )
-    .bind(id)
-    .bind(id)
-    .bind(id)
     .bind(id)
     .bind(id)
     .execute(&db.pool)
@@ -315,19 +318,16 @@ pub(super) async fn delete_resolution(
     item_id: i64,
     height: i64,
 ) -> anyhow::Result<Option<String>> {
-    let row = sqlx::query("SELECT filepath FROM item_resolutions WHERE item_id = ? AND height = ?")
-        .bind(item_id)
-        .bind(height)
-        .fetch_optional(&db.pool)
-        .await?;
-    let Some(row) = row else { return Ok(None) };
-    let filepath: String = row.try_get("filepath")?;
-    sqlx::query("DELETE FROM item_resolutions WHERE item_id = ? AND height = ?")
-        .bind(item_id)
-        .bind(height)
-        .execute(&db.pool)
-        .await?;
-    Ok(Some(filepath))
+    let row = sqlx::query(
+        "DELETE FROM item_resolutions WHERE item_id = ? AND height = ? RETURNING filepath",
+    )
+    .bind(item_id)
+    .bind(height)
+    .fetch_optional(&db.pool)
+    .await?;
+    row.map(|r| r.try_get("filepath"))
+        .transpose()
+        .map_err(Into::into)
 }
 
 /// Read a settings value by key (`None` if unset).
@@ -440,12 +440,14 @@ pub(super) async fn rewrite_filepaths(db: &Db, from: &str, to: &str) -> anyhow::
         .bind(format!("%{from}%"))
         .execute(&db.pool)
         .await?;
-    sqlx::query("UPDATE item_resolutions SET filepath = REPLACE(filepath, ?, ?) WHERE filepath LIKE ?")
-        .bind(from)
-        .bind(to)
-        .bind(format!("%{from}%"))
-        .execute(&db.pool)
-        .await?;
+    sqlx::query(
+        "UPDATE item_resolutions SET filepath = REPLACE(filepath, ?, ?) WHERE filepath LIKE ?",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(format!("%{from}%"))
+    .execute(&db.pool)
+    .await?;
     Ok(())
 }
 
@@ -461,19 +463,15 @@ pub(super) async fn delete_website(db: &Db, key: &str) -> anyhow::Result<bool> {
 /// Aggregate download stats: `(count, total_bytes)` over items that have a
 /// recorded filesize (i.e. actually-downloaded records).
 pub(super) async fn download_stats(db: &Db) -> anyhow::Result<(i64, i64)> {
-    let row = sqlx::query(
-        "SELECT COUNT(filesize) AS n, COALESCE(SUM(filesize), 0) AS bytes FROM items",
-    )
-    .fetch_one(&db.pool)
-    .await?;
+    let row =
+        sqlx::query("SELECT COUNT(filesize) AS n, COALESCE(SUM(filesize), 0) AS bytes FROM items")
+            .fetch_one(&db.pool)
+            .await?;
     Ok((row.try_get("n")?, row.try_get("bytes")?))
 }
 
-/// Flip an item's public flag. `until` is the Unix timestamp when the share
-/// should auto-expire (`None` = permanent); it's only meaningful when `public`
-/// is true. Going private clears the expiry and zeroes the access tally (the
-/// hit count is scoped to the current share window, not cumulative) but keeps
-/// the slug stable so a later re-share resolves to the same link.
+/// Flip an item's public flag. Every enable rotates the public capability; revoke
+/// clears it so a previously copied URL can never become live again.
 pub(super) async fn set_public(
     db: &Db,
     id: i64,
@@ -481,9 +479,8 @@ pub(super) async fn set_public(
     until: Option<i64>,
 ) -> anyhow::Result<()> {
     if public {
-        // Assign a slug the first time; keep it stable on re-share (COALESCE).
         sqlx::query(
-            "UPDATE items SET public = 1, public_slug = COALESCE(public_slug, ?), \
+            "UPDATE items SET public = 1, share_slug = ?, \
              public_until = ? WHERE id = ?",
         )
         .bind(random_slug()?)
@@ -493,7 +490,8 @@ pub(super) async fn set_public(
         .await?;
     } else {
         sqlx::query(
-            "UPDATE items SET public = 0, public_until = NULL, public_hits = 0 WHERE id = ?",
+            "UPDATE items SET public = 0, share_slug = NULL, public_until = NULL, \
+             public_hits = 0 WHERE id = ?",
         )
         .bind(id)
         .execute(&db.pool)
@@ -514,12 +512,12 @@ pub(super) async fn bump_public_hits(db: &Db, id: i64) -> anyhow::Result<()> {
 
 /// Disaster-recovery sweep: flip lapsed shares back to private so an expired
 /// link 404s even if it's never accessed. Returns the number of shares expired.
-/// Run at startup and on a periodic timer; the slug is preserved for re-share.
+/// Run at startup and on a periodic timer; expired capabilities are discarded.
 /// Zeroes the access tally like an explicit unshare — the count is scoped to the
 /// live share window, so an expired share drops its capsule.
 pub(super) async fn expire_public_shares(db: &Db) -> anyhow::Result<u64> {
     let res = sqlx::query(
-        "UPDATE items SET public = 0, public_until = NULL, public_hits = 0 \
+        "UPDATE items SET public = 0, share_slug = NULL, public_until = NULL, public_hits = 0 \
          WHERE public = 1 AND public_until IS NOT NULL AND public_until <= ?",
     )
     .bind(now_unix())
@@ -529,6 +527,16 @@ pub(super) async fn expire_public_shares(db: &Db) -> anyhow::Result<u64> {
 }
 
 pub(super) async fn find_by_public_slug(db: &Db, slug: &str) -> anyhow::Result<Option<Item>> {
+    let row = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM items WHERE share_slug = ?"
+    ))
+    .bind(slug)
+    .fetch_optional(&db.pool)
+    .await?;
+    row.map(|r| row_to_item(&r)).transpose()
+}
+
+pub(super) async fn find_by_slug(db: &Db, slug: &str) -> anyhow::Result<Option<Item>> {
     let row = sqlx::query(&format!(
         "SELECT {SELECT_COLS} FROM items WHERE public_slug = ?"
     ))
@@ -621,7 +629,11 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
         match field.as_str() {
             "id" => match value.parse::<i64>() {
                 Ok(n) => {
-                    clauses.push(if negate { "id <> ?".into() } else { "id = ?".into() });
+                    clauses.push(if negate {
+                        "id <> ?".into()
+                    } else {
+                        "id = ?".into()
+                    });
                     binds.push(Bind::Int(n));
                 }
                 // Non-numeric id can never match.
@@ -629,7 +641,11 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
             },
             "status" => match Status::parse(&value.to_ascii_lowercase()) {
                 Some(s) => {
-                    clauses.push(if negate { "status <> ?".into() } else { "status = ?".into() });
+                    clauses.push(if negate {
+                        "status <> ?".into()
+                    } else {
+                        "status = ?".into()
+                    });
                     binds.push(Bind::Text(s.as_str().to_string()));
                 }
                 // An unknown status can never match.
@@ -647,7 +663,11 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
                 // Fold platform aliases (x→twitter, ig→instagram, …) so a search
                 // for the site the user knows matches yt-dlp's extractor naming.
                 let terms = crate::platform::extractor_search_terms(&value);
-                let terms = if terms.is_empty() { vec![value.clone()] } else { terms };
+                let terms = if terms.is_empty() {
+                    vec![value.clone()]
+                } else {
+                    terms
+                };
                 let parts: Vec<String> = terms
                     .iter()
                     .map(|t| {
@@ -663,7 +683,11 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
                 // extractor term is alias-folded so `x`/`twitter` both hit the
                 // twitter extractor without an explicit `platform:` prefix.
                 let terms = crate::platform::extractor_search_terms(&value);
-                let ext_terms = if terms.is_empty() { vec![value.clone()] } else { terms };
+                let ext_terms = if terms.is_empty() {
+                    vec![value.clone()]
+                } else {
+                    terms
+                };
                 if negate {
                     let mut parts = vec![
                         "title NOT LIKE ?".to_string(),
@@ -677,8 +701,7 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
                     }
                     clauses.push(format!("({})", parts.join(" AND ")));
                 } else {
-                    let mut parts =
-                        vec!["title LIKE ?".to_string(), "uploader LIKE ?".to_string()];
+                    let mut parts = vec!["title LIKE ?".to_string(), "uploader LIKE ?".to_string()];
                     binds.push(Bind::Text(like.clone()));
                     binds.push(Bind::Text(like.clone()));
                     for t in &ext_terms {
@@ -866,13 +889,27 @@ pub(super) async fn register_client(
 }
 
 /// Resolve a passphrase to a *trusted* client id, or `None` if unknown/untrusted.
-pub(super) async fn find_trusted_client_id(db: &Db, passphrase: &str) -> anyhow::Result<Option<i64>> {
+pub(super) async fn find_trusted_client_id(
+    db: &Db,
+    passphrase: &str,
+) -> anyhow::Result<Option<i64>> {
     let hash = hash_passphrase(passphrase);
     let row = sqlx::query("SELECT id FROM clients WHERE passphrase_hash = ? AND trusted = 1")
         .bind(&hash)
         .fetch_optional(&db.pool)
         .await?;
     Ok(row.map(|r| r.get::<i64, _>("id")))
+}
+
+/// Trusted client passphrase hashes used to resolve an E2EE key id without
+/// sending the passphrase or its authentication hash over the network.
+pub(super) async fn trusted_client_auth_hashes(db: &Db) -> anyhow::Result<Vec<(i64, String)>> {
+    let rows = sqlx::query("SELECT id, passphrase_hash FROM clients WHERE trusted = 1")
+        .fetch_all(&db.pool)
+        .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.try_get("id")?, row.try_get("passphrase_hash")?)))
+        .collect()
 }
 
 /// Mark a client trusted. Returns false if no such client.
@@ -894,7 +931,11 @@ pub(super) async fn delete_client(db: &Db, id: i64) -> anyhow::Result<bool> {
 }
 
 /// Increment a client's per-extractor submission tally.
-pub(super) async fn bump_site_count(db: &Db, client_id: i64, extractor: &str) -> anyhow::Result<()> {
+pub(super) async fn bump_site_count(
+    db: &Db,
+    client_id: i64,
+    extractor: &str,
+) -> anyhow::Result<()> {
     sqlx::query(
         "INSERT INTO client_site_counts (client_id, extractor, count) VALUES (?, ?, 1) \
          ON CONFLICT(client_id, extractor) DO UPDATE SET count = count + 1",
@@ -975,19 +1016,34 @@ mod tests {
         let (db, _dir) = temp_db().await;
 
         // TOFU on: first registration is trusted immediately and idempotent.
-        let c = db.register_client("supersecret", Some("phone"), true).await.unwrap();
+        let c = db
+            .register_client("supersecret", Some("phone"), true)
+            .await
+            .unwrap();
         assert!(c.trusted);
         let again = db.register_client("supersecret", None, true).await.unwrap();
         assert_eq!(again.id, c.id, "same passphrase reuses the row");
-        assert_eq!(db.find_trusted_client_id("supersecret").await.unwrap(), Some(c.id));
+        assert_eq!(
+            db.find_trusted_client_id("supersecret").await.unwrap(),
+            Some(c.id)
+        );
         assert_eq!(db.find_trusted_client_id("wrong").await.unwrap(), None);
 
         // TOFU off: pending until explicitly trusted.
-        let p = db.register_client("pendingpass", None, false).await.unwrap();
+        let p = db
+            .register_client("pendingpass", None, false)
+            .await
+            .unwrap();
         assert!(!p.trusted);
-        assert_eq!(db.find_trusted_client_id("pendingpass").await.unwrap(), None);
+        assert_eq!(
+            db.find_trusted_client_id("pendingpass").await.unwrap(),
+            None
+        );
         assert!(db.trust_client(p.id).await.unwrap());
-        assert_eq!(db.find_trusted_client_id("pendingpass").await.unwrap(), Some(p.id));
+        assert_eq!(
+            db.find_trusted_client_id("pendingpass").await.unwrap(),
+            Some(p.id)
+        );
 
         // Per-extractor tally accrues and sorts by count desc.
         db.bump_site_count(c.id, "youtube").await.unwrap();
@@ -1001,7 +1057,10 @@ mod tests {
 
         // Revoke removes trust and cascades counts.
         assert!(db.delete_client(c.id).await.unwrap());
-        assert_eq!(db.find_trusted_client_id("supersecret").await.unwrap(), None);
+        assert_eq!(
+            db.find_trusted_client_id("supersecret").await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -1094,7 +1153,10 @@ mod tests {
     #[test]
     fn tokenize_honors_quotes() {
         assert_eq!(tokenize("a b c"), vec!["a", "b", "c"]);
-        assert_eq!(tokenize(r#"title:"never gonna" up"#), vec!["title:never gonna", "up"]);
+        assert_eq!(
+            tokenize(r#"title:"never gonna" up"#),
+            vec!["title:never gonna", "up"]
+        );
         assert_eq!(tokenize("  spaced   out  "), vec!["spaced", "out"]);
     }
 
@@ -1112,10 +1174,16 @@ mod tests {
         assert!(matches!(&b[0], Bind::Text(s) if s == "%twitter%"));
         // Bare word now also fuzzily matches the platform/extractor column.
         let (c, _) = build_search("hello");
-        assert_eq!(c, vec!["(title LIKE ? OR uploader LIKE ? OR extractor LIKE ?)"]);
+        assert_eq!(
+            c,
+            vec!["(title LIKE ? OR uploader LIKE ? OR extractor LIKE ?)"]
+        );
         // A bare platform name (no prefix) folds into the extractor branch.
         let (c, b) = build_search("twitter");
-        assert_eq!(c, vec!["(title LIKE ? OR uploader LIKE ? OR extractor LIKE ?)"]);
+        assert_eq!(
+            c,
+            vec!["(title LIKE ? OR uploader LIKE ? OR extractor LIKE ?)"]
+        );
         assert!(matches!(&b[2], Bind::Text(s) if s == "%twitter%"));
         // Bare `x` alias-folds to the twitter extractor term.
         let (_, b) = build_search("x");
@@ -1160,7 +1228,11 @@ mod tests {
         db.insert_probe(&p2, Source::Download).await.unwrap();
 
         let by_platform = db
-            .list(ListQuery { q: Some("platform:twitter".into()), limit: 50, ..Default::default() })
+            .list(ListQuery {
+                q: Some("platform:twitter".into()),
+                limit: 50,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(by_platform.items.len(), 1);
@@ -1168,7 +1240,11 @@ mod tests {
 
         // Alias search: `x` resolves to the twitter extractor.
         let by_alias = db
-            .list(ListQuery { q: Some("platform:x".into()), limit: 50, ..Default::default() })
+            .list(ListQuery {
+                q: Some("platform:x".into()),
+                limit: 50,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(by_alias.items.len(), 1);
@@ -1176,7 +1252,11 @@ mod tests {
 
         // Bare platform word (no prefix) folds to the extractor: `x` → twitter.
         let bare = db
-            .list(ListQuery { q: Some("x".into()), limit: 50, ..Default::default() })
+            .list(ListQuery {
+                q: Some("x".into()),
+                limit: 50,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(bare.items.len(), 1);
@@ -1184,25 +1264,41 @@ mod tests {
 
         // Bare status word filters by status (both items are queued on insert).
         let queued = db
-            .list(ListQuery { q: Some("queued".into()), limit: 50, ..Default::default() })
+            .list(ListQuery {
+                q: Some("queued".into()),
+                limit: 50,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(queued.items.len(), 2);
         let failed = db
-            .list(ListQuery { q: Some("failed".into()), limit: 50, ..Default::default() })
+            .list(ListQuery {
+                q: Some("failed".into()),
+                limit: 50,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert!(failed.items.is_empty());
 
         let by_user = db
-            .list(ListQuery { q: Some("user:rickc".into()), limit: 50, ..Default::default() })
+            .list(ListQuery {
+                q: Some("user:rickc".into()),
+                limit: 50,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(by_user.items.len(), 1);
         assert_eq!(by_user.items[0].uploader.as_deref(), Some("RickC"));
 
         let by_title = db
-            .list(ListQuery { q: Some("title:cat".into()), limit: 50, ..Default::default() })
+            .list(ListQuery {
+                q: Some("title:cat".into()),
+                limit: 50,
+                ..Default::default()
+            })
             .await
             .unwrap();
         assert_eq!(by_title.items.len(), 1);
@@ -1211,55 +1307,64 @@ mod tests {
 
     #[tokio::test]
     async fn insert_assigns_unguessable_slug() {
-        // Every item gets a 24-hex-char (96-bit) slug at creation — so media URLs
+        // Every item gets a 32-hex-char (128-bit) slug at creation — so media URLs
         // key off the slug, never the enumerable sequential id — and it's usable
         // for lookup immediately, before any sharing.
         let (db, _dir) = temp_db().await;
-        let a = db.insert_probe(&probe("youtube", "s1", "One"), Source::Download).await.unwrap();
-        let b = db.insert_probe(&probe("youtube", "s2", "Two"), Source::Download).await.unwrap();
-        let sa = a.public_slug.clone().expect("slug at insert");
-        let sb = b.public_slug.clone().expect("slug at insert");
-        assert_eq!(sa.len(), 24);
+        let a = db
+            .insert_probe(&probe("youtube", "s1", "One"), Source::Download)
+            .await
+            .unwrap();
+        let b = db
+            .insert_probe(&probe("youtube", "s2", "Two"), Source::Download)
+            .await
+            .unwrap();
+        let sa = a.slug.clone();
+        let sb = b.slug.clone();
+        assert_eq!(sa.len(), 32);
         assert!(sa.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(sa, sb, "slugs are random, not derived from the id");
         // Resolvable before the item is ever made public.
         assert!(!a.public);
-        assert_eq!(db.find_by_public_slug(&sa).await.unwrap().unwrap().id, a.id);
+        assert_eq!(db.find_by_slug(&sa).await.unwrap().unwrap().id, a.id);
+        assert!(a.public_slug.is_none());
     }
 
     #[tokio::test]
-    async fn set_public_reuses_insert_slug_and_looks_up() {
+    async fn set_public_rotates_share_capability_and_looks_up() {
         let (db, _dir) = temp_db().await;
         let p = probe("youtube", "pub1", "Public me");
         let item = db.insert_probe(&p, Source::Download).await.unwrap();
         assert!(!item.public);
-        // Slug now exists from insert, not from sharing.
-        let slug = item.public_slug.clone().expect("slug at insert");
-        assert_eq!(slug.len(), 24);
-        assert!(slug.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(item.slug.len(), 32);
+        assert!(item.public_slug.is_none());
 
-        // Permanent share (no expiry) reuses the existing slug (COALESCE).
         db.set_public(item.id, true, None).await.unwrap();
         let pubd = db.get(item.id).await.unwrap().unwrap();
         assert!(pubd.public);
         assert!(pubd.public_until.is_none());
-        assert_eq!(pubd.public_slug.as_deref(), Some(slug.as_str()));
+        let first_share = pubd.public_slug.clone().expect("share capability");
+        assert_eq!(first_share.len(), 32);
 
-        // Slug lookup resolves to the same row.
-        let found = db.find_by_public_slug(&slug).await.unwrap().unwrap();
+        let found = db.find_by_public_slug(&first_share).await.unwrap().unwrap();
         assert_eq!(found.id, item.id);
 
-        // Going private keeps the slug stable but the item is no longer public.
+        // Revocation destroys the capability.
         db.set_public(item.id, false, None).await.unwrap();
         let priv_again = db.get(item.id).await.unwrap().unwrap();
         assert!(!priv_again.public);
-        assert_eq!(priv_again.public_slug.as_deref(), Some(slug.as_str()));
+        assert!(priv_again.public_slug.is_none());
+        assert!(db
+            .find_by_public_slug(&first_share)
+            .await
+            .unwrap()
+            .is_none());
 
-        // Re-sharing with an expiry reuses the same slug and records the expiry.
+        // Re-sharing creates a different capability and records the expiry.
         let until = now_unix() + 7 * 86400;
         db.set_public(item.id, true, Some(until)).await.unwrap();
         let reshared = db.get(item.id).await.unwrap().unwrap();
-        assert_eq!(reshared.public_slug.as_deref(), Some(slug.as_str()));
+        assert_ne!(reshared.public_slug.as_deref(), Some(first_share.as_str()));
         assert_eq!(reshared.public_until, Some(until));
 
         // Unknown slug → None.
@@ -1299,7 +1404,9 @@ mod tests {
             .insert_probe(&probe("youtube", "old", "Lapsed"), Source::Download)
             .await
             .unwrap();
-        db.set_public(lapsed.id, true, Some(now_unix() - 10)).await.unwrap();
+        db.set_public(lapsed.id, true, Some(now_unix() - 10))
+            .await
+            .unwrap();
         db.bump_public_hits(lapsed.id).await.unwrap();
 
         // Future-dated and permanent shares must survive the sweep.
@@ -1307,7 +1414,9 @@ mod tests {
             .insert_probe(&probe("youtube", "fut", "Future"), Source::Download)
             .await
             .unwrap();
-        db.set_public(future.id, true, Some(now_unix() + 86400)).await.unwrap();
+        db.set_public(future.id, true, Some(now_unix() + 86400))
+            .await
+            .unwrap();
         let forever = db
             .insert_probe(&probe("youtube", "perm", "Forever"), Source::Download)
             .await
@@ -1320,8 +1429,14 @@ mod tests {
         assert!(db.get(future.id).await.unwrap().unwrap().public);
         assert!(db.get(forever.id).await.unwrap().unwrap().public);
 
-        // Slug preserved on the expired item for a future re-share.
-        assert!(db.get(lapsed.id).await.unwrap().unwrap().public_slug.is_some());
+        // Expiry destroys the public capability.
+        assert!(db
+            .get(lapsed.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .public_slug
+            .is_none());
         // Access tally zeroed on expiry — capsule drops once the share lapses.
         assert_eq!(db.get(lapsed.id).await.unwrap().unwrap().public_hits, 0);
     }
@@ -1335,8 +1450,12 @@ mod tests {
             .unwrap();
 
         // Two downloaded variants → primary points at the highest (720).
-        db.upsert_resolution(item.id, 360, "/d/v_360.mkv", 10).await.unwrap();
-        db.upsert_resolution(item.id, 720, "/d/v_720.mkv", 30).await.unwrap();
+        db.upsert_resolution(item.id, 360, "/d/v_360.mkv", 10)
+            .await
+            .unwrap();
+        db.upsert_resolution(item.id, 720, "/d/v_720.mkv", 30)
+            .await
+            .unwrap();
         db.repoint_primary(item.id).await.unwrap();
         let hi = db.get(item.id).await.unwrap().unwrap();
         assert_eq!(hi.height, Some(720));
@@ -1365,11 +1484,17 @@ mod tests {
             .await
             .unwrap();
         // No variants yet, but a primary filesize is set → total falls back to it.
-        db.set_completed(item.id, "/d/primary.mkv", 100, Some(720)).await.unwrap();
+        db.set_completed(item.id, "/d/primary.mkv", 100, Some(720))
+            .await
+            .unwrap();
         assert_eq!(db.get(item.id).await.unwrap().unwrap().total_filesize, 100);
         // Two variants → total is their sum (independent of the primary filesize).
-        db.upsert_resolution(item.id, 720, "/d/v720.mkv", 100).await.unwrap();
-        db.upsert_resolution(item.id, 360, "/d/v360.mkv", 25).await.unwrap();
+        db.upsert_resolution(item.id, 720, "/d/v720.mkv", 100)
+            .await
+            .unwrap();
+        db.upsert_resolution(item.id, 360, "/d/v360.mkv", 25)
+            .await
+            .unwrap();
         assert_eq!(db.get(item.id).await.unwrap().unwrap().total_filesize, 125);
     }
 
@@ -1381,10 +1506,18 @@ mod tests {
             .insert_probe(&probe("youtube", "ah", "Heights"), Source::Download)
             .await
             .unwrap();
-        assert_eq!(db.get_available_heights(item.id).await.unwrap(), Some(vec![1080, 720, 360]));
+        assert_eq!(
+            db.get_available_heights(item.id).await.unwrap(),
+            Some(vec![1080, 720, 360])
+        );
         // A refresh overwrites the cache.
-        db.set_available_heights(item.id, &[2160, 720]).await.unwrap();
-        assert_eq!(db.get_available_heights(item.id).await.unwrap(), Some(vec![2160, 720]));
+        db.set_available_heights(item.id, &[2160, 720])
+            .await
+            .unwrap();
+        assert_eq!(
+            db.get_available_heights(item.id).await.unwrap(),
+            Some(vec![2160, 720])
+        );
     }
 
     #[tokio::test]

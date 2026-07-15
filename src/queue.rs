@@ -26,14 +26,20 @@ type Cancels = Arc<Mutex<HashMap<(i64, Option<i64>), oneshot::Sender<()>>>>;
 
 #[derive(Clone)]
 pub struct Queue {
-    tx: mpsc::UnboundedSender<Job>,
+    tx: mpsc::Sender<Job>,
     events: broadcast::Sender<ProgressEvent>,
     cancels: Cancels,
 }
 
 impl Queue {
-    pub fn spawn(cfg: Config, db: Db, archive: Archive, cookies: CookieStore, errlog: ErrorLog) -> Self {
-        let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
+    pub fn spawn(
+        cfg: Config,
+        db: Db,
+        archive: Archive,
+        cookies: CookieStore,
+        errlog: ErrorLog,
+    ) -> Self {
+        let (tx, mut rx) = mpsc::channel::<Job>(1024);
         let (events, _) = broadcast::channel::<ProgressEvent>(1024);
         let semaphore = Arc::new(Semaphore::new(cfg.effective_concurrency()));
         let cancels: Cancels = Arc::new(Mutex::new(HashMap::new()));
@@ -65,24 +71,43 @@ impl Queue {
                 let errlog = errlog.clone();
                 let cancels = worker_cancels.clone();
                 tokio::spawn(async move {
-                    run_job(&cfg, &db, &archive, &cookies, &events, &errlog, &cancels, job).await;
+                    run_job(
+                        &cfg, &db, &archive, &cookies, &events, &errlog, &cancels, job,
+                    )
+                    .await;
                     drop(permit);
                 });
             }
         });
 
-        Queue { tx, events, cancels }
+        Queue {
+            tx,
+            events,
+            cancels,
+        }
     }
 
     /// Enqueue an item's primary download.
     pub async fn enqueue(&self, item_id: i64) {
-        let _ = self.tx.send(Job { id: item_id, height: None });
+        let _ = self
+            .tx
+            .send(Job {
+                id: item_id,
+                height: None,
+            })
+            .await;
     }
 
     /// Enqueue a specific-resolution variant download for an item (an extra file
     /// at `height`, kept alongside the primary).
     pub async fn enqueue_resolution(&self, item_id: i64, height: i64) {
-        let _ = self.tx.send(Job { id: item_id, height: Some(height) });
+        let _ = self
+            .tx
+            .send(Job {
+                id: item_id,
+                height: Some(height),
+            })
+            .await;
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ProgressEvent> {
@@ -95,7 +120,11 @@ impl Queue {
     /// a video the user no longer wants.
     pub fn cancel(&self, item_id: i64) -> bool {
         let mut map = self.cancels.lock().unwrap_or_else(|e| e.into_inner());
-        let keys: Vec<_> = map.keys().filter(|(id, _)| *id == item_id).copied().collect();
+        let keys: Vec<_> = map
+            .keys()
+            .filter(|(id, _)| *id == item_id)
+            .copied()
+            .collect();
         let mut any = false;
         for k in keys {
             if let Some(tx) = map.remove(&k) {
@@ -224,7 +253,8 @@ async fn run_job(
         .insert((id, variant), cancel_tx);
 
     // Auto-select this site's cookie via the registry key (falls back to global).
-    let cookie = crate::cookies::resolve_keyed(cookies, cfg.cookies.as_deref(), site_key.as_deref());
+    let cookie =
+        crate::cookies::resolve_keyed(cookies, cfg.cookies.as_deref(), site_key.as_deref());
     let result =
         crate::ytdlp::download(&job_cfg, &item, cookie.as_deref(), ptx, cancel_rx, variant).await;
     forwarder.abort();
@@ -254,10 +284,18 @@ async fn run_job(
                 // Shouldn't happen (archive bypassed for variants) — just clear the
                 // transient running state.
                 let _ = events.send(ProgressEvent {
-                    id, status: Status::Completed, percent: None, speed: None, eta: None, phase: None,
+                    id,
+                    status: Status::Completed,
+                    percent: None,
+                    speed: None,
+                    eta: None,
+                    phase: None,
                 });
             } else if let Some(path) = existing.filter(|_| has_file) {
-                tracing::info!(job_id = id, "primary skipped by archive; keeping existing local file");
+                tracing::info!(
+                    job_id = id,
+                    "primary skipped by archive; keeping existing local file"
+                );
                 let size = std::fs::metadata(path)
                     .map(|m| m.len() as i64)
                     .unwrap_or(item.filesize.unwrap_or(0));
@@ -267,7 +305,12 @@ async fn run_job(
                     let _ = db.repoint_primary(id).await;
                 }
                 let _ = events.send(ProgressEvent {
-                    id, status: Status::Completed, percent: Some(100.0), speed: None, eta: None, phase: None,
+                    id,
+                    status: Status::Completed,
+                    percent: Some(100.0),
+                    speed: None,
+                    eta: None,
+                    phase: None,
                 });
             } else {
                 let msg = "already in the download archive but the local file is missing — remove its dedup entry (Settings → Archive editor) to re-download";
@@ -275,18 +318,28 @@ async fn run_job(
                     tracing::error!(job_id = id, error = %e, "set_status(failed) failed");
                 }
                 let _ = events.send(ProgressEvent {
-                    id, status: Status::Failed, percent: None, speed: None, eta: None, phase: None,
+                    id,
+                    status: Status::Failed,
+                    percent: None,
+                    speed: None,
+                    eta: None,
+                    phase: None,
                 });
             }
         }
         Ok(out) => match variant {
             // Primary download: mark the item completed and record its resolution.
             None => {
-                if let Err(e) = db.set_completed(id, &out.filepath, out.filesize, out.height).await {
+                if let Err(e) = db
+                    .set_completed(id, &out.filepath, out.filesize, out.height)
+                    .await
+                {
                     tracing::error!("job {id}: set_completed failed: {e}");
                 }
                 if let Some(h) = out.height {
-                    let _ = db.upsert_resolution(id, h, &out.filepath, out.filesize).await;
+                    let _ = db
+                        .upsert_resolution(id, h, &out.filepath, out.filesize)
+                        .await;
                     // Keep the item's primary pointed at its highest downloaded
                     // version (a re-download at a higher cap should surface it).
                     let _ = db.repoint_primary(id).await;
@@ -307,7 +360,9 @@ async fn run_job(
             // Variant download: record the extra file under the REQUESTED height
             // (matches the UI checkbox), leaving the item's own status untouched.
             Some(h) => {
-                let _ = db.upsert_resolution(id, h, &out.filepath, out.filesize).await;
+                let _ = db
+                    .upsert_resolution(id, h, &out.filepath, out.filesize)
+                    .await;
                 // A newly-fetched variant may now be the highest version the item
                 // holds — repoint the primary so the card shows the best one (Req 3).
                 let _ = db.repoint_primary(id).await;

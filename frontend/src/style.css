@@ -103,8 +103,9 @@ a, button, summary, input, textarea, [role="button"],
 .act, .btn, .icon-btn, .ck-btn {
   -webkit-tap-highlight-color: transparent;
 }
+button { overflow: hidden; touch-action: manipulation; }
 .act:active, .btn:active, .ck-btn:active, .icon-btn:active {
-  filter: brightness(1.3);
+  opacity: .72;
 }
 
 html, body {
@@ -129,8 +130,6 @@ body {
   /* Clear the Android status bar / notch (edge-to-edge WebView). */
   padding: calc(10px + env(safe-area-inset-top)) 2px 8px;
 }
-.brand { font-size: 20px; margin: 0; }
-
 /* ---- Server status heartbeat (right of the brand) ----
    A small dot that mirrors the SSE stream's health: green and breathing while
    the stream is live, solid red when it's down / before a token is set. The
@@ -283,13 +282,18 @@ input:focus { outline: none; border-color: var(--accent); }
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding:
+    max(16px, env(safe-area-inset-top))
+    max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+  overscroll-behavior: contain;
 }
 .modal-card {
   position: relative;
   width: 100%;
   max-width: 460px;
-  max-height: calc(100dvh - 32px);
+  max-height: calc(100dvh - max(16px, env(safe-area-inset-top)) - max(16px, env(safe-area-inset-bottom)));
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -333,8 +337,6 @@ input:focus { outline: none; border-color: var(--accent); }
    so hide the whole row — detected via html.app-native (set from
    window.__TAURI__), not user-agent sniffing. */
 html:not(.app-native) #server-row { display: none; }
-/* Permission re-prompt row is Android-only (no runtime permissions in a browser). */
-html:not(.app-native) #perm-row { display: none; }
 .hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
 .hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
 .hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: 4px; font-size: 11px; }
@@ -351,6 +353,56 @@ html:not(.app-native) #perm-row { display: none; }
   margin-bottom: 8px;
 }
 .ta:focus { outline: none; border-color: var(--accent); }
+
+/* Android permission state follows DataBackup's setup-page pattern: one compact,
+   full-width action per permission with a state-tinted icon and live result. */
+.permission-box {
+  overflow: hidden;
+  margin: 0 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.permission-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.permission-item + .permission-item { border-top: 1px solid var(--border); }
+.permission-item:disabled { cursor: wait; }
+.permission-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: var(--muted);
+  background: var(--surface);
+}
+.permission-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.permission-copy strong { font-size: 14px; font-weight: 600; }
+.permission-copy small { margin-top: 2px; color: var(--muted); font-size: 12px; }
+.permission-result { flex: 0 0 20px; color: var(--muted); font-size: 20px; text-align: center; }
+.permission-item[data-state="granted"] .permission-icon {
+  color: var(--ok);
+  background: color-mix(in oklab, var(--ok) 14%, var(--surface));
+}
+.permission-item[data-state="granted"] .permission-result { color: var(--ok); font-size: 17px; }
+.permission-item[data-state="missing"] .permission-icon {
+  color: var(--err);
+  background: color-mix(in oklab, var(--err) 12%, var(--surface));
+}
+.permission-prompt-card { max-width: 430px; }
+.permission-prompt-actions { margin-top: 4px; }
 
 .topbar-actions { display: flex; gap: 2px; }
 
@@ -850,7 +902,7 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   cursor: pointer;
 }
 /* Freeze the list behind the player. */
-body.player-open { overflow: hidden; }
+body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 
 /* ---- Share dialog (Baidu-netdisk style) ---- */
 .share-overlay {
@@ -863,12 +915,19 @@ body.player-open { overflow: hidden; }
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 16px;
+  padding:
+    max(16px, env(safe-area-inset-top))
+    max(16px, env(safe-area-inset-right))
+    max(16px, env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+  overscroll-behavior: contain;
 }
 .share-card {
   position: relative;
   width: 100%;
   max-width: 420px;
+  max-height: calc(100dvh - max(16px, env(safe-area-inset-top)) - max(16px, env(safe-area-inset-bottom)));
+  overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 16px;

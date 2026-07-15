@@ -1,5 +1,5 @@
 //! In-memory dedup set backed by an append-only yt-dlp `--download-archive` file.
-//! Workstream B owns this file. See docs/MODULES.md §3, docs/DATABASE.md §3.
+//! Persistent yt-dlp archive set. See docs/DATABASE.md.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -40,9 +40,7 @@ impl Archive {
                 .map(str::to_string)
                 .collect(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => {
-                return Err(e).with_context(|| format!("reading archive {}", path.display()))
-            }
+            Err(e) => return Err(e).with_context(|| format!("reading archive {}", path.display())),
         };
 
         let file_existed = fs::metadata(path).await.is_ok();
@@ -180,12 +178,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("archive.txt");
         // Simulate the yt-dlp + app double-write: duplicate (and unsorted) lines.
-        fs::write(&path, "twitter b\ntwitter a\ntwitter b\ntwitter a\n").await.unwrap();
+        fs::write(&path, "twitter b\ntwitter a\ntwitter b\ntwitter a\n")
+            .await
+            .unwrap();
 
         let archive = Archive::load(&path, vec![]).await.unwrap();
         let contents = fs::read_to_string(&path).await.unwrap();
         // Canonicalized: sorted, one line each.
-        assert_eq!(contents.lines().collect::<Vec<_>>(), vec!["twitter a", "twitter b"]);
+        assert_eq!(
+            contents.lines().collect::<Vec<_>>(),
+            vec!["twitter a", "twitter b"]
+        );
         assert!(archive.contains("twitter a").await);
         assert!(archive.contains("twitter b").await);
     }
@@ -206,7 +209,10 @@ mod tests {
 
         archive.remove("twitter x").await.unwrap();
         let after = fs::read_to_string(&path).await.unwrap();
-        assert!(after.lines().all(|l| l != "twitter x"), "delete frees the key");
+        assert!(
+            after.lines().all(|l| l != "twitter x"),
+            "delete frees the key"
+        );
     }
 
     #[tokio::test]

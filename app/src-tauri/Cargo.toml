@@ -2,6 +2,9 @@
 name = "whale-app"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.97"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Meeks233/Whale"
 description = "Whale Android/desktop shell — reuses the web UI"
 default-run = "whale-app"
 

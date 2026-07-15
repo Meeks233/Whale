@@ -1,4 +1,4 @@
-//! Shared serde DTOs — the API/DB contract types. See docs/MODULES.md §2.
+//! Shared serde DTOs for the API and database contracts. See docs/API.md.
 //!
 //! Do not change field names without updating API.md and DATABASE.md.
 
@@ -82,6 +82,9 @@ impl Source {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Item {
     pub id: i64,
+    /// Random 128-bit resource identifier used by every authenticated item URL.
+    /// The sequential database id remains internal and is never accepted in a path.
+    pub slug: String,
     pub extractor: String,
     pub video_id: String,
     pub archive_key: String,
@@ -90,6 +93,7 @@ pub struct Item {
     pub webpage_url: String,
     pub thumbnail_url: Option<String>,
     pub duration: Option<i64>,
+    #[serde(default, skip_serializing)]
     pub filepath: Option<String>,
     pub filesize: Option<i64>,
     /// Downloaded video pixel height (e.g. 720, 1080, 2160), used to label the
@@ -108,8 +112,8 @@ pub struct Item {
     pub completed_at: Option<i64>,
     /// When true, the media file streams without a token (shareable direct link).
     pub public: bool,
-    /// Random, unguessable slug for the public link (`/api/p/:slug`). Set the
-    /// first time an item is made public; `None` until then.
+    /// Random, unguessable capability for the public link (`/api/p/:slug`). It is
+    /// rotated on every share and cleared on revoke/expiry.
     pub public_slug: Option<String>,
     /// Unix timestamp when the public share auto-expires. `None` while public
     /// means a permanent share; ignored when `public` is false.

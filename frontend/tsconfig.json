@@ -19,5 +19,5 @@
     "noEmit": true,
     "isolatedModules": true
   },
-  "include": ["src/app.ts", "src/i18n.ts"]
+  "include": ["src/app.ts", "src/e2ee.ts", "src/i18n.ts"]
 }

@@ -7,20 +7,9 @@
 //! or non-HTTP schemes like `file://`. This module rejects those before we ever
 //! spawn yt-dlp.
 //!
-//! [`guard`] enforces a scheme allowlist and rejects literal internal IPs and
-//! localhost/mDNS names ([`precheck`]).
-//!
-//! We deliberately do NOT resolve hostnames and classify the result: fake-IP
-//! proxies (Clash / sing-box, common on the machines that run a self-hosted
-//! downloader) map every domain into a reserved range like `198.18.0.0/15`, so
-//! resolving `youtube.com` yields a "private" address and blocks legitimate
-//! downloads. App-layer resolution is also defeated by DNS rebinding (yt-dlp
-//! re-resolves later), so it buys little. Robustly blocking a hostname that
-//! resolves internally needs a pinning HTTP proxy, which is out of scope.
-//!
-//! Residual risk: `http://internal-name/` (a hostname resolving to a private
-//! IP) is not blocked. The literal-IP, scheme, and localhost guards cover the
-//! high-value vectors (cloud metadata, loopback, RFC-1918, `file://`).
+//! [`guard`] enforces a scheme allowlist, rejects literal internal addresses, and
+//! resolves hostnames to reject internal DNS answers. Operators using a fake-IP
+//! proxy can explicitly bypass only the DNS classification.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -60,7 +49,10 @@ pub fn precheck(url: &str) -> Result<String, UrlRejection> {
     let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..auth_end];
     // Drop any `userinfo@`.
-    let hostport = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
 
     // Extract host, honoring `[ipv6]:port` bracket form.
     let host = if let Some(after) = hostport.strip_prefix('[') {
@@ -91,8 +83,22 @@ pub fn precheck(url: &str) -> Result<String, UrlRejection> {
 /// Reject a submitted URL that must not reach yt-dlp: a non-http(s) scheme, or a
 /// literal internal IP / localhost host. Hostnames are intentionally not
 /// resolved (see the module docs). Run once at submit time.
-pub fn guard(url: &str) -> Result<(), UrlRejection> {
-    precheck(url).map(|_| ())
+pub async fn guard(url: &str, allow_private_dns: bool) -> Result<(), UrlRejection> {
+    let host = precheck(url)?;
+    if allow_private_dns || host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let addrs = tokio::net::lookup_host((host.as_str(), 0))
+        .await
+        .map_err(|_| UrlRejection::BadHost)?;
+    let mut saw_address = false;
+    for addr in addrs {
+        saw_address = true;
+        if is_forbidden_ip(addr.ip()) {
+            return Err(UrlRejection::PrivateAddress);
+        }
+    }
+    saw_address.then_some(()).ok_or(UrlRejection::BadHost)
 }
 
 /// True if `ip` is anything other than a routable public address: loopback,
@@ -171,19 +177,26 @@ mod tests {
             "http://printer.local/",
             "http://user:pass@127.0.0.1/", // userinfo must not smuggle host
         ] {
-            assert_eq!(precheck(u).unwrap_err(), UrlRejection::PrivateAddress, "{u}");
+            assert_eq!(
+                precheck(u).unwrap_err(),
+                UrlRejection::PrivateAddress,
+                "{u}"
+            );
         }
     }
 
-    #[test]
-    fn guard_passes_hostnames_without_resolving() {
-        // Hostnames are not resolved, so a normal domain always passes even
-        // behind a fake-IP proxy; only literal internal IPs / localhost / bad
-        // schemes are rejected.
-        assert!(guard("https://www.youtube.com/watch?v=abc").is_ok());
-        assert!(guard("https://example.com/x").is_ok());
-        assert_eq!(guard("http://127.0.0.1/").unwrap_err(), UrlRejection::PrivateAddress);
-        assert_eq!(guard("file:///etc/passwd").unwrap_err(), UrlRejection::BadScheme);
+    #[tokio::test]
+    async fn guard_resolves_hosts_and_keeps_compatibility_escape_hatch() {
+        assert!(guard("https://1.1.1.1/x", false).await.is_ok());
+        assert!(guard("https://example.com/x", true).await.is_ok());
+        assert_eq!(
+            guard("http://127.0.0.1/", false).await.unwrap_err(),
+            UrlRejection::PrivateAddress
+        );
+        assert_eq!(
+            guard("file:///etc/passwd", false).await.unwrap_err(),
+            UrlRejection::BadScheme
+        );
     }
 
     #[test]

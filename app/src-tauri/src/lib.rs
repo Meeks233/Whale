@@ -4,6 +4,26 @@
 
 use tauri::Manager;
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct AndroidPermissionStatus {
+    notifications: bool,
+    background: bool,
+}
+
+#[cfg(target_os = "android")]
+struct AndroidPermissions<R: tauri::Runtime>(tauri::plugin::PluginHandle<R>);
+
+#[cfg(target_os = "android")]
+fn android_permissions_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("whale-permissions")
+        .setup(|app, api| {
+            let handle = api.register_android_plugin("com.whale.app", "PermissionsPlugin")?;
+            app.manage(AndroidPermissions(handle));
+            Ok(())
+        })
+        .build()
+}
+
 /// Mirror the server base URL + token from the WebView's localStorage into a
 /// file the native `ShareActivity` can read (`<app_data_dir>/whale_share_creds.json`).
 ///
@@ -20,17 +40,52 @@ fn save_share_creds(app: tauri::AppHandle, base: String, token: String) {
     }
 }
 
-/// Re-arm the Android launch-time permission prompt from the in-app Settings, for
-/// a user who previously chose "Don't ask again" but changed their mind. Drops a
-/// sentinel file `MainActivity` picks up in `onResume` (same app-data-dir bridge
-/// as `save_share_creds`); it clears the opt-out and re-shows the prompt. No-op
-/// on desktop, where these Android runtime permissions don't apply.
 #[tauri::command]
-fn reset_permission_prompt(app: tauri::AppHandle) {
-    if let Ok(dir) = app.path().app_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("whale_perm_request"), b"1");
+fn android_permission_status<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+) -> Result<AndroidPermissionStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin("status", ())
+            .map_err(|e| e.to_string());
     }
+    #[cfg(not(target_os = "android"))]
+    Err("Android permissions are unavailable on this platform".into())
+}
+
+#[tauri::command]
+fn request_background_permission<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+) -> Result<AndroidPermissionStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin("requestBackground", ())
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("Android permissions are unavailable on this platform".into())
+}
+
+#[tauri::command]
+fn request_notification_permission<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+) -> Result<AndroidPermissionStatus, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin("requestNotifications", ())
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("Android permissions are unavailable on this platform".into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -39,7 +94,17 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![save_share_creds, reset_permission_prompt]);
+        .invoke_handler(tauri::generate_handler![
+            save_share_creds,
+            android_permission_status,
+            request_notification_permission,
+            request_background_permission
+        ]);
+
+    #[cfg(target_os = "android")]
+    {
+        builder = builder.plugin(android_permissions_plugin());
+    }
 
     // Android/iOS: register the share-target plugin so shared URLs land in a
     // queue the frontend drains on launch/focus (see web/app.js).

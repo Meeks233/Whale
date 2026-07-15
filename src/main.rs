@@ -10,6 +10,7 @@ mod archive;
 mod config;
 mod cookies;
 mod db;
+mod e2ee;
 mod errlog;
 mod error;
 mod net_guard;
@@ -143,14 +144,32 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         cookies: cookie_store,
         ytdlp_version,
         errlog,
+        stream_urls: Default::default(),
     };
 
     let bind = cfg.bind;
     let router = api::router(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("whale listening on {bind}");
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = terminate.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = tokio::signal::ctrl_c().await;
+    tracing::info!("shutdown signal received");
 }
 
 async fn import(cfg: config::Config, file: PathBuf, archive_only: bool) -> anyhow::Result<()> {

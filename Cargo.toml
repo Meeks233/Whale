@@ -2,6 +2,11 @@
 name = "whale"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.97"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/Meeks233/Whale"
+homepage = "https://github.com/Meeks233/Whale"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -21,6 +26,8 @@ mime_guess = "2"
 futures = "0.3"
 sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+aes-gcm = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

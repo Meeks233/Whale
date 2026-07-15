@@ -32,15 +32,28 @@ impl AppError {
                 "unauthorized",
                 "missing or invalid token".to_string(),
             ),
-            AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", "unknown item".to_string()),
-            AppError::ProbeFailed(m) => (StatusCode::UNPROCESSABLE_ENTITY, "probe_failed", m.clone()),
-            AppError::Internal(m) => (StatusCode::INTERNAL_SERVER_ERROR, "internal", m.clone()),
+            AppError::NotFound => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "unknown item".to_string(),
+            ),
+            AppError::ProbeFailed(m) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "probe_failed", m.clone())
+            }
+            AppError::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+                "internal server error".to_string(),
+            ),
         }
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
+        if let AppError::Internal(message) = &self {
+            tracing::error!(error = %message, "request failed");
+        }
         let (status, code, message) = self.parts();
         let body = Json(json!({ "error": code, "message": message }));
         (status, body).into_response()

@@ -1,7 +1,7 @@
 //! Media file streaming — range-capable playback + download. See docs/API.md.
 //!
 //! Two entry points:
-//! - `GET /api/items/:id/file` — **token-required**, by sequential id (owner use).
+//! - `GET /api/items/:slug/file` — **token-required**, by private random slug.
 //! - `GET /api/p/:slug` — **tokenless**, by the item's random public slug, and
 //!   only while it is still flagged `public`. The slug is unguessable, so public
 //!   items can't be discovered by enumerating ids.
@@ -15,6 +15,7 @@ use crate::types::Item;
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::header;
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use std::path::Path as FsPath;
 use tower::ServiceExt;
@@ -26,11 +27,11 @@ use tower_http::services::ServeFile;
 const PROXY_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-/// GET /api/items/:id/file — stream by id. Requires a valid token (header or
+/// GET /api/items/:slug/file — stream by private slug. Requires a valid token (header or
 /// `?token=`). Add `?download=1` to force a download (Content-Disposition).
 pub async fn file(
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    Path(slug): Path<String>,
     req: Request,
 ) -> Result<Response, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
@@ -41,7 +42,11 @@ pub async fn file(
     {
         return Err(AppError::Unauthorized);
     }
-    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    let item = state
+        .db
+        .find_by_slug(&slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
     serve_item(&state.cfg.download_dir, item, req).await
 }
 
@@ -80,7 +85,11 @@ pub async fn public_file(
 /// 0 (the first request a media element makes). Later chunks (`bytes=N-`, N>0)
 /// don't recount the same view.
 fn is_fresh_access(req: &Request) -> bool {
-    match req.headers().get(header::RANGE).and_then(|v| v.to_str().ok()) {
+    match req
+        .headers()
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+    {
         None => true,
         Some(r) => r.trim().replace(' ', "").starts_with("bytes=0-"),
     }
@@ -117,21 +126,14 @@ pub async fn stream(
     {
         return Err(AppError::Unauthorized);
     }
-    let item = state.db.find_by_public_slug(&slug).await?.ok_or(AppError::NotFound)?;
-    // Defense in depth: re-validate the stored page URL before yt-dlp fetches it.
-    crate::net_guard::guard(&item.webpage_url).map_err(|r| AppError::BadRequest(r.reason().into()))?;
-    let cookie = crate::cookies::resolve(&state.cookies, state.cfg.cookies.as_deref(), &item.webpage_url);
-    let upstream =
-        crate::ytdlp::resolve_stream_url(&state.cfg, &item.webpage_url, cookie.as_deref(), item.playlist_index)
-            .await
-            .map_err(|e| AppError::Internal(format!("stream url resolve failed: {e}")))?;
+    let (item, upstream, cookie) = resolve_stream_target(&state, &slug).await?;
     // The resolved CDN URL is now our fetch target — guard it too so a poisoned
     // row can't make the *server* fetch an internal address (SSRF).
-    crate::net_guard::guard(&upstream).map_err(|r| AppError::BadRequest(r.reason().into()))?;
-
-    let host = crate::net_guard::precheck(&upstream)
+    crate::net_guard::guard(&upstream, state.cfg.allow_private_dns)
+        .await
         .map_err(|r| AppError::BadRequest(r.reason().into()))?;
-    let cookie_header = cookie_header_for(cookie.as_deref(), &host);
+
+    let cookie_header = cookie_header_for(cookie.as_deref(), &upstream);
     let range = req
         .headers()
         .get(header::RANGE)
@@ -139,6 +141,58 @@ pub async fn stream(
         .map(str::to_string);
 
     proxy_upstream(&upstream, &item.webpage_url, cookie_header, range).await
+}
+
+/// Resolve and cache an online stream URL without fetching media bytes. The UI
+/// calls this for a small number of visible cloud items so the later video GET
+/// can start from the warm cache instead of waiting on a fresh Python process.
+pub async fn prepare_stream(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    req: Request,
+) -> Result<StatusCode, AppError> {
+    let query = req.uri().query().unwrap_or("").to_string();
+    let token = super::auth::extract_token(req.headers(), &query);
+    if !token
+        .as_deref()
+        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
+    {
+        return Err(AppError::Unauthorized);
+    }
+    let _ = resolve_stream_target(&state, &slug).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn resolve_stream_target(
+    state: &AppState,
+    slug: &str,
+) -> Result<(Item, String, Option<std::path::PathBuf>), AppError> {
+    let item = state
+        .db
+        .find_by_slug(slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    // Defense in depth: re-validate the stored page URL before yt-dlp fetches it.
+    crate::net_guard::guard(&item.webpage_url, state.cfg.allow_private_dns)
+        .await
+        .map_err(|r| AppError::BadRequest(r.reason().into()))?;
+    let cookie = crate::cookies::resolve(
+        &state.cookies,
+        state.cfg.cookies.as_deref(),
+        &item.webpage_url,
+    );
+    let upstream = state
+        .stream_urls
+        .resolve(
+            slug,
+            &state.cfg,
+            &item.webpage_url,
+            cookie.as_deref(),
+            item.playlist_index,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("stream url resolve failed: {e}")))?;
+    Ok((item, upstream, cookie))
 }
 
 /// Fetch `upstream` from this server and stream it back to the client, mirroring
@@ -151,23 +205,28 @@ async fn proxy_upstream(
     cookie_header: Option<String>,
     range: Option<String>,
 ) -> Result<Response, AppError> {
-    let client = reqwest::Client::builder()
-        // Follow CDN redirects, but never into an internal address (SSRF).
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if let Some(host) = attempt.url().host_str() {
-                if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-                    if crate::net_guard::is_forbidden_ip(ip) {
-                        return attempt.error("redirect to forbidden address");
+    static CLIENT: tokio::sync::OnceCell<reqwest::Client> = tokio::sync::OnceCell::const_new();
+    let client = CLIENT
+        .get_or_try_init(|| async {
+            reqwest::Client::builder()
+                // Follow CDN redirects, but never into an internal address (SSRF).
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    if let Some(host) = attempt.url().host_str() {
+                        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                            if crate::net_guard::is_forbidden_ip(ip) {
+                                return attempt.error("redirect to forbidden address");
+                            }
+                        }
                     }
-                }
-            }
-            if attempt.previous().len() >= 5 {
-                attempt.stop()
-            } else {
-                attempt.follow()
-            }
-        }))
-        .build()
+                    if attempt.previous().len() >= 5 {
+                        attempt.stop()
+                    } else {
+                        attempt.follow()
+                    }
+                }))
+                .build()
+        })
+        .await
         .map_err(|e| AppError::Internal(format!("http client build failed: {e}")))?;
 
     let mut rb = client
@@ -206,36 +265,53 @@ async fn proxy_upstream(
         }
     }
     let body = Body::from_stream(resp.bytes_stream());
+    builder = builder.header(header::CACHE_CONTROL, "private, no-store");
     builder
         .body(body)
         .map(IntoResponse::into_response)
         .map_err(|e| AppError::Internal(format!("proxy response build failed: {e}")))
 }
 
-/// Build a `Cookie:` header for a proxied request to `host` from a Netscape
-/// `cookies.txt`, so the upstream fetch carries the same session the download
-/// used. Only cookies whose domain matches `host` are included (`.x.com` matches
-/// `x.com` and `video.x.com`); everything else is left out so unrelated cookies
-/// never leak to a CDN. Returns `None` when there is no file or no match.
-fn cookie_header_for(cookie_file: Option<&FsPath>, host: &str) -> Option<String> {
+/// Build a scope-correct `Cookie:` header for an upstream URL from a Netscape
+/// cookies.txt. Domain, host-only, path, Secure, and expiry rules are enforced.
+fn cookie_header_for(cookie_file: Option<&FsPath>, upstream: &str) -> Option<String> {
     let text = std::fs::read_to_string(cookie_file?).ok()?;
-    let host = host.to_ascii_lowercase();
+    let url = reqwest::Url::parse(upstream).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let path = url.path();
+    let secure_request = url.scheme() == "https";
+    let now = crate::types::now_unix();
     let mut pairs = Vec::new();
     for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let mut line = line.trim();
+        if let Some(rest) = line.strip_prefix("#HttpOnly_") {
+            line = rest;
+        } else if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let f: Vec<&str> = line.split('\t').collect();
         if f.len() < 7 {
             continue;
         }
-        let domain = f[0].trim_start_matches('.').to_ascii_lowercase();
+        let raw_domain = f[0];
+        let domain = raw_domain.trim_start_matches('.').to_ascii_lowercase();
         if domain.is_empty() {
             continue;
         }
-        let matches = host == domain || host.ends_with(&format!(".{domain}"));
-        if matches {
+        let include_subdomains = f[1].eq_ignore_ascii_case("TRUE") || raw_domain.starts_with('.');
+        let domain_matches =
+            host == domain || (include_subdomains && host.ends_with(&format!(".{domain}")));
+        let cookie_path = if f[2].is_empty() { "/" } else { f[2] };
+        let path_matches = path == cookie_path
+            || path
+                .strip_prefix(cookie_path)
+                .is_some_and(|rest| cookie_path.ends_with('/') || rest.starts_with('/'));
+        let secure = f[3].eq_ignore_ascii_case("TRUE");
+        let unexpired = f[4]
+            .parse::<i64>()
+            .ok()
+            .is_none_or(|expiry| expiry == 0 || expiry > now);
+        if domain_matches && path_matches && (!secure || secure_request) && unexpired {
             pairs.push(format!("{}={}", f[5], f[6]));
         }
     }
@@ -271,6 +347,12 @@ async fn serve_item(root: &FsPath, item: Item, req: Request) -> Result<Response,
             }
         }
     }
+    parts
+        .headers
+        .insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
+    parts
+        .headers
+        .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     Ok(Response::from_parts(parts, Body::new(body)).into_response())
 }
 
@@ -285,7 +367,10 @@ fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         let unreserved = b.is_ascii_alphanumeric()
-            || matches!(b, b'-' | b'.' | b'_' | b'~' | b'!' | b'#' | b'$' | b'&' | b'+');
+            || matches!(
+                b,
+                b'-' | b'.' | b'_' | b'~' | b'!' | b'#' | b'$' | b'&' | b'+'
+            );
         if unreserved {
             out.push(b as char);
         } else {
@@ -332,7 +417,7 @@ mod tests {
              .x.com\tTRUE\t/\tTRUE\t0\tct0\tCSRF\n\
              .other.com\tTRUE\t/\tFALSE\t0\tnope\tXXX\n",
         );
-        let h = cookie_header_for(Some(f.path()), "video.x.com").unwrap();
+        let h = cookie_header_for(Some(f.path()), "https://video.x.com/media/1").unwrap();
         assert!(h.contains("auth_token=SECRET"));
         assert!(h.contains("ct0=CSRF"));
         // Cookies for an unrelated domain never leak to this host.
@@ -345,8 +430,21 @@ mod tests {
             "# Netscape HTTP Cookie File\n.x.com\tTRUE\t/\tTRUE\t0\tauth_token\tSECRET\n",
         );
         // Host belongs to a different site → no cookies selected.
-        assert!(cookie_header_for(Some(f.path()), "youtube.com").is_none());
+        assert!(cookie_header_for(Some(f.path()), "https://youtube.com/watch").is_none());
         // No file at all → None.
-        assert!(cookie_header_for(None, "video.x.com").is_none());
+        assert!(cookie_header_for(None, "https://video.x.com/media").is_none());
+    }
+
+    #[test]
+    fn cookie_header_enforces_host_path_secure_and_expiry() {
+        let f = write_cookies(
+            "x.com\tFALSE\t/account\tTRUE\t0\thost_only\tA\n\
+             .x.com\tTRUE\t/\tFALSE\t1\texpired\tB\n\
+             .x.com\tTRUE\t/media\tTRUE\t4102444800\tvalid\tC\n",
+        );
+        let h = cookie_header_for(Some(f.path()), "https://video.x.com/media/1").unwrap();
+        assert_eq!(h, "valid=C");
+        assert!(cookie_header_for(Some(f.path()), "http://video.x.com/media/1").is_none());
+        assert!(cookie_header_for(Some(f.path()), "https://video.x.com/other").is_none());
     }
 }

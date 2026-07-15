@@ -161,7 +161,11 @@ pub fn resolve(store: &CookieStore, global: Option<&Path>, url: &str) -> Option<
 /// Resolve the cookie file when the caller has already determined the site `key`
 /// (e.g. from the DB-backed website registry, which supports user-added sites the
 /// static platform catalog doesn't). Falls back to the global cookie file.
-pub fn resolve_keyed(store: &CookieStore, global: Option<&Path>, key: Option<&str>) -> Option<PathBuf> {
+pub fn resolve_keyed(
+    store: &CookieStore,
+    global: Option<&Path>,
+    key: Option<&str>,
+) -> Option<PathBuf> {
     if let Some(k) = key {
         if let Some(path) = store.active_cookie(k) {
             return Some(path);
@@ -259,9 +263,11 @@ fn normalize_cookies(raw: &str, default_domain: Option<&str>) -> Result<String, 
     if trimmed.contains('=') {
         return header_to_netscape(trimmed, default_domain);
     }
-    Err("does not look like cookies — paste a Netscape cookies.txt, a JSON cookie \
+    Err(
+        "does not look like cookies — paste a Netscape cookies.txt, a JSON cookie \
          export, or a \"name=value; …\" header string"
-        .to_string())
+            .to_string(),
+    )
 }
 
 /// Convert a JSON cookie export (bare array, or `{ "cookies": [...] }`) to
@@ -322,7 +328,10 @@ fn json_to_netscape(raw: &str) -> Result<String, String> {
     if lines.is_empty() {
         return Err("JSON cookie export contained no usable cookies".to_string());
     }
-    Ok(format!("# Netscape HTTP Cookie File\n{}\n", lines.join("\n")))
+    Ok(format!(
+        "# Netscape HTTP Cookie File\n{}\n",
+        lines.join("\n")
+    ))
 }
 
 /// Convert a raw `Cookie:` header string (`a=b; c=d`) to Netscape, attaching every
@@ -333,9 +342,11 @@ fn header_to_netscape(raw: &str, default_domain: Option<&str>) -> Result<String,
         format!(".{h}") // leading dot → also applies to subdomains
     });
     let Some(domain) = host else {
-        return Err("a \"name=value; …\" header needs a site to attach to — add \
+        return Err(
+            "a \"name=value; …\" header needs a site to attach to — add \
                     this site's domain first, then paste"
-            .to_string());
+                .to_string(),
+        );
     };
     let mut lines = Vec::new();
     for pair in raw.split([';', '\n']) {
@@ -351,12 +362,20 @@ fn header_to_netscape(raw: &str, default_domain: Option<&str>) -> Result<String,
             continue;
         }
         // Secure + session (expiry 0): the safe default for pasted auth cookies.
-        lines.push(format!("{}\tTRUE\t/\tTRUE\t0\t{}\t{}", domain, name, value.trim()));
+        lines.push(format!(
+            "{}\tTRUE\t/\tTRUE\t0\t{}\t{}",
+            domain,
+            name,
+            value.trim()
+        ));
     }
     if lines.is_empty() {
         return Err("no name=value pairs found in the header string".to_string());
     }
-    Ok(format!("# Netscape HTTP Cookie File\n{}\n", lines.join("\n")))
+    Ok(format!(
+        "# Netscape HTTP Cookie File\n{}\n",
+        lines.join("\n")
+    ))
 }
 
 /// Validate + normalize pasted cookie text into a yt-dlp-acceptable Netscape

@@ -4,9 +4,28 @@ use super::YtdlpError;
 use crate::config::Config;
 use crate::types::ProbeResult;
 use std::path::Path;
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::sync::Semaphore;
 
 /// How many trailing bytes of stderr to surface on failure.
 const STDERR_TAIL: usize = 500;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+static PROBE_SLOTS: OnceLock<Semaphore> = OnceLock::new();
+
+async fn run_probe(cfg: &Config, args: &[String]) -> Result<std::process::Output, YtdlpError> {
+    let slots = PROBE_SLOTS.get_or_init(|| Semaphore::new(2));
+    let _permit = slots
+        .acquire()
+        .await
+        .map_err(|_| YtdlpError::Spawn("probe limiter closed".into()))?;
+    let mut command = tokio::process::Command::new(&cfg.ytdlp_path);
+    command.args(args).kill_on_drop(true);
+    tokio::time::timeout(PROBE_TIMEOUT, command.output())
+        .await
+        .map_err(|_| YtdlpError::Timeout)?
+        .map_err(|e| YtdlpError::Spawn(format!("failed to run {}: {e}", cfg.ytdlp_path)))
+}
 
 /// Probe a URL; returns one ProbeResult per video (playlists → many).
 /// `cookies` is the resolved cookie file for this URL (see `crate::cookies`).
@@ -17,11 +36,7 @@ pub async fn probe(
 ) -> Result<Vec<ProbeResult>, YtdlpError> {
     let args = crate::ytdlp::options::probe_args(cfg, url, cookies);
 
-    let output = tokio::process::Command::new(&cfg.ytdlp_path)
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| YtdlpError::Spawn(format!("failed to run {}: {e}", cfg.ytdlp_path)))?;
+    let output = run_probe(cfg, &args).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -55,11 +70,7 @@ pub async fn probe_heights(
     cookies: Option<&Path>,
 ) -> Result<Vec<i64>, YtdlpError> {
     let args = crate::ytdlp::options::probe_args(cfg, url, cookies);
-    let output = tokio::process::Command::new(&cfg.ytdlp_path)
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| YtdlpError::Spawn(format!("failed to run {}: {e}", cfg.ytdlp_path)))?;
+    let output = run_probe(cfg, &args).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -199,10 +210,7 @@ mod tests {
             Some("https://i.ytimg.com/vi/dQw4w9WgXcQ/maxres.jpg")
         );
         assert_eq!(r.duration, Some(213));
-        assert_eq!(
-            r.webpage_url,
-            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        );
+        assert_eq!(r.webpage_url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
         assert_eq!(r.archive_key(), "youtube dQw4w9WgXcQ");
     }
 
@@ -224,11 +232,13 @@ mod tests {
 
     #[test]
     fn duration_rounds_to_nearest_second() {
-        let line = r#"{"extractor":"youtube","id":"x","title":"t","webpage_url":"u","duration":212.6}"#;
+        let line =
+            r#"{"extractor":"youtube","id":"x","title":"t","webpage_url":"u","duration":212.6}"#;
         let r = parse_dump_json_line(line).expect("should parse");
         assert_eq!(r.duration, Some(213));
 
-        let line2 = r#"{"extractor":"youtube","id":"x","title":"t","webpage_url":"u","duration":212.4}"#;
+        let line2 =
+            r#"{"extractor":"youtube","id":"x","title":"t","webpage_url":"u","duration":212.4}"#;
         let r2 = parse_dump_json_line(line2).expect("should parse");
         assert_eq!(r2.duration, Some(212));
     }
@@ -258,7 +268,10 @@ mod tests {
     fn invalid_line_returns_none() {
         assert!(parse_dump_json_line("not json").is_none());
         // Missing required field `id`.
-        assert!(parse_dump_json_line(r#"{"extractor":"youtube","title":"t","webpage_url":"u"}"#).is_none());
+        assert!(
+            parse_dump_json_line(r#"{"extractor":"youtube","title":"t","webpage_url":"u"}"#)
+                .is_none()
+        );
     }
 
     #[test]
@@ -277,8 +290,10 @@ mod tests {
         .unwrap();
         assert_eq!(heights_from_json(&v), vec![1080, 720, 360]);
         // Only storyboard/audio (vcodec none) → empty.
-        let audio: serde_json::Value =
-            serde_json::from_str(r#"{"formats":[{"height":45,"vcodec":"none"},{"acodec":"opus","vcodec":"none"}]}"#).unwrap();
+        let audio: serde_json::Value = serde_json::from_str(
+            r#"{"formats":[{"height":45,"vcodec":"none"},{"acodec":"opus","vcodec":"none"}]}"#,
+        )
+        .unwrap();
         assert!(heights_from_json(&audio).is_empty());
     }
 

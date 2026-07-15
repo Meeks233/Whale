@@ -4,21 +4,32 @@ use super::AppState;
 use crate::db::ListQuery;
 use crate::error::{AppError, AppResult};
 use crate::types::{Item, Status, SubmitRequest, SubmitResponse};
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
+async fn item_by_slug(state: &AppState, slug: &str) -> AppResult<Item> {
+    let valid = matches!(slug.len(), 24 | 32) && slug.bytes().all(|b| b.is_ascii_hexdigit());
+    if !valid {
+        return Err(AppError::NotFound);
+    }
+    state.db.find_by_slug(slug).await?.ok_or(AppError::NotFound)
+}
+
 /// POST /api/items — submit a URL: probe → dedup → enqueue.
 pub async fn submit(
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
+    Extension(auth): Extension<super::auth::AuthContext>,
     Json(req): Json<SubmitRequest>,
 ) -> AppResult<Response> {
     if req.url.trim().is_empty() {
         return Err(AppError::BadRequest("missing url".into()));
+    }
+    if req.url.len() > 8192 {
+        return Err(AppError::BadRequest("url is too long".into()));
     }
     // Canonicalize before probe/dedup: strip tracking params and fold short
     // links / mobile hosts so the same video shared in different forms resolves
@@ -27,15 +38,14 @@ pub async fn submit(
     // SSRF guard: reject non-http(s) schemes and hosts that are/resolve to
     // private, loopback, or link-local addresses before handing the URL to
     // yt-dlp (whose generic extractor would otherwise fetch them).
-    crate::net_guard::guard(&url).map_err(|r| AppError::BadRequest(r.reason().into()))?;
+    crate::net_guard::guard(&url, state.cfg.allow_private_dns)
+        .await
+        .map_err(|r| AppError::BadRequest(r.reason().into()))?;
     let force = req.options.as_ref().and_then(|o| o.force).unwrap_or(false);
 
     // If this request authenticated as a self-registered client (not the owner
     // token), we tally its submissions per extractor for rate/abuse visibility.
-    let client_id = match super::auth::extract_token(&headers, "") {
-        Some(t) if t != state.cfg.token => state.db.find_trusted_client_id(&t).await.ok().flatten(),
-        _ => None,
-    };
+    let client_id = auth.client_id;
 
     // Website registry gating (before probe): a disabled site refuses submissions
     // outright — don't even touch it.
@@ -82,6 +92,9 @@ pub async fn submit(
             return Err(AppError::ProbeFailed(msg));
         }
     };
+    if probes.len() > 500 {
+        return Err(AppError::BadRequest("playlist exceeds 500 items".into()));
+    }
 
     // A multi-video post (e.g. a tweet with two clips) probes into several entries
     // that all carry the SAME webpage_url; a playlist of distinct videos gives each
@@ -127,7 +140,10 @@ pub async fn submit(
         let shared_url = url_counts.get(p.webpage_url.as_str()).copied().unwrap_or(0) > 1;
         let mut probe = p.clone();
         probe.playlist_index = if shared_url { p.playlist_index } else { None };
-        let item = state.db.insert_probe(&probe, crate::types::Source::Download).await?;
+        let item = state
+            .db
+            .insert_probe(&probe, crate::types::Source::Download)
+            .await?;
         if no_download {
             // Keep the entry as a stream-only record; don't fetch anything.
             state.db.mark_stream_only(item.id).await?;
@@ -152,8 +168,8 @@ pub async fn submit(
         // share-target notifications (ShareActivity) can mask a blurred site's
         // real title. Additive field on the item object; harmless to other clients.
         let blur = site.map(|w| w.blur).unwrap_or(false);
-        let mut v = serde_json::to_value(SubmitResponse { item, duplicate })
-            .unwrap_or_else(|_| json!({}));
+        let mut v =
+            serde_json::to_value(SubmitResponse { item, duplicate }).unwrap_or_else(|_| json!({}));
         v["item"]["blur"] = json!(blur);
         Ok((status, Json(v)).into_response())
     } else {
@@ -179,7 +195,9 @@ pub async fn list(
     Query(params): Query<ListParams>,
 ) -> AppResult<Response> {
     let status = match params.status.as_deref() {
-        Some(s) => Some(Status::parse(s).ok_or_else(|| AppError::BadRequest(format!("bad status '{s}'")))?),
+        Some(s) => Some(
+            Status::parse(s).ok_or_else(|| AppError::BadRequest(format!("bad status '{s}'")))?,
+        ),
         None => None,
     };
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
@@ -195,11 +213,11 @@ pub async fn list(
     Ok(Json(json!({ "items": page.items, "next_cursor": page.next_cursor })).into_response())
 }
 
-/// GET /api/items/:id — one item. Carries a computed `blur` flag (its site's
+/// GET /api/items/:slug — one item. Carries a computed `blur` flag (its site's
 /// privacy-blur setting) so the headless share-target notification poller
 /// (ShareActivity) can mask a blurred site's real title.
-pub async fn get(State(state): State<AppState>, Path(id): Path<i64>) -> AppResult<Response> {
-    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+pub async fn get(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
+    let item = item_by_slug(&state, &slug).await?;
     let sites = state.db.list_websites().await.unwrap_or_default();
     let blur = crate::websites::detect(&sites, &item.webpage_url)
         .map(|w| w.blur)
@@ -209,15 +227,17 @@ pub async fn get(State(state): State<AppState>, Path(id): Path<i64>) -> AppResul
     Ok(Json(v).into_response())
 }
 
-/// POST /api/items/:id/retry — re-queue a failed item.
-pub async fn retry(State(state): State<AppState>, Path(id): Path<i64>) -> AppResult<Response> {
-    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+/// POST /api/items/:slug/retry — re-queue a failed item.
+pub async fn retry(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
+    let item = item_by_slug(&state, &slug).await?;
     if item.status != Status::Failed {
-        return Err(AppError::BadRequest("item is not in a retryable (failed) state".into()));
+        return Err(AppError::BadRequest(
+            "item is not in a retryable (failed) state".into(),
+        ));
     }
-    state.db.set_status(id, Status::Queued, None).await?;
-    state.queue.enqueue(id).await;
-    let refreshed = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    state.db.set_status(item.id, Status::Queued, None).await?;
+    state.queue.enqueue(item.id).await;
+    let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(refreshed).into_response())
 }
 
@@ -234,14 +254,14 @@ pub struct PublicRequest {
 /// can't set an arbitrary window.
 const ALLOWED_SHARE_DAYS: [i64; 2] = [7, 30];
 
-/// POST /api/items/:id/public — flip an item's public (tokenless-streaming) flag.
+/// POST /api/items/:slug/public — flip an item's public (tokenless-streaming) flag.
 /// When making public, `expires_in_days` (7 | 30 | null) sets the auto-expiry.
 pub async fn set_public(
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    Path(slug): Path<String>,
     Json(req): Json<PublicRequest>,
 ) -> AppResult<Response> {
-    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    let item = item_by_slug(&state, &slug).await?;
     if item.status != Status::Completed || item.filepath.is_none() {
         return Err(AppError::BadRequest(
             "only completed items with a file can be made public".into(),
@@ -260,8 +280,8 @@ pub async fn set_public(
         }
         None => None,
     };
-    state.db.set_public(id, req.public, until).await?;
-    let refreshed = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    state.db.set_public(item.id, req.public, until).await?;
+    let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(refreshed).into_response())
 }
 
@@ -271,15 +291,17 @@ pub struct DeleteParams {
     pub delete_file: bool,
 }
 
-/// DELETE /api/items/:id — remove a record (optionally its file).
+/// DELETE /api/items/:slug — remove a record (optionally its file).
 pub async fn delete(
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    Path(slug): Path<String>,
     Query(params): Query<DeleteParams>,
 ) -> AppResult<Response> {
     // Stop the backend download(s) if this item is still fetching — otherwise the
     // yt-dlp child keeps running after the row (and the UI card) are gone. Grab
     // the resolution files first (the rows cascade-delete with the item).
+    let item = item_by_slug(&state, &slug).await?;
+    let id = item.id;
     state.queue.cancel(id);
     let resolution_files: Vec<String> = state
         .db
@@ -323,14 +345,15 @@ pub async fn logs(State(state): State<AppState>) -> AppResult<Response> {
     Ok(Json(json!({ "entries": entries, "capacity": crate::errlog::CAPACITY })).into_response())
 }
 
-/// GET /api/items/:id/resolutions — the resolution versions the SOURCE actually
+/// GET /api/items/:slug/resolutions — the resolution versions the SOURCE actually
 /// offers (its real per-format heights, captured at probe time) and which are
 /// already downloaded. Powers the per-item resolution multi-select.
 pub async fn resolutions(
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    Path(slug): Path<String>,
 ) -> AppResult<Response> {
-    let item = state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    let item = item_by_slug(&state, &slug).await?;
+    let id = item.id;
     let downloaded: Vec<i64> = state
         .db
         .list_resolutions(id)
@@ -347,7 +370,9 @@ pub async fn resolutions(
             spawn_heights_refresh(state.clone(), item.clone());
             h
         }
-        _ => probe_source_heights(&state, &item).await.unwrap_or_default(),
+        _ => probe_source_heights(&state, &item)
+            .await
+            .unwrap_or_default(),
     };
 
     // Union the source's heights with anything already downloaded (always let the
@@ -369,11 +394,17 @@ pub async fn resolutions(
 /// Probe the source's available heights now and cache them. `None` on any
 /// failure (SSRF guard / yt-dlp error) so the caller can degrade gracefully.
 async fn probe_source_heights(state: &AppState, item: &crate::types::Item) -> Option<Vec<i64>> {
-    if crate::net_guard::guard(&item.webpage_url).is_err() {
+    if crate::net_guard::guard(&item.webpage_url, state.cfg.allow_private_dns)
+        .await
+        .is_err()
+    {
         return None;
     }
-    let cookie =
-        crate::cookies::resolve(&state.cookies, state.cfg.cookies.as_deref(), &item.webpage_url);
+    let cookie = crate::cookies::resolve(
+        &state.cookies,
+        state.cfg.cookies.as_deref(),
+        &item.webpage_url,
+    );
     match crate::ytdlp::probe_heights(&state.cfg, &item.webpage_url, cookie.as_deref()).await {
         Ok(h) => {
             let _ = state.db.set_available_heights(item.id, &h).await;
@@ -401,17 +432,23 @@ pub struct ResolutionsRequest {
     pub heights: Vec<i64>,
 }
 
-/// PUT /api/items/:id/resolutions — reconcile the item's downloaded resolutions
+/// PUT /api/items/:slug/resolutions — reconcile the item's downloaded resolutions
 /// to the desired set: queue downloads for newly-selected heights, delete files
 /// for deselected ones. Rejects an empty set (a video must keep ≥1 version;
 /// deselecting everything must not silently fall back to the original).
 pub async fn set_resolutions(
     State(state): State<AppState>,
-    Path(id): Path<i64>,
+    Path(slug): Path<String>,
     Json(req): Json<ResolutionsRequest>,
 ) -> AppResult<Response> {
-    // Ensure the item exists (404 otherwise); its primary is derived below.
-    state.db.get(id).await?.ok_or(AppError::NotFound)?;
+    let item = item_by_slug(&state, &slug).await?;
+    let id = item.id;
+
+    if req.heights.len() > 16 {
+        return Err(AppError::BadRequest(
+            "at most 16 resolutions may be selected".into(),
+        ));
+    }
 
     // An empty desired set is the explicit "None" (no-download) mode: purge every
     // local file and keep the DB entry as a stream-only record. It is no longer
@@ -529,7 +566,10 @@ pub async fn put_settings(
             _ => None,
         }
     };
-    state.db.set_setting("max_height", stored.as_deref()).await?;
+    state
+        .db
+        .set_setting("max_height", stored.as_deref())
+        .await?;
     get_settings(State(state)).await
 }
 

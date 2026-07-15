@@ -7,11 +7,12 @@ declare const self: ServiceWorkerGlobalScope;
 
 // Cache name is versioned so activate() can purge stale generations. The fetch
 // handler below is network-first, so code edits load without bumping this.
-const CACHE = 'whale-shell-v5';
+const CACHE = 'whale-shell-v6';
 const SHELL = [
   '/',
   '/index.html',
   '/app.js',
+  '/theme.js',
   '/style.css',
   '/manifest.webmanifest',
   '/icons/192.png',

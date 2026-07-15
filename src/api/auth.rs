@@ -7,6 +7,25 @@ use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
 
+#[derive(Debug, Clone, Copy)]
+pub struct AuthContext {
+    pub client_id: Option<i64>,
+}
+
+struct Credential {
+    context: AuthContext,
+    encryption_key: Option<[u8; 32]>,
+}
+
+fn header_token(headers: &HeaderMap) -> Option<String> {
+    let val = headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?;
+    let tok = val.strip_prefix("Bearer ")?.trim();
+    (!tok.is_empty()).then(|| tok.to_string())
+}
+
 /// Extract a bearer token from the `Authorization: Bearer` header or a `token=` query param.
 pub fn extract_token(headers: &HeaderMap, query: &str) -> Option<String> {
     if let Some(val) = headers.get(axum::http::header::AUTHORIZATION) {
@@ -22,6 +41,18 @@ pub fn extract_token(headers: &HeaderMap, query: &str) -> Option<String> {
     for pair in query.split('&') {
         if let Some(tok) = pair.strip_prefix("token=") {
             let decoded = urldecode(tok);
+            if !decoded.is_empty() {
+                return Some(decoded);
+            }
+        }
+    }
+    None
+}
+
+pub fn query_param(query: &str, name: &str) -> Option<String> {
+    for pair in query.split('&') {
+        if let Some(value) = pair.strip_prefix(&format!("{name}=")) {
+            let decoded = urldecode(value);
             if !decoded.is_empty() {
                 return Some(decoded);
             }
@@ -78,23 +109,130 @@ fn urldecode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Middleware guarding `/api/*` routes (except health/events, which are wired separately).
-pub async fn require_auth(
+/// Owner-only middleware. Normal JSON API routes never accept query-string
+/// credentials; query auth is limited to media and SSE where browser APIs cannot
+/// attach an Authorization header.
+pub async fn require_owner(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
-    let query = request.uri().query().unwrap_or("");
-    let token = extract_token(request.headers(), query);
-    let Some(t) = token else {
+    run_authenticated(&state, request, next, false).await
+}
+
+/// Submission middleware: owner or an explicitly trusted client. Client
+/// credentials are intentionally scoped to POST /api/items and cannot read or
+/// administer owner data.
+pub async fn require_submitter(
+    State(state): State<AppState>,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    run_authenticated(&state, request, next, true).await
+}
+
+async fn run_authenticated(
+    state: &AppState,
+    request: Request,
+    next: Next,
+    allow_client: bool,
+) -> Result<Response, AppError> {
+    let credential = authenticate(state, request.headers(), allow_client).await?;
+    let method = request.method().as_str().to_string();
+    let target = request
+        .uri()
+        .path_and_query()
+        .map(|v| v.as_str())
+        .unwrap_or(request.uri().path())
+        .to_string();
+    let encrypted_body = request
+        .headers()
+        .contains_key(crate::e2ee::HEADER_ENCRYPTED_BODY);
+    let mut request = if let (Some(key), true) = (&credential.encryption_key, encrypted_body) {
+        let aad = format!("{method}\n{target}");
+        crate::e2ee::decrypt_request(request, key, aad.as_bytes()).await?
+    } else {
+        request
+    };
+    request.extensions_mut().insert(credential.context);
+    let response = next.run(request).await;
+    if let Some(key) = &credential.encryption_key {
+        let aad = format!("{}\n{target}", response.status().as_u16());
+        crate::e2ee::encrypt_response(response, key, aad.as_bytes()).await
+    } else {
+        Ok(response)
+    }
+}
+
+async fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+    allow_client: bool,
+) -> Result<Credential, AppError> {
+    let encrypted = headers
+        .get(crate::e2ee::HEADER_E2EE)
+        .and_then(|v| v.to_str().ok())
+        == Some("1");
+    if encrypted {
+        let requested_id = headers
+            .get(crate::e2ee::HEADER_KEY_ID)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::Unauthorized)?;
+        let owner_hash = crate::e2ee::auth_hash(&state.cfg.token);
+        if ct_eq(requested_id, &crate::e2ee::key_id(&owner_hash)) {
+            return Ok(Credential {
+                context: AuthContext { client_id: None },
+                encryption_key: Some(crate::e2ee::encryption_key(&owner_hash)),
+            });
+        }
+        if allow_client {
+            for (client_id, stored_hash) in state.db.trusted_client_auth_hashes().await? {
+                let Some(hash) = crate::e2ee::auth_hash_from_hex(&stored_hash) else {
+                    continue;
+                };
+                if ct_eq(requested_id, &crate::e2ee::key_id(&hash)) {
+                    return Ok(Credential {
+                        context: AuthContext {
+                            client_id: Some(client_id),
+                        },
+                        encryption_key: Some(crate::e2ee::encryption_key(&hash)),
+                    });
+                }
+            }
+        }
+        return Err(AppError::Unauthorized);
+    }
+
+    let Some(token) = header_token(headers) else {
         return Err(AppError::Unauthorized);
     };
-    // Owner token OR a trusted self-registered client passphrase.
-    if ct_eq(&t, &state.cfg.token) {
-        return Ok(next.run(request).await);
+    if ct_eq(&token, &state.cfg.token) {
+        return Ok(Credential {
+            context: AuthContext { client_id: None },
+            encryption_key: None,
+        });
     }
-    match state.db.find_trusted_client_id(&t).await {
-        Ok(Some(_)) => Ok(next.run(request).await),
-        _ => Err(AppError::Unauthorized),
+    if allow_client {
+        if let Some(client_id) = state.db.find_trusted_client_id(&token).await? {
+            return Ok(Credential {
+                context: AuthContext {
+                    client_id: Some(client_id),
+                },
+                encryption_key: None,
+            });
+        }
+    }
+    Err(AppError::Unauthorized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_comparison_matches_exact_bytes() {
+        assert!(ct_eq("0123456789abcdef", "0123456789abcdef"));
+        assert!(!ct_eq("0123456789abcdee", "0123456789abcdef"));
+        assert!(!ct_eq("short", "longer"));
     }
 }

@@ -23,7 +23,7 @@ const common = {
   minify: true,
   format: 'iife',
   target: ['es2019'],
-  legalComments: 'none',
+  legalComments: 'eof',
   logLevel: 'info',
 };
 
@@ -31,10 +31,11 @@ await Promise.all([
   // App bundle: app.ts imports i18n.ts for its side effect (window.i18n), so the
   // two former <script>s collapse into one request.
   build({ ...common, entryPoints: [src('app.ts')], outfile: out('app.js') }),
+  build({ ...common, entryPoints: [src('theme.ts')], outfile: out('theme.js') }),
   // Service worker: bundled separately so it keeps its own top-level scope.
   build({ ...common, entryPoints: [src('sw.ts')], outfile: out('sw.js') }),
   // Stylesheet: esbuild minifies CSS (whitespace, longhand collapse, dead rules).
   build({ ...common, entryPoints: [src('style.css')], outfile: out('style.css'), loader: { '.css': 'css' } }),
 ]);
 
-console.log('web/ assets built (app.js, sw.js, style.css)');
+console.log('web/ assets built (app.js, theme.js, sw.js, style.css)');

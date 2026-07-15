@@ -1,0 +1,12 @@
+**
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!Dockerfile
+!YTDLP_SHA256
+!migrations/
+!migrations/**
+!src/
+!src/**
+!web/
+!web/**

@@ -32,14 +32,21 @@ pub async fn list(State(state): State<AppState>) -> AppResult<Response> {
 
 /// POST /api/archive — add a dedup key. Body `{ "key": "youtube abc123" }`.
 /// Idempotent. Rejects keys not shaped like `extractor id`.
-pub async fn add(State(state): State<AppState>, Json(req): Json<KeyRequest>) -> AppResult<Response> {
+pub async fn add(
+    State(state): State<AppState>,
+    Json(req): Json<KeyRequest>,
+) -> AppResult<Response> {
     let key = req.key.trim();
     if key.is_empty() || !key.contains(' ') {
         return Err(AppError::BadRequest(
             "key must look like 'extractor id' (Seal/yt-dlp archive format)".into(),
         ));
     }
-    state.archive.insert(key).await.map_err(|e| AppError::Internal(e.to_string()))?;
+    state
+        .archive
+        .insert(key)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(json!({ "added": true, "key": key })).into_response())
 }
 
@@ -70,8 +77,15 @@ pub async fn import(
 }
 
 /// DELETE /api/archive — remove a dedup key. Body `{ "key": "youtube abc123" }`.
-pub async fn remove(State(state): State<AppState>, Json(req): Json<KeyRequest>) -> AppResult<Response> {
+pub async fn remove(
+    State(state): State<AppState>,
+    Json(req): Json<KeyRequest>,
+) -> AppResult<Response> {
     let key = req.key.trim();
-    state.archive.remove(key).await.map_err(|e| AppError::Internal(e.to_string()))?;
+    state
+        .archive
+        .remove(key)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     Ok(Json(json!({ "removed": true, "key": key })).into_response())
 }

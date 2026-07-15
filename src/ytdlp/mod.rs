@@ -5,7 +5,11 @@ pub mod metadata;
 pub mod options;
 
 use crate::config::Config;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 pub use download::download;
 pub use metadata::{probe, probe_heights};
@@ -34,6 +38,59 @@ pub enum YtdlpError {
     /// forever. The caller surfaces this as a normal (recoverable) stream failure.
     #[error("timed out")]
     Timeout,
+}
+
+#[derive(Debug, Clone)]
+struct CachedStreamUrl {
+    value: String,
+    expires_at: Instant,
+}
+
+type StreamUrlSlot = Arc<Mutex<Option<CachedStreamUrl>>>;
+
+/// Short-lived direct-media URL cache. A per-item mutex collapses concurrent
+/// video Range requests into one `yt-dlp -g` process while unrelated items still
+/// resolve in parallel. URLs remain cached only briefly because CDN signatures
+/// are time-limited and tied to this server's IP.
+#[derive(Clone, Default)]
+pub struct StreamUrlCache {
+    slots: Arc<Mutex<HashMap<String, StreamUrlSlot>>>,
+}
+
+impl StreamUrlCache {
+    pub async fn resolve(
+        &self,
+        key: &str,
+        cfg: &Config,
+        url: &str,
+        cookies: Option<&Path>,
+        playlist_index: Option<i64>,
+    ) -> Result<String, YtdlpError> {
+        let slot = {
+            let mut slots = self.slots.lock().await;
+            // Bound stale keys from a long-running server. Existing Arc handles
+            // stay valid if a cleanup races an in-flight resolution.
+            if slots.len() >= 128 && !slots.contains_key(key) {
+                slots.clear();
+            }
+            slots
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .clone()
+        };
+
+        let mut cached = slot.lock().await;
+        if let Some(hit) = cached.as_ref().filter(|v| v.expires_at > Instant::now()) {
+            return Ok(hit.value.clone());
+        }
+
+        let value = resolve_stream_url(cfg, url, cookies, playlist_index).await?;
+        *cached = Some(CachedStreamUrl {
+            value: value.clone(),
+            expires_at: Instant::now() + Duration::from_secs(120),
+        });
+        Ok(value)
+    }
 }
 
 /// Turn a raw yt-dlp error into a message the user can act on.
@@ -103,6 +160,9 @@ pub async fn resolve_stream_url(
         .arg("-f")
         .arg("b[protocol^=http]/b")
         .arg("-g");
+    if playlist_index.is_none() {
+        cmd.arg("--no-playlist");
+    }
     // Multi-video post: pick this item's own video from the shared URL.
     if let Some(idx) = playlist_index {
         cmd.arg("--playlist-items").arg(idx.to_string());

@@ -21,13 +21,24 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Pinned by digest for reproducible builds (debian:bookworm-slim as of 2026-07).
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 ARG YTDLP_VERSION=2026.07.04
-LABEL org.opencontainers.image.ytdlp="${YTDLP_VERSION}"
+ARG VCS_REF=unknown
+ARG IMAGE_VERSION=dev
+LABEL org.opencontainers.image.title="Whale" \
+      org.opencontainers.image.description="Self-hosted cloud-native yt-dlp downloader" \
+      org.opencontainers.image.source="https://github.com/Meeks233/Whale" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.licenses="GPL-3.0-or-later" \
+      org.opencontainers.image.ytdlp="${YTDLP_VERSION}"
+COPY YTDLP_SHA256 /tmp/YTDLP_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg python3 ca-certificates curl \
-    && curl -L "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp" \
+    && curl --fail --location --retry 3 --retry-all-errors \
+        "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp" \
         -o /usr/local/bin/yt-dlp \
+    && printf '%s  %s\n' "$(cat /tmp/YTDLP_SHA256)" /usr/local/bin/yt-dlp | sha256sum -c - \
     && chmod +x /usr/local/bin/yt-dlp \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/YTDLP_SHA256
 COPY --from=builder /app/whale /usr/local/bin/whale
 RUN useradd -m -u 10001 whale && mkdir -p /data /downloads && chown whale /data /downloads
 USER whale

@@ -1,6 +1,6 @@
-//! Embedded static frontend assets (rust-embed) + Axum static handler. See docs/FRONTEND.md.
+//! Embedded static frontend assets and Axum handler. See docs/ARCHITECTURE.md.
 
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -34,20 +34,48 @@ pub async fn static_handler(headers: HeaderMap, uri: Uri) -> Response {
                 .get(header::IF_NONE_MATCH)
                 .is_some_and(|v| v.as_bytes() == etag.as_bytes())
             {
-                return (StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response();
+                return secure((StatusCode::NOT_MODIFIED, [(header::ETAG, etag)]).into_response());
             }
 
             let mime = mime_guess::from_path(path).first_or_octet_stream();
-            (
-                [
-                    (header::CONTENT_TYPE, mime.as_ref().to_owned()),
-                    (header::CACHE_CONTROL, "no-cache".to_owned()),
-                    (header::ETAG, etag),
-                ],
-                content.data.into_owned(),
+            secure(
+                (
+                    [
+                        (header::CONTENT_TYPE, mime.as_ref().to_owned()),
+                        (header::CACHE_CONTROL, "no-cache".to_owned()),
+                        (header::ETAG, etag),
+                    ],
+                    content.data.into_owned(),
+                )
+                    .into_response(),
             )
-                .into_response()
         }
-        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+        None => secure((StatusCode::NOT_FOUND, "not found").into_response()),
     }
+}
+
+fn secure(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: https:; media-src 'self' blob:; connect-src 'self' http: https:; \
+             font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        ),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=()"),
+    );
+    response
 }

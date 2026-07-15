@@ -12,11 +12,17 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.util.Base64
 import android.widget.Toast
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * "Quick Download" share target (mirrors Seal's QuickDownloadActivity).
@@ -126,9 +132,65 @@ class ShareActivity : Activity() {
   companion object {
     private const val TAG = "WhaleShare"
     private const val CHANNEL_ID = "quick_download"
-    // Notification-id base for per-item progress notifications, keyed by item id
-    // so each download owns one updatable notification.
+    // Notification-id base for per-item progress notifications. The private API
+    // slug is hashed into Android's integer notification namespace.
     private const val NOTIF_BASE = 200000
+
+    private data class E2eeCredential(val keyId: String, val key: SecretKeySpec)
+
+    private fun sha256(bytes: ByteArray): ByteArray =
+      MessageDigest.getInstance("SHA-256").digest(bytes)
+
+    private fun e2eeCredential(token: String): E2eeCredential {
+      val authHash = sha256(token.toByteArray(Charsets.UTF_8))
+      val keyId = sha256("whale-e2ee-kid-v1\u0000".toByteArray() + authHash)
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+      val key = sha256("whale-e2ee-key-v1\u0000".toByteArray() + authHash)
+      return E2eeCredential(keyId, SecretKeySpec(key, "AES"))
+    }
+
+    private fun seal(credential: E2eeCredential, plaintext: ByteArray, aad: String): String {
+      val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }
+      val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+      cipher.init(Cipher.ENCRYPT_MODE, credential.key, GCMParameterSpec(128, nonce))
+      cipher.updateAAD(aad.toByteArray(Charsets.UTF_8))
+      return JSONObject()
+        .put("v", 1)
+        .put("n", Base64.encodeToString(nonce, Base64.NO_WRAP))
+        .put("c", Base64.encodeToString(cipher.doFinal(plaintext), Base64.NO_WRAP))
+        .toString()
+    }
+
+    private fun open(credential: E2eeCredential, envelope: String, aad: String): String {
+      val parsed = JSONObject(envelope)
+      require(parsed.optInt("v") == 1) { "invalid encrypted response" }
+      val nonce = Base64.decode(parsed.getString("n"), Base64.DEFAULT)
+      val ciphertext = Base64.decode(parsed.getString("c"), Base64.DEFAULT)
+      require(nonce.size == 12 && ciphertext.size >= 16) { "invalid encrypted response" }
+      val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+      cipher.init(Cipher.DECRYPT_MODE, credential.key, GCMParameterSpec(128, nonce))
+      cipher.updateAAD(aad.toByteArray(Charsets.UTF_8))
+      return String(cipher.doFinal(ciphertext), Charsets.UTF_8)
+    }
+
+    private fun configureE2ee(conn: HttpURLConnection, credential: E2eeCredential, hasBody: Boolean) {
+      conn.setRequestProperty("X-Whale-E2EE", "1")
+      conn.setRequestProperty("X-Whale-Key-Id", credential.keyId)
+      if (hasBody) {
+        conn.setRequestProperty("X-Whale-Encrypted-Body", "1")
+        conn.setRequestProperty("Content-Type", "text/plain")
+      }
+    }
+
+    private fun readResponse(conn: HttpURLConnection, credential: E2eeCredential, path: String): Pair<Int, String> {
+      val code = conn.responseCode
+      val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+      val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
+      val plaintext = if (conn.getHeaderField("X-Whale-E2EE") == "1") {
+        open(credential, body, "$code\n$path")
+      } else body
+      return Pair(code, plaintext)
+    }
 
     /** An intent that opens MainActivity (the WebView) with `url` prefilled so
      *  the frontend's drain path re-submits it and shows the real error toast. */
@@ -144,32 +206,31 @@ class ShareActivity : Activity() {
       var title = "Whale"
       var body: String
       var ok = false
-      var itemId = -1
+      var itemSlug = ""
       var videoId = ""
       var duplicate = false
       var blur = false
       try {
+        val path = "/api/items"
+        val credential = e2eeCredential(token)
         val conn = (URL("$base/api/items").openConnection() as HttpURLConnection).apply {
           requestMethod = "POST"
           connectTimeout = 15000
           readTimeout = 30000
           doOutput = true
-          setRequestProperty("Content-Type", "application/json")
-          setRequestProperty("Authorization", "Bearer $token")
+          configureE2ee(this, credential, true)
         }
         val payload = JSONObject().put("url", url).put("options", JSONObject()).toString()
-        conn.outputStream.use { it.write(payload.toByteArray()) }
+        conn.outputStream.use { it.write(seal(credential, payload.toByteArray(), "POST\n$path").toByteArray()) }
         Log.i(TAG, "POST $base/api/items payload=$payload")
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val respText = stream?.bufferedReader()?.use { it.readText() } ?: ""
+        val (code, respText) = readResponse(conn, credential, path)
         Log.i(TAG, "response code=$code body=${respText.take(300)}")
         val resp = try { JSONObject(respText) } catch (e: Exception) { JSONObject() }
         body = when {
           code in 200..299 -> {
             ok = true
             val item = resp.optJSONObject("item")
-            itemId = item?.optInt("id", -1) ?: -1
+            itemSlug = item?.optString("slug") ?: ""
             videoId = item?.optString("video_id") ?: ""
             title = item?.optString("title")?.takeIf { it.isNotEmpty() } ?: "Link"
             duplicate = resp.optBoolean("duplicate")
@@ -193,19 +254,19 @@ class ShareActivity : Activity() {
       toast(ctx, "Whale · $body")
       // One notification per item, keyed by a stable id so progress updates
       // REPLACE it in place instead of stacking (one slot per item, never two).
-      val notifId = if (itemId >= 0) NOTIF_BASE + itemId else (System.currentTimeMillis() % 100000).toInt()
-      val active = ok && !duplicate && itemId >= 0
+      val notifId = if (itemSlug.isNotEmpty()) NOTIF_BASE + (itemSlug.hashCode() and 0x0fffffff) else (System.currentTimeMillis() % 100000).toInt()
+      val active = ok && !duplicate && itemSlug.isNotEmpty()
       if (active) {
         // Deliberately NO "queued" notification here: the Toast above already
         // acknowledged the queue, and echoing it into the persistent channel was
         // the redundant buzz. The system notification first appears once the
         // download is actually running and then updates that SAME notification
         // through to completion (see pollProgress) — silent (onlyAlertOnce).
-        pollProgress(ctx, base, token, itemId, notifId, title, videoId, blur)
+        pollProgress(ctx, base, token, itemSlug, notifId, title, videoId, blur)
       } else if (!ok) {
         // A real failure still needs a tappable notification (the Toast is easy to
         // miss) so the user can reopen the app and retry with the actual error.
-        postNotif(ctx, notifId, notifTitle(title, blur, videoId, itemId), body, url, ongoing = false, indeterminate = false)
+        postNotif(ctx, notifId, notifTitle(title, blur, videoId), body, url, ongoing = false, indeterminate = false)
       }
       // success + duplicate: Toast only — it's already downloaded, nothing to track.
     }
@@ -214,14 +275,14 @@ class ShareActivity : Activity() {
      *  otherwise sit in a persistent notification the user must clear by hand).
      *  Masks with the source's own video id (tweet / youtube id) — meaningful yet
      *  title-free — falling back to the internal item id only when it's unknown. */
-    private fun notifTitle(title: String, blur: Boolean, videoId: String, itemId: Int): String =
-      if (blur) (if (videoId.isNotEmpty()) "Video $videoId" else if (itemId >= 0) "Item #$itemId" else "Download") else title
+    private fun notifTitle(title: String, blur: Boolean, videoId: String): String =
+      if (blur) (if (videoId.isNotEmpty()) "Video $videoId" else "Download") else title
 
     /** Poll the server for this item's status and update its notification in
      *  place until it finishes. Silent (no new sound) thanks to onlyAlertOnce.
      *  Bounded (~10 min) so a stuck download can't spin forever; best-effort —
      *  the process may be reclaimed while backgrounded, which is fine. */
-    private fun pollProgress(ctx: Context, base: String, token: String, itemId: Int, notifId: Int, titleIn: String, videoIdIn: String, blurIn: Boolean) {
+    private fun pollProgress(ctx: Context, base: String, token: String, itemSlug: String, notifId: Int, titleIn: String, videoIdIn: String, blurIn: Boolean) {
       var title = titleIn
       var videoId = videoIdIn
       var blur = blurIn
@@ -230,24 +291,25 @@ class ShareActivity : Activity() {
         tries++
         try { Thread.sleep(3000) } catch (e: InterruptedException) { return }
         try {
-          val conn = (URL("$base/api/items/$itemId").openConnection() as HttpURLConnection).apply {
+          val path = "/api/items/$itemSlug"
+          val credential = e2eeCredential(token)
+          val conn = (URL("$base/api/items/$itemSlug").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 15000
             readTimeout = 20000
-            setRequestProperty("Authorization", "Bearer $token")
+            configureE2ee(this, credential, false)
           }
-          val code = conn.responseCode
+          val (code, txt) = readResponse(conn, credential, path)
           // The item is gone (deleted while downloading → 404): clear our ongoing
           // notification so it can't linger as a ghost the user must swipe away.
           if (code == 404) { conn.disconnect(); cancelNotif(ctx, notifId); return }
           if (code !in 200..299) { conn.disconnect(); continue }
-          val txt = conn.inputStream.bufferedReader().use { it.readText() }
           conn.disconnect()
           val item = JSONObject(txt)
           item.optString("title").takeIf { it.isNotEmpty() }?.let { title = it }
           item.optString("video_id").takeIf { it.isNotEmpty() }?.let { videoId = it }
           blur = item.optBoolean("blur", blur) // may flip if the site setting changed
-          val shown = notifTitle(title, blur, videoId, itemId)
+          val shown = notifTitle(title, blur, videoId)
           when (item.optString("status")) {
             "completed" -> { postNotif(ctx, notifId, shown, "Download complete ✓", null, ongoing = false, indeterminate = false); return }
             "failed" -> {

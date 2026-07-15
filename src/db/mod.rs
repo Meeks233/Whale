@@ -1,4 +1,4 @@
-//! Database handle: connect, migrate, and queries. See docs/DATABASE.md, docs/MODULES.md §3.
+//! Database handle: connect, migrate, and queries. See docs/DATABASE.md.
 
 mod queries;
 
@@ -172,6 +172,11 @@ impl Db {
         queries::find_by_public_slug(self, slug).await
     }
 
+    /// Resolve an authenticated API resource by its unguessable slug.
+    pub async fn find_by_slug(&self, slug: &str) -> anyhow::Result<Option<Item>> {
+        queries::find_by_slug(self, slug).await
+    }
+
     pub async fn get(&self, id: i64) -> anyhow::Result<Option<Item>> {
         queries::get(self, id).await
     }
@@ -207,6 +212,10 @@ impl Db {
 
     pub async fn find_trusted_client_id(&self, passphrase: &str) -> anyhow::Result<Option<i64>> {
         queries::find_trusted_client_id(self, passphrase).await
+    }
+
+    pub async fn trusted_client_auth_hashes(&self) -> anyhow::Result<Vec<(i64, String)>> {
+        queries::trusted_client_auth_hashes(self).await
     }
 
     pub async fn trust_client(&self, id: i64) -> anyhow::Result<bool> {

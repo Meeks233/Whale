@@ -2,10 +2,10 @@
 //!
 //! A client (Android app / installed PWA) generates its own passphrase and
 //! POSTs it to `/api/clients/register` — no owner token needed for that one
-//! route. With `WHALE_CLIENT_TOFU` on (default) the passphrase is trusted
+//! route. With `WHALE_CLIENT_TOFU` explicitly enabled the passphrase is trusted
 //! immediately; otherwise it lands as *pending* until the owner approves it via
 //! `POST /api/clients/:id/trust` (token-required). The passphrase then works as
-//! a bearer credential on all `/api/*` routes, exactly like the owner token.
+//! a bearer credential only for `POST /api/items`.
 
 use super::AppState;
 use crate::error::{AppError, AppResult};
@@ -23,14 +23,25 @@ pub async fn register(
     Json(req): Json<RegisterRequest>,
 ) -> AppResult<Response> {
     let pass = req.passphrase.trim();
-    if pass.len() < 8 {
-        return Err(AppError::BadRequest("passphrase must be at least 8 chars".into()));
+    if !(16..=256).contains(&pass.len()) {
+        return Err(AppError::BadRequest(
+            "passphrase must be 16 to 256 bytes".into(),
+        ));
+    }
+    if req.label.as_deref().is_some_and(|label| label.len() > 128) {
+        return Err(AppError::BadRequest(
+            "label must not exceed 128 bytes".into(),
+        ));
     }
     let client = state
         .db
         .register_client(pass, req.label.as_deref(), state.cfg.client_tofu)
         .await?;
-    let status = if client.trusted { StatusCode::OK } else { StatusCode::ACCEPTED };
+    let status = if client.trusted {
+        StatusCode::OK
+    } else {
+        StatusCode::ACCEPTED
+    };
     Ok((status, Json(client)).into_response())
 }
 

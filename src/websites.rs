@@ -46,7 +46,10 @@ pub fn host_of(url: &str) -> Option<String> {
     let s = url.trim();
     let s = s.split_once("://").map(|(_, r)| r).unwrap_or(s);
     let authority = s.split(['/', '?', '#']).next().unwrap_or(s);
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     let host = authority.split(':').next().unwrap_or(authority);
     let host = normalize_host(host);
     if host.is_empty() {
@@ -90,11 +93,24 @@ mod tests {
 
     #[test]
     fn detect_matches_subdomains_and_aliases() {
-        let list = vec![site("twitter", &["x.com", "twitter.com"]), site("youtube", &["youtube.com", "youtu.be"])];
-        assert_eq!(detect(&list, "https://x.com/i/status/1").unwrap().key, "twitter");
-        assert_eq!(detect(&list, "https://mobile.twitter.com/a").unwrap().key, "twitter");
-        assert_eq!(detect(&list, "https://music.youtube.com/watch?v=x").unwrap().key, "youtube");
+        let list = vec![
+            site("twitter", &["x.com", "twitter.com"]),
+            site("youtube", &["youtube.com", "youtu.be"]),
+        ];
+        assert_eq!(
+            detect(&list, "https://x.com/i/status/1").unwrap().key,
+            "twitter"
+        );
+        assert_eq!(
+            detect(&list, "https://mobile.twitter.com/a").unwrap().key,
+            "twitter"
+        );
+        assert_eq!(
+            detect(&list, "https://music.youtube.com/watch?v=x")
+                .unwrap()
+                .key,
+            "youtube"
+        );
         assert!(detect(&list, "https://example.com/v").is_none());
     }
-
 }

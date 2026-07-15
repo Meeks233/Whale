@@ -2,6 +2,7 @@
 // ../web/app.js by build.mjs. Importing i18n for its side effect installs
 // window.i18n before any app code runs.
 import './i18n';
+import { decryptEvent, encryptedEventSourceUrl, encryptedFetch } from './e2ee';
 
 type Params = Record<string, string | number>;
 
@@ -9,9 +10,9 @@ type Params = Record<string, string | number>;
 // signature keeps the many optional server fields ergonomic to read.
 interface Item {
   id: number;
+  slug: string;
   status: string;
   title?: string;
-  filepath?: string | null;
   filesize?: number | null;
   total_filesize?: number | null;  // sum across all downloaded resolution variants
   height?: number | null;
@@ -128,15 +129,27 @@ function isPublicIpHost(host: string): boolean {
   return false;
 }
 
-// A remote base that would leak the token + cookies in the clear: plain http://
-// pointing at a public IP address. https is always fine; private/LAN/loopback
-// http (a home server) is fine. Blocked from the frontend before it's ever saved.
+// A remote base that would leak the bearer token in cleartext. HTTPS is always
+// accepted. HTTP is limited to private IPs, localhost/mDNS, and single-label LAN
+// hostnames; public IPs and public-looking DNS names are rejected.
 function isInsecurePublicBase(raw: string): boolean {
   const s = (raw || '').trim();
   if (!s) return false;
   let u: URL;
   try { u = new URL(s.includes('://') ? s : 'http://' + s); } catch (_) { return false; }
-  return u.protocol === 'http:' && isPublicIpHost(u.hostname);
+  if (u.protocol !== 'http:') return false;
+  const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const localName = host === 'localhost'
+    || host.endsWith('.localhost')
+    || host.endsWith('.local')
+    || (!host.includes('.') && !host.includes(':'));
+  if (localName) return false;
+  const ipv4 = host.split('.');
+  const ipLiteral = (ipv4.length === 4 && ipv4.every((part) => {
+    const n = Number(part);
+    return part !== '' && Number.isInteger(n) && n >= 0 && n <= 255;
+  })) || host.includes(':');
+  return !ipLiteral || isPublicIpHost(host);
 }
 
 // Canonical public domain the operator declared via WHALE_PUBLIC_URL, fetched
@@ -185,7 +198,11 @@ const els = {
   tokenHint: byId('token-hint'),
   server: byId<HTMLInputElement>('server'),
   serverSave: byId<HTMLButtonElement>('server-save'),
-  permRequest: byId<HTMLButtonElement>('perm-request'),
+  permRow: byId('perm-row'),
+  permissionsPrompt: byId('permissions-prompt'),
+  permissionsPromptClose: byId<HTMLButtonElement>('permissions-prompt-close'),
+  permissionsPromptLater: byId<HTMLButtonElement>('permissions-prompt-later'),
+  permissionsPromptNever: byId<HTMLButtonElement>('permissions-prompt-never'),
   maxRes: byId<HTMLSelectElement>('max-res'),
   maxResSave: byId<HTMLButtonElement>('max-res-save'),
   maxResHint: byId('max-res-hint'),
@@ -297,10 +314,7 @@ function toast(msg: string, kind?: string): void {
 // ---- Auth-aware fetch ------------------------------------------------------
 async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
   opts = opts || {};
-  const headers = Object.assign({}, opts.headers, {
-    'Authorization': 'Bearer ' + getToken(),
-  });
-  const res = await fetch(apiUrl(path), Object.assign({}, opts, { headers }));
+  const res = await encryptedFetch(apiUrl(path), path, getToken(), opts);
   if (res.status === 401) {
     showTokenField(true);
     throw { unauthorized: true };
@@ -414,9 +428,15 @@ const TERMINAL: Record<string, number> = { completed: 1, failed: 1, duplicate: 1
 // Direct media link. `download` forces a browser save; otherwise it streams
 // (used as the <video> source). Token rides in the query since <video>/<a>
 // can't send an Authorization header.
-function fileUrl(id: number, download?: boolean): string {
+function itemPath(item: Item | number, suffix = ''): string {
+  const resolved = typeof item === 'number' ? state.items.get(item) : item;
+  if (!resolved?.slug) throw new Error('missing item slug');
+  return '/api/items/' + encodeURIComponent(resolved.slug) + suffix;
+}
+
+function fileUrl(item: Item | number, download?: boolean): string {
   const tok = encodeURIComponent(getToken());
-  return apiUrl('/api/items/' + id + '/file?token=' + tok + (download ? '&download=1' : ''));
+  return apiUrl(itemPath(item, '/file') + '?token=' + tok + (download ? '&download=1' : ''));
 }
 
 // Online-playback proxy: the backend resolves the upstream URL (with cookies)
@@ -428,6 +448,23 @@ function streamUrl(slug: string): string {
   const tok = encodeURIComponent(getToken());
   return apiUrl('/api/stream/' + encodeURIComponent(slug) + '?token=' + tok);
 }
+
+const streamPrewarmed = new Set<string>();
+let streamPrewarmCount = 0;
+const streamPrewarmObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting || streamPrewarmCount >= 2) continue;
+    const play = entry.target as HTMLElement;
+    const slug = play.dataset.slug;
+    streamPrewarmObserver.unobserve(play);
+    if (!slug || streamPrewarmed.has(slug)) continue;
+    streamPrewarmed.add(slug);
+    streamPrewarmCount++;
+    apiFetch('/api/stream/' + encodeURIComponent(slug) + '/prepare').catch(() => {
+      streamPrewarmed.delete(slug);
+    });
+  }
+}, { rootMargin: '160px' });
 
 // Tokenless public link, keyed by the item's random slug (not its id, so it
 // can't be guessed by enumeration). Prefers the operator-declared public
@@ -518,10 +555,10 @@ function actionsHtml(item: Item): string {
   // plays from upstream, no save/share. Sharing state lives in the share dialog.
   let mediaActions = '';
   if (item.status === 'completed') {
-    const local = !!item.local_available && !!item.filepath;
+    const local = !!item.local_available;
     const pub = !!item.public;
     mediaActions = local
-      ? `<a class="act act-icon act-save" href="${fileUrl(item.id, true)}" download aria-label="${esc(t('aria.save'))}" title="${esc(t('aria.save'))}">${DOWNLOAD_SVG}</a>
+      ? `<a class="act act-icon act-save" href="${fileUrl(item, true)}" download aria-label="${esc(t('aria.save'))}" title="${esc(t('aria.save'))}">${DOWNLOAD_SVG}</a>
       <button class="act act-icon act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
       : `<span class="act act-cloud" title="Streams from source — no local copy">${esc(t('cloud.only'))}</span>`;
   }
@@ -665,6 +702,13 @@ function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
   if (rowSig.get(li) !== html) {
     li.innerHTML = html;
     rowSig.set(li, html);
+  }
+  if (item.status === 'completed' && !item.local_available && item.public_slug) {
+    const play = li.querySelector<HTMLElement>('.thumb-play');
+    if (play) {
+      play.dataset.slug = item.public_slug;
+      streamPrewarmObserver.observe(play);
+    }
   }
   li.classList.toggle('blurred', isItemBlurred(item));
   if (gkey) updateGroupHeader(gkey);
@@ -912,7 +956,7 @@ function patchRow(ev: ProgressEv): void {
     if (ev.status === 'completed') {
       markFreshCompleted(ev.id);
       badge?.classList.add('flash');
-      apiFetch('/api/items/' + ev.id)
+      apiFetch(itemPath(ev.id))
         .then((r) => (r.ok ? r.json() : null))
         .then((it) => { if (it) upsertRow(it, false); })
         .catch(() => { /* ignore */ });
@@ -1016,16 +1060,20 @@ async function submitUrl(url: string): Promise<void> {
 
 // ---- SSE ------------------------------------------------------------------
 let es: EventSource | null = null;
-function connectEvents(): void {
+let eventGeneration = 0;
+async function connectEvents(): Promise<void> {
   const token = getToken();
   if (!token) { setServerStatus(false); return; }
   if (es) { es.close(); es = null; }
-  es = new EventSource(apiUrl('/api/events?token=' + encodeURIComponent(token)));
+  const generation = ++eventGeneration;
+  const encrypted = await encryptedEventSourceUrl(apiUrl('/api/events'), token);
+  if (generation !== eventGeneration) return;
+  es = new EventSource(encrypted.url);
   // Stream established → server is reachable (green breathing light).
   es.onopen = () => setServerStatus(true);
-  es.addEventListener('progress', (e) => {
+  es.addEventListener('progress', async (e) => {
     setServerStatus(true); // any delivered event also confirms liveness
-    try { patchRow(JSON.parse((e as MessageEvent).data)); } catch (_) { /* ignore */ }
+    try { patchRow(JSON.parse(await decryptEvent(encrypted.key, (e as MessageEvent).data))); } catch (_) { /* ignore */ }
   });
   // Stream dropped → red. EventSource retries a merely-stalled stream itself,
   // but on some (Android WebView) engines a connection that never opened — e.g.
@@ -1262,7 +1310,7 @@ function renderWebsites(): void {
 }
 
 // PUT a partial update to a website and refresh its card in place.
-async function saveWebsite(key: string, patch: Record<string, unknown>): Promise<boolean> {
+async function saveWebsite(key: string, patch: Record<string, unknown>, render = true): Promise<boolean> {
   try {
     const res = await apiFetch('/api/websites/' + encodeURIComponent(key), {
       method: 'PUT',
@@ -1274,7 +1322,7 @@ async function saveWebsite(key: string, patch: Record<string, unknown>): Promise
     if (data && data.website) {
       const i = websitesLoaded.findIndex((w) => w.key === key);
       if (i >= 0) websitesLoaded[i] = data.website;
-      renderWebsites();
+      if (render) renderWebsites();
     }
     return true;
   } catch (e) {
@@ -1476,7 +1524,7 @@ async function batchSetEnabled(enabled: boolean): Promise<void> {
   if (!keys.length) return;
   for (const key of keys) {
     const w = websitesLoaded.find((x) => x.key === key);
-    if (w && w.enabled !== enabled) await saveWebsite(key, { enabled });
+    if (w && w.enabled !== enabled) await saveWebsite(key, { enabled }, false);
   }
   setSiteSelectMode(false);
 }
@@ -1605,7 +1653,7 @@ async function applyShare(makePublic: boolean): Promise<void> {
   els.shareConfirm.disabled = true;
   els.shareStop.disabled = true;
   try {
-    const res = await apiFetch('/api/items/' + id + '/public', {
+    const res = await apiFetch(itemPath(id, '/public'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -1673,6 +1721,7 @@ els.settingsToggle.addEventListener('click', () => {
   els.token.value = getToken();
   if (els.server) els.server.value = apiBase();
   openModal(els.settings);
+  refreshAppPermissions();
   loadArchive();
   loadLogs();
 });
@@ -1765,15 +1814,83 @@ if (els.serverSave) {
   });
 }
 
-// App-only: re-arm the native launch-time permission prompt (notifications +
-// unrestricted background power) for a user who tapped "Don't ask again".
-if (els.permRequest) {
-  els.permRequest.addEventListener('click', () => {
-    const T = window.__TAURI__;
-    try { T?.core?.invoke('reset_permission_prompt'); } catch (_) { /* desktop / not ready */ }
-    toast(t('toast.permReset'), 'ok');
+type AppPermissionStatus = { notifications: boolean; background: boolean };
+let appPermissions: AppPermissionStatus | null = null;
+const requestingPermissions = new Set<keyof AppPermissionStatus>();
+const PERMISSION_PROMPT_NEVER = 'whale_permissions_prompt_never';
+
+function renderAppPermission(kind: keyof AppPermissionStatus): void {
+  const granted = appPermissions?.[kind] ?? null;
+  const requesting = requestingPermissions.has(kind);
+  const state = requesting ? 'checking' : granted == null ? 'checking' : granted ? 'granted' : 'missing';
+  document.querySelectorAll<HTMLButtonElement>(`.permission-item[data-permission="${kind}"]`).forEach((button) => {
+    button.dataset.state = state;
+    button.disabled = requesting;
+    const status = button.querySelector<HTMLElement>('.permission-status');
+    const result = button.querySelector<HTMLElement>('.permission-result');
+    if (status) status.textContent = t(requesting
+      ? 'settings.permRequesting'
+      : granted == null ? 'settings.permChecking' : granted ? 'settings.permGranted' : 'settings.permMissing');
+    if (result) result.textContent = state === 'granted' ? '✓' : state === 'missing' ? '›' : '…';
   });
 }
+
+function renderAppPermissions(): void {
+  renderAppPermission('notifications');
+  renderAppPermission('background');
+}
+
+async function refreshAppPermissions(): Promise<AppPermissionStatus | null> {
+  const T = window.__TAURI__;
+  if (!T?.core?.invoke) return null;
+  try {
+    const status = await T.core.invoke('android_permission_status') as AppPermissionStatus;
+    appPermissions = { notifications: !!status.notifications, background: !!status.background };
+    notif.granted = appPermissions.notifications;
+    els.permRow.classList.remove('hidden');
+    renderAppPermissions();
+    if (appPermissions.notifications && appPermissions.background && !els.permissionsPrompt.classList.contains('hidden')) {
+      closeModal(els.permissionsPrompt);
+    }
+    return appPermissions;
+  } catch (_) {
+    // Desktop Tauri has no Android permission bridge; keep the row hidden there.
+    els.permRow.classList.add('hidden');
+    return null;
+  }
+}
+
+async function requestAppPermission(kind: 'notifications' | 'background'): Promise<void> {
+  const T = window.__TAURI__;
+  if (!T?.core?.invoke) return;
+  const current = await refreshAppPermissions();
+  if (!current || current[kind]) return;
+  requestingPermissions.add(kind);
+  renderAppPermission(kind);
+  try {
+    if (kind === 'notifications') {
+      await T.core.invoke('request_notification_permission');
+    } else {
+      await T.core.invoke('request_background_permission');
+    }
+  } catch (_) { /* the next state read shows the actual result */ }
+  requestingPermissions.delete(kind);
+  await refreshAppPermissions();
+}
+
+document.addEventListener('click', (e) => {
+  const button = (e.target as HTMLElement).closest<HTMLButtonElement>('.permission-item[data-permission]');
+  const kind = button?.dataset.permission;
+  if (kind === 'notifications' || kind === 'background') requestAppPermission(kind);
+});
+
+function dismissPermissionPrompt(never: boolean): void {
+  if (never) localStorage.setItem(PERMISSION_PROMPT_NEVER, '1');
+  closeModal(els.permissionsPrompt);
+}
+els.permissionsPromptClose.addEventListener('click', () => dismissPermissionPrompt(false));
+els.permissionsPromptLater.addEventListener('click', () => dismissPermissionPrompt(false));
+els.permissionsPromptNever.addEventListener('click', () => dismissPermissionPrompt(true));
 
 // ---- Seal / yt-dlp download archive editor --------------------------------
 // Not just import: the textarea shows every dedup key Whale has recorded so the
@@ -1919,7 +2036,7 @@ async function openResolutions(id: number): Promise<void> {
   // resolution just gets a toast — no dialog to dismiss (Req 2).
   let data: { available?: number[]; downloaded?: number[] };
   try {
-    const res = await apiFetch(`/api/items/${id}/resolutions`);
+    const res = await apiFetch(itemPath(id, '/resolutions'));
     if (!res.ok) throw new Error('load');
     data = await res.json();
   } catch (e) {
@@ -2002,7 +2119,7 @@ async function saveResolutions(): Promise<void> {
   const target = resTarget;
   els.resolutionSave.disabled = true;
   try {
-    const res = await apiFetch(`/api/items/${target}/resolutions`, {
+    const res = await apiFetch(itemPath(target, '/resolutions'), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ heights }),
@@ -2014,7 +2131,7 @@ async function saveResolutions(): Promise<void> {
     closeModal(els.resolution);
     // Refetch so the card's resolution label/size reflect the new highest kept
     // version immediately (removals repoint the primary server-side; Req 3).
-    apiFetch('/api/items/' + target)
+    apiFetch(itemPath(target))
       .then((r) => (r.ok ? r.json() : null))
       .then((it) => { if (it) upsertRow(it, false); })
       .catch(() => { /* SSE / next load will catch up */ });
@@ -2324,12 +2441,12 @@ function copyText(text: string, okMsg: string): void {
 // explicit list — used to download a whole fold). Staggered so the browser
 // doesn't drop rapid concurrent downloads.
 function batchDownload(source?: Item[]): void {
-  const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.local_available && it.filepath);
+  const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.local_available);
   if (!items.length) { toast(t('toast.noDownloadable'), 'info'); return; }
   items.forEach((it, i) => {
     setTimeout(() => {
       const a = document.createElement('a');
-      a.href = fileUrl(it.id, true);
+      a.href = fileUrl(it, true);
       a.download = '';
       document.body.appendChild(a);
       a.click();
@@ -2345,7 +2462,7 @@ function batchDownload(source?: Item[]): void {
 let batchShareSource: Item[] | null = null;
 function openBatchShare(source?: Item[]): void {
   batchShareSource = source ?? null;
-  const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.filepath);
+  const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.local_available);
   if (!items.length) { toast(t('toast.noShareable'), 'info'); return; }
   els.batchShareSub.textContent = t('batchShare.sub', { n: items.length });
   const def = els.batchShare.querySelector('input[value="7"]') as HTMLInputElement | null;
@@ -2363,14 +2480,14 @@ function selectedBatchShareDays(): number | null {
 // Make every targeted completed item public with the chosen window (the stashed
 // fold list if a fold was shared, else the current selection).
 async function applyBatchShare(): Promise<void> {
-  const items = (batchShareSource ?? selectedItems()).filter((it) => it.status === 'completed' && it.filepath);
+  const items = (batchShareSource ?? selectedItems()).filter((it) => it.status === 'completed' && it.local_available);
   if (!items.length) { closeModal(els.batchShare); return; }
   const days = selectedBatchShareDays();
   els.batchShareConfirm.disabled = true;
   let ok = 0;
   try {
     for (const it of items) {
-      const res = await apiFetch('/api/items/' + it.id + '/public', {
+      const res = await apiFetch(itemPath(it, '/public'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ public: true, expires_in_days: days }),
@@ -2405,7 +2522,7 @@ async function batchUnshare(): Promise<void> {
   let ok = 0;
   try {
     for (const it of items) {
-      const res = await apiFetch('/api/items/' + it.id + '/public', {
+      const res = await apiFetch(itemPath(it, '/public'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ public: false }),
@@ -2485,7 +2602,7 @@ async function batchDelete(): Promise<void> {
   let ok = 0;
   try {
     for (const id of ids) {
-      const res = await apiFetch('/api/items/' + id + '?delete_file=true', { method: 'DELETE' });
+      const res = await apiFetch(itemPath(id) + '?delete_file=true', { method: 'DELETE' });
       if (res.ok) { removeRow(id); ok++; }
     }
     if (ok) els.empty.classList.toggle('hidden', state.rows.size > 0);
@@ -2509,14 +2626,14 @@ async function batchClean(): Promise<void> {
   let ok = 0;
   try {
     for (const id of ids) {
-      const res = await apiFetch('/api/items/' + id + '/resolutions', {
+      const res = await apiFetch(itemPath(id, '/resolutions'), {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ heights: [] }),
       });
       if (res.ok) {
         ok++;
-        apiFetch('/api/items/' + id)
+        apiFetch(itemPath(id))
           .then((r) => (r.ok ? r.json() : null))
           .then((it) => { if (it) upsertRow(it, false); })
           .catch(() => { /* SSE / next load will catch up */ });
@@ -2592,6 +2709,7 @@ function thumbSrc(play: HTMLElement): string | undefined {
 // the `ended` handler is a no-op there.
 let playQueue: Array<{ id: number; cloud: boolean; poster?: string }> = [];
 let playIndex = 0;
+let playerScrollY = 0;
 function playCurrentInQueue(): void {
   const cur = playQueue[playIndex];
   if (cur) openPlayer(cur.id, cur.cloud, cur.poster);
@@ -2599,6 +2717,11 @@ function playCurrentInQueue(): void {
 
 function openPlayer(id: number, cloud: boolean, poster?: string): void {
   const v = els.playerVideo;
+  const opening = els.player.classList.contains('hidden');
+  if (opening) {
+    playerScrollY = window.scrollY;
+    document.body.style.top = `-${playerScrollY}px`;
+  }
   // Show the source thumbnail as the poster so the load gap (especially the
   // cloud proxy resolve) reads as the still frame instead of Chrome's default
   // gray media placeholder. Cleared again in closePlayer.
@@ -2616,7 +2739,7 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
     // back, so we never hand the browser a stale/IP-bound CDN URL. The resolve
     // happens server-side (capped at 25s); the poster holds until the first bytes
     // arrive, and the <video> 'error' handler surfaces a failed resolve.
-    const slug = state.items.get(id)?.public_slug;
+    const slug = state.items.get(id)?.slug;
     if (!slug) { toast(t('toast.streamFail'), 'error'); closePlayer(true); return; }
     v.src = streamUrl(slug);
     v.load();
@@ -2640,6 +2763,12 @@ function closePlayer(pop: boolean): void {
   els.player.classList.add('hidden');
   els.player.setAttribute('aria-hidden', 'true');
   document.body.classList.remove('player-open');
+  document.body.style.top = '';
+  window.scrollTo(0, playerScrollY);
+  // A native hardware Back finishes its popstate restoration after this handler.
+  // Re-apply once layout/history settle so WebView cannot overwrite us with the
+  // sentinel entry's old (usually top-of-page) scroll position.
+  requestAnimationFrame(() => window.scrollTo(0, playerScrollY));
   playQueue = []; // stop any sequential fold playback
   if (!isNativeApp && pop && history.state && history.state.player) history.back();
 }
@@ -2690,6 +2819,7 @@ els.playerClose.addEventListener('click', () => closePlayer(true));
 // Close the top-most open surface. Returns true if it handled the Back.
 function dismissTopLayer(): boolean {
   if (!els.player.classList.contains('hidden')) { closePlayer(false); return true; }
+  if (!els.permissionsPrompt.classList.contains('hidden')) { closeModal(els.permissionsPrompt); return true; }
   if (!els.deleteConfirm.classList.contains('hidden')) { closeModal(els.deleteConfirm); return true; }
   if (!els.batchShare.classList.contains('hidden')) { closeModal(els.batchShare); return true; }
   if (!els.shareOverlay.classList.contains('hidden')) { closeShare(); return true; }
@@ -2704,6 +2834,10 @@ if (isNativeApp) {
   let exitArmed = false;
   let exitArmedAt = 0;
   const armSentinel = () => history.pushState({ whaleBack: true }, '');
+
+  // The sentinel exists only to consume Android Back; its captured scroll offset
+  // must never compete with the player's explicit list-position restoration.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
   // Ask Tauri to quit (process plugin). If it's unavailable the sentinel isn't
   // re-armed, so we've dropped to the WebView root and the next hardware Back
@@ -2819,10 +2953,24 @@ async function setupNotifications(): Promise<void> {
   const N = window.__TAURI__ && window.__TAURI__.notification;
   if (!N) return; // desktop browser or plugin absent
   try {
-    let ok = await N.isPermissionGranted();
-    if (!ok) ok = (await N.requestPermission()) === 'granted';
-    notif.granted = !!ok;
+    // Permission is user-driven from the Settings permission box. Launching the
+    // app must never open a system prompt by itself.
+    notif.granted = !!(await N.isPermissionGranted());
   } catch (_) { /* plugin missing/blocked — silently skip */ }
+}
+
+function setupAppPermissionRefresh(): void {
+  if (!isNativeApp) return;
+  const refresh = () => { setTimeout(refreshAppPermissions, 100); };
+  refreshAppPermissions().then((status) => {
+    if (!status || (status.notifications && status.background)) return;
+    if (localStorage.getItem(PERMISSION_PROMPT_NEVER) !== '1') openModal(els.permissionsPrompt);
+  });
+  const T = window.__TAURI__;
+  T?.event?.listen?.('tauri://resume', refresh);
+  T?.event?.listen?.('tauri://focus', refresh);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  window.addEventListener('focus', refresh);
 }
 
 // Android notification id base — MUST match ShareActivity.NOTIF_BASE so the
@@ -3017,6 +3165,7 @@ if (els.themeToggle) {
 // is rebuilt on open.)
 document.addEventListener('i18n:changed', () => {
   renderThemeToggle();
+  renderAppPermissions();
   setServerStatus(serverUp);
   renderDlStats(); // re-localize the "N items · X GB" summary
   if (getToken()) loadItems(true);
@@ -3095,3 +3244,4 @@ if (getToken()) loadWebsites(); // populate per-site privacy-blur state for the 
 handleShareParam();
 setupNativeShare();
 setupNotifications();
+setupAppPermissionRefresh();

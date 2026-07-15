@@ -203,7 +203,10 @@ fn host_of(url: &str) -> Option<String> {
     // Authority ends at the first path/query/fragment delimiter.
     let authority = s.split(['/', '?', '#']).next().unwrap_or(s);
     // Drop userinfo.
-    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let authority = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
     // Drop port (rightmost colon; also covers bare IPv4:port — good enough for our host set).
     let host = authority.split(':').next().unwrap_or(authority);
     let host = host.trim().trim_end_matches('.'); // tolerate a trailing FQDN dot
@@ -226,10 +229,18 @@ mod tests {
 
     #[test]
     fn detects_x_and_twitter_as_same_platform() {
-        assert_eq!(from_url("https://x.com/user/status/1").unwrap().key, "twitter");
-        assert_eq!(from_url("https://twitter.com/user/status/1").unwrap().key, "twitter");
         assert_eq!(
-            from_url("https://mobile.twitter.com/user/status/1").unwrap().key,
+            from_url("https://x.com/user/status/1").unwrap().key,
+            "twitter"
+        );
+        assert_eq!(
+            from_url("https://twitter.com/user/status/1").unwrap().key,
+            "twitter"
+        );
+        assert_eq!(
+            from_url("https://mobile.twitter.com/user/status/1")
+                .unwrap()
+                .key,
             "twitter"
         );
     }
@@ -237,14 +248,20 @@ mod tests {
     #[test]
     fn detection_is_case_insensitive() {
         // Uppercase scheme/host must still resolve — this is the alias bug guard.
-        assert_eq!(from_url("HTTPS://WWW.YOUTUBE.COM/watch?v=x").unwrap().key, "youtube");
+        assert_eq!(
+            from_url("HTTPS://WWW.YOUTUBE.COM/watch?v=x").unwrap().key,
+            "youtube"
+        );
         assert_eq!(from_url("https://YouTu.Be/abc").unwrap().key, "youtube");
         assert_eq!(from_url("https://X.COM/i/status/9").unwrap().key, "twitter");
     }
 
     #[test]
     fn matches_subdomains_but_not_lookalikes() {
-        assert_eq!(from_url("https://music.youtube.com/watch?v=x").unwrap().key, "youtube");
+        assert_eq!(
+            from_url("https://music.youtube.com/watch?v=x").unwrap().key,
+            "youtube"
+        );
         // A different registrable domain that merely contains the name must NOT match.
         assert!(from_url("https://notyoutube.com/watch?v=x").is_none());
         assert!(from_url("https://youtube.com.evil.example/x").is_none());
@@ -253,7 +270,10 @@ mod tests {
     #[test]
     fn handles_missing_scheme_userinfo_and_port() {
         assert_eq!(from_url("youtu.be/abc").unwrap().key, "youtube");
-        assert_eq!(from_url("https://user:pw@x.com:443/status/1").unwrap().key, "twitter");
+        assert_eq!(
+            from_url("https://user:pw@x.com:443/status/1").unwrap().key,
+            "twitter"
+        );
     }
 
     #[test]
@@ -286,7 +306,9 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for p in CATALOG {
             assert!(
-                p.key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                p.key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
                 "key {:?} is not filesystem-safe",
                 p.key
             );

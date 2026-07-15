@@ -97,7 +97,10 @@ mod tests {
     #[test]
     fn rejects_directory() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(confined_file(dir.path(), dir.path().to_str().unwrap()), None);
+        assert_eq!(
+            confined_file(dir.path(), dir.path().to_str().unwrap()),
+            None
+        );
     }
 
     #[test]

@@ -13,16 +13,13 @@
   <link rel="apple-touch-icon" href="/icons/apple-touch-180.png">
   <!-- Anti-FOUC: apply a forced Light/Dark override before first paint. Absent
        (or "system") it falls through to the CSS prefers-color-scheme default. -->
-  <script>
-    try { var p = localStorage.getItem('whale_theme'); if (p && p !== 'system') document.documentElement.setAttribute('data-theme', p); } catch (e) {}
-  </script>
+  <script src="/theme.js"></script>
 </head>
 <body>
   <header class="topbar">
     <div class="brand-wrap">
-      <h1 class="brand">🐋 Whale</h1>
       <!-- Server status heartbeat: green + breathing while the SSE stream is
-           live, red when it drops. Driven by the EventSource lifecycle in app.js. -->
+            live, red when it drops. Driven by the EventSource lifecycle in app.js. -->
       <span id="server-status" class="server-status down" role="status" aria-label="Server status" data-i18n-aria="aria.serverStatus"></span>
       <!-- Total downloaded readout: count + summed size of all downloads, sitting
            to the right of the heartbeat. Populated from /api/stats by app.js. -->
@@ -124,6 +121,33 @@
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
+  <!-- First-launch permission reminder. It is driven by the same live Android
+       state as Settings and stops opening once both permissions are granted or
+       the user explicitly chooses not to see it again. -->
+  <div id="permissions-prompt" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="permissions-prompt-title">
+    <div class="modal-card permission-prompt-card">
+      <button id="permissions-prompt-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="permissions-prompt-title" class="modal-heading" data-i18n="permissionsPrompt.title">App permissions</h2>
+      <p class="hint-muted" data-i18n="permissionsPrompt.hint">Allow these so Whale can report downloads reliably in the background.</p>
+      <div class="permission-box">
+        <button class="permission-item" type="button" data-permission="notifications" data-state="checking">
+          <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
+          <span class="permission-copy"><strong data-i18n="settings.permNotifications">Notifications</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+          <span class="permission-result" aria-hidden="true">…</span>
+        </button>
+        <button class="permission-item" type="button" data-permission="background" data-state="checking">
+          <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 7h1a2 2 0 0 1 2 2v2"/><path d="M6 7h1"/><path d="M6 11h8"/><path d="M6 15h8"/><rect width="16" height="16" x="2" y="4" rx="2"/><path d="M22 11v2"/></svg></span>
+          <span class="permission-copy"><strong data-i18n="settings.permBackground">Background activity</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+          <span class="permission-result" aria-hidden="true">…</span>
+        </button>
+      </div>
+      <div class="share-actions permission-prompt-actions">
+        <button id="permissions-prompt-never" class="btn btn-ghost" data-i18n="permissionsPrompt.never">Don't show again</button>
+        <button id="permissions-prompt-later" class="btn" data-i18n="permissionsPrompt.later">Not now</button>
+      </div>
+    </div>
+  </div>
+
   <!-- In-app fullscreen player. Opened by tapping a completed thumbnail; the
        Android back button pops it (see app.js) instead of exiting the app. -->
   <div id="player" class="player-overlay hidden" aria-hidden="true">
@@ -188,18 +212,24 @@
           <input id="server" type="url" inputmode="url" autocomplete="off" placeholder="https://whale.example.com (blank = this site)" data-i18n-ph="ph.server">
           <button id="server-save" class="btn" data-i18n="btn.save">Save</button>
         </div>
-        <p class="hint" data-i18n="settings.serverHint">Only needed in the app. Leave blank when opening Whale in a browser.</p>
       </div>
 
-      <!-- App-only: re-open the launch-time permission prompt (notifications +
-           unrestricted background power) for a user who dismissed it. Hidden in
-           browsers via `html:not(.app-native) #perm-row` in style.css. -->
-      <div id="perm-row">
+      <!-- Android-only permission state. Each row reads the current OS state,
+           requests only what is missing, then refreshes again on app resume. -->
+      <div id="perm-row" class="hidden">
         <label data-i18n="settings.permissions">App permissions</label>
-        <div class="row">
-          <button id="perm-request" class="btn" data-i18n="settings.permGrant">Grant background &amp; notifications</button>
+        <div class="permission-box">
+          <button class="permission-item" type="button" data-permission="notifications" data-state="checking">
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
+            <span class="permission-copy"><strong data-i18n="settings.permNotifications">Notifications</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+            <span class="permission-result" aria-hidden="true">…</span>
+          </button>
+          <button class="permission-item" type="button" data-permission="background" data-state="checking">
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 7h1a2 2 0 0 1 2 2v2"/><path d="M6 7h1"/><path d="M6 11h8"/><path d="M6 15h8"/><rect width="16" height="16" x="2" y="4" rx="2"/><path d="M22 11v2"/></svg></span>
+            <span class="permission-copy"><strong data-i18n="settings.permBackground">Background activity</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+            <span class="permission-result" aria-hidden="true">…</span>
+          </button>
         </div>
-        <p class="hint-muted" data-i18n="settings.permHint">Re-open the prompt for notifications and unrestricted background power. Takes effect next time the app starts.</p>
       </div>
 
       <label for="token" data-i18n="settings.token">API token</label>

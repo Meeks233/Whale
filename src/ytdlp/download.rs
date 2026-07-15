@@ -305,12 +305,14 @@ mod tests {
             embed_thumbnail: false,
             cookies: None,
             ytdlp_path: ytdlp.display().to_string(),
+            allow_private_dns: false,
         }
     }
 
     fn cancel_test_item() -> Item {
         Item {
             id: 999,
+            slug: "0123456789abcdef0123456789abcdef".into(),
             extractor: "youtube".into(),
             video_id: "x".into(),
             archive_key: "youtube x".into(),
@@ -355,7 +357,8 @@ mod tests {
         let (ptx, _prx) = mpsc::channel::<ProgressEvent>(8);
         let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let task = tokio::spawn(async move { download(&cfg, &item, None, ptx, cancel_rx, None).await });
+        let task =
+            tokio::spawn(async move { download(&cfg, &item, None, ptx, cancel_rx, None).await });
 
         // Let the child spawn, then cancel it.
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -366,7 +369,10 @@ mod tests {
             .await
             .expect("download() did not return within 5s of cancel")
             .expect("download task panicked");
-        assert!(matches!(res, Err(YtdlpError::Cancelled)), "expected Cancelled, got {res:?}");
+        assert!(
+            matches!(res, Err(YtdlpError::Cancelled)),
+            "expected Cancelled, got {res:?}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

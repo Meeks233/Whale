@@ -1,6 +1,6 @@
 services:
   whale:
-    image: ghcr.io/OWNER/whale:latest
+    image: ${WHALE_IMAGE:-ghcr.io/meeks233/whale:latest}
     environment:
       # Access token. If unset, Whale generates a random 32-char token on startup
       # and prints it to the container log. Set it here to keep it stable.
@@ -10,8 +10,14 @@ services:
       WHALE_CONCURRENT_FRAGMENTS: "4"
       # Total download-rate cap, split across concurrent jobs. "0"/"none" disables.
       WHALE_LIMIT_RATE: "10M"
+      WHALE_CLIENT_TOFU: "false"
     volumes:
       - ./data:/data
       - ./downloads:/downloads
-    ports: ["8080:8080"]
+    ports: ["127.0.0.1:8080:8080"]
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     restart: unless-stopped

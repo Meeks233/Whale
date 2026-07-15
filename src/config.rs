@@ -1,4 +1,4 @@
-//! Configuration loaded from environment variables. See docs/CONFIG.md.
+//! Configuration loaded from environment variables. See docs/CONFIGURATION.md.
 
 use anyhow::{anyhow, Context};
 use std::net::SocketAddr;
@@ -26,7 +26,7 @@ pub struct Config {
     pub token_generated: bool,
     /// Trust-on-first-use for self-registered clients: when true, a client that
     /// POSTs a new passphrase to `/api/clients/register` is trusted immediately
-    /// (single-user / private-network default). Set false to require the owner
+    /// (explicit private-network opt-in). The secure default requires the owner
     /// to approve each client with the token before it can submit.
     pub client_tofu: bool,
     pub bind: SocketAddr,
@@ -67,6 +67,9 @@ pub struct Config {
     pub embed_thumbnail: bool,
     pub cookies: Option<PathBuf>,
     pub ytdlp_path: String,
+    /// Compatibility escape hatch for fake-IP DNS proxies. When false (default),
+    /// hostnames resolving to non-public addresses are rejected before yt-dlp.
+    pub allow_private_dns: bool,
     /// Canonical public base URL the server is reachable at (e.g.
     /// `https://whale.example.com`), declared by the operator. Used to build
     /// share links so they carry the real domain instead of whatever origin
@@ -80,7 +83,10 @@ fn env_or(key: &str, default: &str) -> String {
 
 fn env_bool(key: &str, default: bool) -> bool {
     match std::env::var(key) {
-        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
         Err(_) => default,
     }
 }
@@ -126,7 +132,7 @@ impl Config {
             .parse()
             .context("WHALE_CONCURRENCY must be a positive integer")?;
 
-        let client_tofu = env_bool("WHALE_CLIENT_TOFU", true);
+        let client_tofu = env_bool("WHALE_CLIENT_TOFU", false);
 
         let polite = env_bool("WHALE_POLITE", true);
         let sleep_min: u64 = env_or("WHALE_SLEEP_MIN", "2")
@@ -152,7 +158,10 @@ impl Config {
             },
         };
 
-        let container = match env_or("WHALE_CONTAINER", "mkv").to_ascii_lowercase().as_str() {
+        let container = match env_or("WHALE_CONTAINER", "mkv")
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "mkv" => Container::Mkv,
             "mp4" => Container::Mp4,
             other => {
@@ -174,12 +183,9 @@ impl Config {
             None => None,
             Some(v) => match v.trim().to_ascii_lowercase().as_str() {
                 "0" | "highest" | "best" | "none" | "max" => None,
-                other => Some(
-                    other
-                        .trim_end_matches('p')
-                        .parse::<i64>()
-                        .context("WHALE_MAX_HEIGHT must be an integer height (e.g. 1080), 'highest', or 0")?,
-                ),
+                other => Some(other.trim_end_matches('p').parse::<i64>().context(
+                    "WHALE_MAX_HEIGHT must be an integer height (e.g. 1080), 'highest', or 0",
+                )?),
             },
         };
         let subs = env_bool("WHALE_SUBS", true);
@@ -188,6 +194,7 @@ impl Config {
         let embed_thumbnail = env_bool("WHALE_EMBED_THUMBNAIL", true);
         let cookies = env_opt("WHALE_COOKIES").map(PathBuf::from);
         let ytdlp_path = env_or("WHALE_YTDLP_PATH", "yt-dlp");
+        let allow_private_dns = env_bool("WHALE_ALLOW_PRIVATE_DNS", false);
         // Strip trailing slashes so it concatenates cleanly with `/api/p/:slug`.
         let public_url = env_opt("WHALE_PUBLIC_URL")
             .map(|u| u.trim().trim_end_matches('/').to_string())
@@ -219,6 +226,7 @@ impl Config {
             embed_thumbnail,
             cookies,
             ytdlp_path,
+            allow_private_dns,
             public_url,
         })
     }
@@ -238,7 +246,11 @@ impl Config {
     /// Number of downloads allowed to run at once: forced to 1 in polite mode,
     /// otherwise the configured `concurrency`.
     pub fn effective_concurrency(&self) -> usize {
-        if self.polite { 1 } else { self.concurrency.max(1) }
+        if self.polite {
+            1
+        } else {
+            self.concurrency.max(1)
+        }
     }
 
     /// Per-job `--limit-rate` value in bytes/s: the configured total cap divided
@@ -386,8 +398,8 @@ fn token_strength(token: &str) -> Result<(), String> {
 /// Generate a 32-character (128-bit) hex token from OS randomness.
 fn random_token() -> anyhow::Result<String> {
     let mut bytes = [0u8; 16];
-    let mut f =
-        std::fs::File::open("/dev/urandom").context("cannot open /dev/urandom to generate token")?;
+    let mut f = std::fs::File::open("/dev/urandom")
+        .context("cannot open /dev/urandom to generate token")?;
     std::io::Read::read_exact(&mut f, &mut bytes)
         .context("cannot read randomness for token generation")?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())

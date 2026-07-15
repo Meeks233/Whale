@@ -16,6 +16,8 @@ pub fn probe_args(cfg: &Config, url: &str, cookies: Option<&Path>) -> Vec<String
         "--skip-download".into(),
         "--no-warnings".into(),
         "--ignore-config".into(),
+        "--playlist-end".into(),
+        "500".into(),
     ];
     if let Some(cookies) = cookies {
         args.push("--cookies".into());
@@ -208,12 +210,14 @@ mod tests {
             embed_thumbnail: true,
             cookies: None,
             ytdlp_path: "yt-dlp".into(),
+            allow_private_dns: false,
         }
     }
 
     fn test_item() -> Item {
         Item {
             id: 42,
+            slug: "0123456789abcdef0123456789abcdef".into(),
             extractor: "youtube".into(),
             video_id: "abc123".into(),
             archive_key: "youtube abc123".into(),
@@ -330,7 +334,9 @@ mod tests {
         let cfg = test_config();
         let mut item = test_item();
         // Standalone item → no --playlist-items.
-        assert!(!download_args(&cfg, &item, None, None).iter().any(|a| a == "--playlist-items"));
+        assert!(!download_args(&cfg, &item, None, None)
+            .iter()
+            .any(|a| a == "--playlist-items"));
         // Multi-video post entry → pinned to its position.
         item.playlist_index = Some(2);
         let args = download_args(&cfg, &item, None, None);
