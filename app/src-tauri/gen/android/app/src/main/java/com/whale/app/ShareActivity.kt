@@ -145,6 +145,7 @@ class ShareActivity : Activity() {
       var body: String
       var ok = false
       var itemId = -1
+      var videoId = ""
       var duplicate = false
       var blur = false
       try {
@@ -169,6 +170,7 @@ class ShareActivity : Activity() {
             ok = true
             val item = resp.optJSONObject("item")
             itemId = item?.optInt("id", -1) ?: -1
+            videoId = item?.optString("video_id") ?: ""
             title = item?.optString("title")?.takeIf { it.isNotEmpty() } ?: "Link"
             duplicate = resp.optBoolean("duplicate")
             // A privacy-blurred site's real title must never land in a persistent
@@ -199,26 +201,29 @@ class ShareActivity : Activity() {
         // the redundant buzz. The system notification first appears once the
         // download is actually running and then updates that SAME notification
         // through to completion (see pollProgress) — silent (onlyAlertOnce).
-        pollProgress(ctx, base, token, itemId, notifId, title, blur)
+        pollProgress(ctx, base, token, itemId, notifId, title, videoId, blur)
       } else if (!ok) {
         // A real failure still needs a tappable notification (the Toast is easy to
         // miss) so the user can reopen the app and retry with the actual error.
-        postNotif(ctx, notifId, notifTitle(title, blur, itemId), body, url, ongoing = false, indeterminate = false)
+        postNotif(ctx, notifId, notifTitle(title, blur, videoId, itemId), body, url, ongoing = false, indeterminate = false)
       }
       // success + duplicate: Toast only — it's already downloaded, nothing to track.
     }
 
     /** Notification title, masking a privacy-blurred site's real name (which would
-     *  otherwise sit in a persistent notification the user must clear by hand). */
-    private fun notifTitle(title: String, blur: Boolean, itemId: Int): String =
-      if (blur) (if (itemId >= 0) "Item #$itemId" else "Download") else title
+     *  otherwise sit in a persistent notification the user must clear by hand).
+     *  Masks with the source's own video id (tweet / youtube id) — meaningful yet
+     *  title-free — falling back to the internal item id only when it's unknown. */
+    private fun notifTitle(title: String, blur: Boolean, videoId: String, itemId: Int): String =
+      if (blur) (if (videoId.isNotEmpty()) "Video $videoId" else if (itemId >= 0) "Item #$itemId" else "Download") else title
 
     /** Poll the server for this item's status and update its notification in
      *  place until it finishes. Silent (no new sound) thanks to onlyAlertOnce.
      *  Bounded (~10 min) so a stuck download can't spin forever; best-effort —
      *  the process may be reclaimed while backgrounded, which is fine. */
-    private fun pollProgress(ctx: Context, base: String, token: String, itemId: Int, notifId: Int, titleIn: String, blurIn: Boolean) {
+    private fun pollProgress(ctx: Context, base: String, token: String, itemId: Int, notifId: Int, titleIn: String, videoIdIn: String, blurIn: Boolean) {
       var title = titleIn
+      var videoId = videoIdIn
       var blur = blurIn
       var tries = 0
       while (tries < 200) {
@@ -232,13 +237,17 @@ class ShareActivity : Activity() {
             setRequestProperty("Authorization", "Bearer $token")
           }
           val code = conn.responseCode
+          // The item is gone (deleted while downloading → 404): clear our ongoing
+          // notification so it can't linger as a ghost the user must swipe away.
+          if (code == 404) { conn.disconnect(); cancelNotif(ctx, notifId); return }
           if (code !in 200..299) { conn.disconnect(); continue }
           val txt = conn.inputStream.bufferedReader().use { it.readText() }
           conn.disconnect()
           val item = JSONObject(txt)
           item.optString("title").takeIf { it.isNotEmpty() }?.let { title = it }
+          item.optString("video_id").takeIf { it.isNotEmpty() }?.let { videoId = it }
           blur = item.optBoolean("blur", blur) // may flip if the site setting changed
-          val shown = notifTitle(title, blur, itemId)
+          val shown = notifTitle(title, blur, videoId, itemId)
           when (item.optString("status")) {
             "completed" -> { postNotif(ctx, notifId, shown, "Download complete ✓", null, ongoing = false, indeterminate = false); return }
             "failed" -> {
@@ -250,12 +259,22 @@ class ShareActivity : Activity() {
             // Still queued: keep polling but post NOTHING — the Toast already
             // acknowledged the queue; a persistent "Queued…" here was the redundant buzz.
             "queued" -> { /* no notification while queued */ }
-            else -> return // deleted/unknown — stop quietly
+            // Deleted / unknown status: drop any ongoing notification so it never
+            // sticks around as a ghost, then stop.
+            else -> { cancelNotif(ctx, notifId); return }
           }
         } catch (e: Exception) {
           // Transient network hiccup; keep trying within the bound.
         }
       }
+    }
+
+    /** Remove a notification by id (best-effort) — used to clear an ongoing
+     *  progress notification whose download vanished, preventing ghost entries. */
+    private fun cancelNotif(ctx: Context, notifId: Int) {
+      try {
+        (ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).cancel(notifId)
+      } catch (e: Exception) { /* best-effort */ }
     }
 
     /** Show a Toast from any thread (Toasts must be posted on the main looper). */

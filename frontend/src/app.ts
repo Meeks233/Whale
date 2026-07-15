@@ -18,6 +18,7 @@ interface Item {
   thumbnail_url?: string;
   duration?: number | null;
   extractor?: string;
+  video_id?: string;
   uploader?: string;
   error?: string;
   webpage_url?: string;
@@ -110,7 +111,7 @@ function isPublicIpHost(host: string): boolean {
   if (m) {
     const o = m.slice(1).map(Number);
     if (o.some((n) => n > 255)) return false;      // malformed → treat as hostname
-    const [a, b] = o;
+    const [a = 0, b = 0] = o;
     if (a === 0 || a === 10 || a === 127) return false;
     if (a === 169 && b === 254) return false;      // link-local 169.254/16
     if (a === 192 && b === 168) return false;
@@ -545,7 +546,7 @@ function isPlayable(item: Item): boolean {
 // Friendly platform name from yt-dlp's extractor id (e.g. "youtube:tab" → YouTube).
 function sourceLabel(extractor: string | undefined): string {
   if (!extractor) return '';
-  const base = String(extractor).split(/[:_]/)[0].toLowerCase();
+  const base = (String(extractor).split(/[:_]/)[0] ?? '').toLowerCase();
   const NAMES: Record<string, string> = {
     youtube: 'YouTube', twitter: 'X', x: 'X', bilibili: 'Bilibili', tiktok: 'TikTok',
     instagram: 'Instagram', soundcloud: 'SoundCloud', vimeo: 'Vimeo', twitch: 'Twitch',
@@ -564,7 +565,7 @@ const SITE_ICONS: Record<string, string> = {
   nicovideo: 'niconico', dailymotion: 'dailymotion',
 };
 function sourceLogoHtml(extractor: string | undefined): string {
-  const base = String(extractor || '').split(/[:_]/)[0].toLowerCase();
+  const base = (String(extractor || '').split(/[:_]/)[0] ?? '').toLowerCase();
   const slug = SITE_ICONS[base] || 'generic';
   const name = sourceLabel(extractor) || 'Source';
   return `<img class="src-logo" src="/icons/sites/${slug}.svg" alt="${esc(name)}" title="${esc(name)}" loading="lazy">`;
@@ -718,7 +719,7 @@ function updateGroupHeader(gkey: string): void {
   if (!g) return;
   const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[];
   if (!items.length) return;
-  const first = items[0];
+  const first = items[0]!;
   const thumb = first.thumbnail_url
     ? `<img class="thumb" src="${esc(first.thumbnail_url)}" alt="" loading="lazy">`
     : `<div class="thumb thumb-empty"></div>`;
@@ -888,7 +889,7 @@ function patchRow(ev: ProgressEv): void {
   if (phase) {
     // Label the video/audio pass so the per-pass 0→100% reset reads as a new
     // stage rather than the bar "jumping" backwards.
-    phase.textContent = ev.phase ? ev.phase[0].toUpperCase() + ev.phase.slice(1) : '';
+    phase.textContent = ev.phase ? ev.phase.charAt(0).toUpperCase() + ev.phase.slice(1) : '';
     phase.className = 'phase' + (ev.phase ? ' phase-' + ev.phase : '');
   }
   const speed = li.querySelector('.speed');
@@ -1090,10 +1091,10 @@ function hostOfUrl(url?: string | null): string {
   let s = String(url).trim();
   const scheme = s.indexOf('://');
   if (scheme >= 0) s = s.slice(scheme + 3);
-  s = s.split(/[/?#]/)[0];
+  s = s.split(/[/?#]/)[0] ?? '';
   const at = s.lastIndexOf('@');
   if (at >= 0) s = s.slice(at + 1);
-  s = s.split(':')[0].toLowerCase().replace(/\.$/, '');
+  s = (s.split(':')[0] ?? '').toLowerCase().replace(/\.$/, '');
   return s.startsWith('www.') ? s.slice(4) : s;
 }
 function isItemBlurred(item: Item): boolean {
@@ -1133,29 +1134,26 @@ function siteResSelectHtml(w: Website): string {
   return `<select class="select site-res-select" data-act="res" aria-label="${esc(t('sites.maxRes'))}">${opts.join('')}</select>`;
 }
 
-function cookieChipHtml(w: Website): string {
+// Cookie health as a single traffic-light dot (mature status-indicator pattern),
+// so the jar's state reads at a glance without ever exposing its contents:
+//   green  = present, enabled, healthy      (success)
+//   yellow = present, enabled, expiring ≤7d (suspected expiry)
+//   red    = present, enabled, past expiry  (failed / needs refresh)
+//   grey   = disabled jar, or no cookie at all
+// Greedy by design near expiry: we never block a download on this (some sites —
+// e.g. YouTube — keep serving past a cookie's nominal expiry), the dot only nudges.
+type CookieDotClass = 'ok' | 'warn' | 'err' | 'off';
+function cookieDot(w: Website): { cls: CookieDotClass; label: string } {
   const c = w.cookie;
-  // No cookie → render nothing. The old "Not set" label was pure noise on the
-  // many sites that never need cookies.
-  if (!c || !c.present) return '';
-  const size = fmtBytes(c.bytes);
-  const chip = c.enabled
-    ? `<span class="ck-status ck-on">${esc(t('cookie.active', { size }))}</span>`
-    : `<span class="ck-status ck-off">${esc(t('cookie.disabled', { size }))}</span>`;
-  return chip + cookieExpiryChipHtml(c);
-}
-
-// A reminder chip when an *enabled* cookie is expired or within 7 days of it.
-// Greedy by design: we never block a download on this (some sites — e.g. YouTube
-// — keep serving past a cookie's nominal expiry), we only nudge; a real failure
-// still gets the "add cookies" hint from the backend.
-function cookieExpiryChipHtml(c: CookieStatus): string {
-  if (!c.enabled || !c.expires_at) return '';
-  const now = Date.now() / 1000;
-  if (c.expires_at <= now) return `<span class="ck-status ck-expired">${esc(t('cookie.expired'))}</span>`;
-  const days = Math.floor((c.expires_at - now) / 86400);
-  if (days <= 7) return `<span class="ck-status ck-expiring">${esc(t('cookie.expiring', { days: Math.max(1, days) }))}</span>`;
-  return '';
+  if (!c || !c.present) return { cls: 'off', label: t('cookie.none') };
+  if (!c.enabled) return { cls: 'off', label: t('cookie.disabled', { size: fmtBytes(c.bytes) }) };
+  if (c.expires_at) {
+    const now = Date.now() / 1000;
+    if (c.expires_at <= now) return { cls: 'err', label: t('cookie.expired') };
+    const days = Math.floor((c.expires_at - now) / 86400);
+    if (days <= 7) return { cls: 'warn', label: t('cookie.expiring', { days: Math.max(1, days) }) };
+  }
+  return { cls: 'ok', label: t('cookie.active', { size: fmtBytes(c.bytes) }) };
 }
 
 // Kebab overflow menu: everything that isn't an everyday control (login, test,
@@ -1169,7 +1167,8 @@ function siteMenuHtml(w: Website): string {
   items.push(`<button class="site-menu-item" data-act="edit">${esc(t('sites.editDomains'))}</button>`);
   items.push(`<button class="site-menu-item" data-act="validate">${esc(t('sites.validate'))}</button>`);
   if (present) {
-    items.push(`<button class="site-menu-item" data-act="ck-toggle" data-enabled="${w.cookie!.enabled ? 'false' : 'true'}">${esc(w.cookie!.enabled ? t('cookie.disable') : t('cookie.enable'))}</button>`);
+    // Enable/disable now lives on the card's cookie switch; the menu keeps only
+    // the destructive "forget this jar" action.
     items.push(`<button class="site-menu-item danger" data-act="ck-delete">${esc(t('cookie.delete'))}</button>`);
   }
   items.push(`<button class="site-menu-item danger" data-act="site-delete">${esc(t('sites.delete'))}</button>`);
@@ -1181,6 +1180,8 @@ function siteMenuHtml(w: Website): string {
 
 function websiteCardHtml(w: Website): string {
   const present = !!(w.cookie && w.cookie.present);
+  const cookieOn = !!(w.cookie && w.cookie.present && w.cookie.enabled);
+  const dot = cookieDot(w);
   return `
     <div class="site-main">
       <button class="site-toggle ${w.enabled ? 'on' : 'off'}" data-act="enable" role="switch" aria-checked="${w.enabled}" title="${esc(w.enabled ? t('sites.disable') : t('sites.enable'))}"><span class="knob"></span></button>
@@ -1192,17 +1193,26 @@ function websiteCardHtml(w: Website): string {
       </div>
       ${siteMenuHtml(w)}
     </div>
-    <div class="site-controls">
-      <label class="site-res-field">
-        <span class="site-res-label">${esc(t('sites.maxRes'))}</span>
-        ${siteResSelectHtml(w)}
-      </label>
-      ${cookieChipHtml(w)}
-      <button class="site-cookie-btn${present ? ' has' : ''}" data-act="ck-import">${esc(present ? t('cookie.replace') : t('cookie.paste'))}</button>
-    </div>
-    <div class="site-privacy">
-      <span class="site-privacy-label">${esc(t('sites.blur'))}</span>
-      <button class="site-blur-toggle ${w.blur ? 'on' : 'off'}" data-act="blur" role="switch" aria-checked="${w.blur}" title="${esc(t('sites.blur'))}"><span class="knob"></span></button>
+    <div class="site-settings">
+      <div class="site-row">
+        <span class="site-row-label">${esc(t('sites.maxRes'))}</span>
+        <div class="site-row-ctl">${siteResSelectHtml(w)}</div>
+      </div>
+      <div class="site-row">
+        <span class="site-row-label">
+          <span class="ck-dot ck-dot-${dot.cls}" title="${esc(dot.label)}" aria-label="${esc(dot.label)}" role="img"></span>${esc(t('sites.cookie'))}
+        </span>
+        <div class="site-row-ctl">
+          ${present ? `<button class="site-cookie-btn" data-act="ck-import">${esc(t('cookie.replace'))}</button>` : ''}
+          <button class="site-cookie-toggle ${cookieOn ? 'on' : 'off'}" data-act="ck-switch" role="switch" aria-checked="${cookieOn}" title="${esc(t('sites.cookie'))}"><span class="knob"></span></button>
+        </div>
+      </div>
+      <div class="site-row">
+        <span class="site-row-label">${esc(t('sites.blur'))}</span>
+        <div class="site-row-ctl">
+          <button class="site-blur-toggle ${w.blur ? 'on' : 'off'}" data-act="blur" role="switch" aria-checked="${w.blur}" title="${esc(t('sites.blur'))}"><span class="knob"></span></button>
+        </div>
+      </div>
     </div>
     <textarea class="ck-paste hidden" placeholder="${esc(t('ph.cookiePaste'))}" rows="4"></textarea>
     <div class="ck-paste-actions hidden">
@@ -1351,15 +1361,21 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
       } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
       return;
     }
-    case 'ck-toggle': {
-      const enabled = el.dataset.enabled === 'true';
-      try {
-        const res = await apiFetch('/api/websites/' + encodeURIComponent(key) + '/cookies', {
-          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok && data.cookie) { w.cookie = data.cookie; renderWebsites(); }
-      } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+    case 'ck-switch': {
+      // The cookie switch: with a jar present it flips enabled/disabled; with no
+      // jar yet, turning it on opens the import field (there's nothing to enable
+      // until cookies exist, so "on" means "let me add some").
+      if (w.cookie && w.cookie.present) {
+        try {
+          const res = await apiFetch('/api/websites/' + encodeURIComponent(key) + '/cookies', {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !w.cookie.enabled }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok && data.cookie) { w.cookie = data.cookie; renderWebsites(); }
+        } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
+      } else {
+        paste.classList.remove('hidden'); pasteActions.classList.remove('hidden'); paste.focus();
+      }
       return;
     }
     case 'ck-delete': {
@@ -1435,7 +1451,7 @@ async function batchDeleteSites(): Promise<void> {
 async function batchMergeSites(): Promise<void> {
   const keys = selectedSiteKeys();
   if (keys.length < 2) return;
-  const target = keys[0];
+  const target = keys[0]!;
   const sources = keys.slice(1);
   const targetName = websitesLoaded.find((w) => w.key === target)?.name || target;
   if (!confirm(t('sites.mergeConfirm', { n: sources.length, name: targetName }))) return;
@@ -1639,7 +1655,11 @@ els.websiteList.addEventListener('click', (e) => {
   // controls are pointer-events:none in this mode (CSS) so they never fire.
   if (siteSelectMode) { toggleSiteSelect(card.dataset.key!); return; }
   const btn = (e.target as HTMLElement).closest('[data-act]') as HTMLElement | null;
-  if (!btn) return;
+  // The max-resolution <select> also carries data-act="res", but it must report
+  // via its 'change' event only. Handling its click here would immediately
+  // re-render the card (saveWebsite → renderWebsites) and destroy the native
+  // dropdown before it can open — the "can't open the resolution picker" bug.
+  if (!btn || btn.tagName === 'SELECT') return;
   websiteAction(card.dataset.key!, btn.dataset.act!, btn);
 });
 // The maximum-resolution dropdown reports via change, not click.
@@ -2747,27 +2767,39 @@ async function setupNotifications(): Promise<void> {
   } catch (_) { /* plugin missing/blocked — silently skip */ }
 }
 
+// Android notification id base — MUST match ShareActivity.NOTIF_BASE so the
+// in-app progress notification and the share-target poller's notification for the
+// SAME item share one id and collapse into a single slot. Without this alignment,
+// sharing a link while the app is open posted TWO notifications per download (id
+// `ev.id` here vs `NOTIF_BASE + itemId` there) — the "ghost / duplicate
+// notification" the user saw.
+const NOTIF_BASE = 200000;
+
 // Drive a per-item notification from progress ticks. Throttled so we replace one
 // ongoing notification (by item id) instead of spamming a stack of them.
 function notifyProgress(ev: ProgressEv): void {
   const N = window.__TAURI__ && window.__TAURI__.notification;
   if (!N || !notif.granted) return;
+  const notifId = NOTIF_BASE + ev.id;
   const li = state.rows.get(ev.id);
   // Privacy blur: a blurred site's real title must not leak into a persistent
-  // (ongoing) notification the user has to clear by hand — use the opaque item id.
+  // (ongoing) notification the user has to clear by hand — show the source's own
+  // video id (e.g. the tweet / youtube id) instead, which identifies the download
+  // without exposing its title. Falls back to the internal id only if unknown.
   const item = state.items.get(ev.id);
   const titleEl = li && li.querySelector('.title');
+  const masked = (item && item.video_id) ? ('Video ' + item.video_id) : ('Item #' + ev.id);
   const title = (item && isItemBlurred(item))
-    ? ('Item #' + ev.id)
-    : ((titleEl && titleEl.textContent) || ('Item #' + ev.id));
+    ? masked
+    : ((titleEl && titleEl.textContent) || masked);
   try {
     if (ev.status === 'completed') {
-      N.sendNotification({ id: ev.id, icon: 'ic_notification', title, body: '✓ Download complete', ongoing: false, autoCancel: true });
+      N.sendNotification({ id: notifId, icon: 'ic_notification', title, body: '✓ Download complete', ongoing: false, autoCancel: true });
       notif.last.delete(ev.id);
       return;
     }
     if (ev.status === 'failed') {
-      N.sendNotification({ id: ev.id, icon: 'ic_notification', title, body: '✗ Download failed', ongoing: false, autoCancel: true });
+      N.sendNotification({ id: notifId, icon: 'ic_notification', title, body: '✗ Download failed', ongoing: false, autoCancel: true });
       notif.last.delete(ev.id);
       return;
     }
@@ -2778,10 +2810,10 @@ function notifyProgress(ev: ProgressEv): void {
     const phaseChanged = (ev.phase || '') !== prev.phase;
     // Update at most ~1/s and only on a ≥2% move or a stage change.
     if (!phaseChanged && now - prev.t < 900 && Math.abs(pct - prev.pct) < 2) return;
-    const stage = ev.phase ? ev.phase[0].toUpperCase() + ev.phase.slice(1) + ' · ' : '';
+    const stage = ev.phase ? ev.phase.charAt(0).toUpperCase() + ev.phase.slice(1) + ' · ' : '';
     const pctStr = ev.percent == null ? 'Downloading' : Math.round(ev.percent) + '%';
     const spd = ev.speed ? ' · ' + ev.speed : '';
-    N.sendNotification({ id: ev.id, icon: 'ic_notification', title, body: `${stage}${pctStr}${spd}`, ongoing: true, silent: true });
+    N.sendNotification({ id: notifId, icon: 'ic_notification', title, body: `${stage}${pctStr}${spd}`, ongoing: true, silent: true });
     notif.last.set(ev.id, { pct, t: now, phase: ev.phase || '' });
   } catch (_) { /* plugin call failed; ignore */ }
 }
@@ -2796,12 +2828,12 @@ function notifyProgress(ev: ProgressEv): void {
 
   window.addEventListener('touchstart', (e) => {
     pulling = atTop() && !state.loading && els.player.classList.contains('hidden');
-    if (pulling) { startY = e.touches[0].clientY; dist = 0; }
+    if (pulling) { startY = e.touches[0]?.clientY ?? 0; dist = 0; }
   }, { passive: true });
 
   window.addEventListener('touchmove', (e) => {
     if (!pulling) return;
-    dist = e.touches[0].clientY - startY;
+    dist = (e.touches[0]?.clientY ?? startY) - startY;
     if (dist <= 0) { ptr.style.transform = ''; ptr.classList.remove('visible', 'ready'); return; }
     const pull = Math.min(dist, THRESH * 1.6);
     ptr.classList.add('visible');
@@ -2839,7 +2871,7 @@ function renderLangMenu(): void {
   const langs = window.i18n.supported();
   const rows: [string, string][] = [
     ['auto', t('lang.auto')],
-    ...Object.keys(langs).map((code) => [code, langs[code].label] as [string, string]),
+    ...Object.keys(langs).map((code) => [code, langs[code]!.label] as [string, string]),
   ];
   els.langMenu.innerHTML = rows.map(([code, label]) =>
     `<button class="popover-item${code === pref ? ' active' : ''}" role="menuitemradio"
@@ -2908,7 +2940,7 @@ function renderThemeToggle(): void {
 
 if (els.themeToggle) {
   els.themeToggle.addEventListener('click', () => {
-    const next = THEME_ORDER[(THEME_ORDER.indexOf(themePref()) + 1) % THEME_ORDER.length];
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(themePref()) + 1) % THEME_ORDER.length]!;
     localStorage.setItem(THEME_KEY, next);
     applyTheme();
     renderThemeToggle();
@@ -2967,12 +2999,12 @@ async function softRefresh(): Promise<void> {
     const data = await res.json();
     const items: Item[] = data.items || [];
     // Iterate oldest→newest so prepending new rows leaves them newest-first.
-    for (let i = items.length - 1; i >= 0; i--) upsertRow(items[i], true);
+    for (let i = items.length - 1; i >= 0; i--) upsertRow(items[i]!, true);
     // Drop rows deleted upstream. When a full page came back, only reconcile within
     // its window (id >= the oldest returned) so scroll-loaded older rows are spared.
     // When a partial page came back the whole history fits here, so reconcile all.
     const present = new Set(items.map((it) => it.id));
-    const floor = items.length >= PAGE_SIZE ? items[items.length - 1].id : -Infinity;
+    const floor = items.length >= PAGE_SIZE ? items[items.length - 1]!.id : -Infinity;
     for (const id of [...state.rows.keys()]) {
       if (id >= floor && !present.has(id)) removeRow(id);
     }

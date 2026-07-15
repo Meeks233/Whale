@@ -157,6 +157,7 @@ declare global {
       'cookies.hint': 'Log in on a site, export its cookies with a “Get cookies.txt” browser extension, then paste them here. Whale applies them automatically to every download from that platform (X cookies → all x.com / twitter.com links, etc.).',
       'ph.cookiePaste': 'Paste cookies.txt, a JSON cookie export, or a "name=value; …" header…',
       'cookie.notSet': 'Not set',
+      'cookie.none': 'No cookies',
       'cookie.active': 'Cookie Active · {size}',
       'cookie.disabled': 'Cookie Disabled · {size}',
       'cookie.expired': 'Cookie expired',
@@ -186,6 +187,7 @@ declare global {
       'sites.editDomains': 'Edit domains',
       'sites.resolution': 'Resolution',
       'sites.maxRes': 'Maximum resolution',
+      'sites.cookie': 'Cookies',
       'sites.followGlobal': 'Follow global',
       'sites.more': 'More',
       'sites.select': 'Select sites',
@@ -389,6 +391,7 @@ declare global {
       'cookies.hint': '在网站上登录，用“Get cookies.txt”浏览器扩展导出其 Cookie，然后粘贴到这里。Whale 会在该平台的每次下载中自动应用（X 的 Cookie → 所有 x.com / twitter.com 链接，依此类推）。',
       'ph.cookiePaste': '粘贴 cookies.txt、JSON 导出或 "name=value; …" 请求头…',
       'cookie.notSet': '未设置',
+      'cookie.none': '未设置 Cookie',
       'cookie.active': 'Cookie 已启用 · {size}',
       'cookie.disabled': 'Cookie 已禁用 · {size}',
       'cookie.expired': 'Cookie 已过期',
@@ -418,6 +421,7 @@ declare global {
       'sites.editDomains': '编辑域名',
       'sites.resolution': '分辨率',
       'sites.maxRes': '最高分辨率',
+      'sites.cookie': 'Cookie',
       'sites.followGlobal': '跟随全局',
       'sites.more': '更多',
       'sites.select': '多选网站',
@@ -621,6 +625,7 @@ declare global {
       'cookies.hint': '在網站上登入，用「Get cookies.txt」瀏覽器擴充功能匯出其 Cookie，然後貼到這裡。Whale 會在該平台的每次下載中自動套用（X 的 Cookie → 所有 x.com / twitter.com 連結，以此類推）。',
       'ph.cookiePaste': '貼上 cookies.txt、JSON 匯出或 "name=value; …" 請求標頭…',
       'cookie.notSet': '未設定',
+      'cookie.none': '未設定 Cookie',
       'cookie.active': 'Cookie 已啟用 · {size}',
       'cookie.disabled': 'Cookie 已停用 · {size}',
       'cookie.expired': 'Cookie 已過期',
@@ -650,6 +655,7 @@ declare global {
       'sites.editDomains': '編輯網域',
       'sites.resolution': '解析度',
       'sites.maxRes': '最高解析度',
+      'sites.cookie': 'Cookie',
       'sites.followGlobal': '跟隨全域',
       'sites.more': '更多',
       'sites.select': '多選網站',
@@ -750,7 +756,7 @@ declare global {
       if (/hant|tw|hk|mo/.test(tag)) return 'zh-Hant';
       return 'zh-Hans';
     }
-    const base = tag.split('-')[0];
+    const base = tag.split('-')[0] ?? '';
     return LANGS[base] ? base : null;
   }
 
@@ -767,9 +773,8 @@ declare global {
   let current: LangCode = (override && LANGS[override]) ? override : detect();
 
   function t(key: string, params?: Params): string {
-    const table = DICT[current] || DICT.en;
-    let s = (table && table[key] != null) ? table[key]
-          : (DICT.en[key] != null ? DICT.en[key] : key);
+    const table = DICT[current] ?? DICT.en ?? {};
+    let s = table[key] ?? DICT.en?.[key] ?? key;
     if (params) s = s.replace(/\{(\w+)\}/g, (m, k) => (params[k] != null ? String(params[k]) : m));
     return s;
   }

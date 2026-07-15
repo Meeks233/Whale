@@ -296,7 +296,21 @@ input:focus { outline: none; border-color: var(--accent); }
   border-radius: 16px;
   padding: 22px;
   box-shadow: 0 12px 40px rgba(0,0,0,.35);
+  /* Firefox: thin themed bar instead of the chunky native one. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+  scrollbar-gutter: stable;
 }
+/* WebKit/Blink: a slim inset thumb that matches the card, so the long website
+   list no longer shows the heavy OS scrollbar. Track stays transparent; the
+   thumb is padded via a card-coloured border for the floating-pill look. */
+.modal-card::-webkit-scrollbar { width: 12px; }
+.modal-card::-webkit-scrollbar-track { background: transparent; }
+.modal-card::-webkit-scrollbar-thumb {
+  background: var(--border); border-radius: 999px;
+  border: 3px solid var(--surface); background-clip: padding-box;
+}
+.modal-card::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
 .modal-close {
   position: absolute;
   top: 10px;
@@ -1095,21 +1109,25 @@ body.player-open { overflow: hidden; }
 .site-name { font-weight: 600; font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-domains-list { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* Enable/disable + privacy-blur pill switches (one shared switch style). */
+/* Enable/disable, cookie, and privacy-blur pill switches (one shared style). */
 .site-toggle,
-.site-blur-toggle {
+.site-blur-toggle,
+.site-cookie-toggle {
   position: relative; width: 40px; height: 22px; border-radius: 999px; flex-shrink: 0; margin-top: 1px;
   border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; padding: 0;
 }
 .site-toggle .knob,
-.site-blur-toggle .knob {
+.site-blur-toggle .knob,
+.site-cookie-toggle .knob {
   position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
   background: var(--muted); transition: left .15s, background .15s;
 }
 .site-toggle.on,
-.site-blur-toggle.on { background: color-mix(in oklab, var(--accent) 30%, var(--surface-2)); border-color: var(--accent); }
+.site-blur-toggle.on,
+.site-cookie-toggle.on { background: color-mix(in oklab, var(--accent) 30%, var(--surface-2)); border-color: var(--accent); }
 .site-toggle.on .knob,
-.site-blur-toggle.on .knob { left: 20px; background: var(--accent); }
+.site-blur-toggle.on .knob,
+.site-cookie-toggle.on .knob { left: 20px; background: var(--accent); }
 
 /* Overflow (kebab) menu: collapses the rarely-used per-site actions. */
 .site-menu-wrap { position: relative; flex-shrink: 0; }
@@ -1131,25 +1149,39 @@ body.player-open { overflow: hidden; }
 .site-menu-item:hover { background: var(--surface); }
 .site-menu-item.danger { color: var(--err); }
 
-/* Controls row: max-resolution dropdown · cookie status · cookie action button.
-   The cookie status chip rides here (next to Replace/Paste) rather than in the
-   title row, so a long "Cookie Active · N KB" never squeezes the site name. */
-.site-controls { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; }
-.site-res-field { display: flex; align-items: center; gap: 8px; flex: 1 1 180px; min-width: 0; }
-.site-res-label { font-size: 12px; color: var(--muted); flex-shrink: 0; }
-.site-res-select { flex: 1 1 auto; min-width: 0; }
-.site-controls .ck-status { flex-shrink: 0; }
+/* Per-site settings: three consistent rows — max-resolution · cookies · blur —
+   each a left-aligned label and a right-aligned control (iOS-settings "form
+   group"). One shared label font size keeps the three controls visually equal. */
+.site-settings { display: flex; flex-direction: column; }
+.site-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 40px; padding: 5px 0;
+}
+.site-row + .site-row { border-top: 1px solid var(--border); }
+.site-row-label {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: 14px; color: var(--text); min-width: 0;
+}
+.site-row-ctl { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.site-row-ctl .site-res-select { flex: 0 0 auto; min-width: 150px; max-width: 220px; }
+
+/* Cookie health dot (traffic-light): green ok · amber expiring · red expired ·
+   grey off. Conveys the jar's state without ever exposing its contents. */
+.ck-dot {
+  width: 9px; height: 9px; border-radius: 999px; flex: 0 0 auto; background: var(--muted);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--muted) 18%, transparent);
+}
+.ck-dot-ok { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 22%, transparent); }
+.ck-dot-warn { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in oklab, var(--warn) 22%, transparent); }
+.ck-dot-err { background: var(--err); box-shadow: 0 0 0 3px color-mix(in oklab, var(--err) 22%, transparent); }
+.ck-dot-off { background: var(--muted); opacity: .45; box-shadow: none; }
+
+/* Import/replace button, shown left of the cookie switch once a jar exists. */
 .site-cookie-btn {
-  flex-shrink: 0; font-size: 13px; padding: 8px 14px; border-radius: 10px;
+  flex-shrink: 0; font-size: 13px; padding: 6px 12px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text); cursor: pointer;
 }
 .site-cookie-btn:hover { border-color: var(--accent); }
-.site-cookie-btn.has { border-style: dashed; }
-
-/* Privacy-blur row: label on the left, pill switch on the right (iOS-settings
-   pattern), sitting directly under the max-resolution control. */
-.site-privacy { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.site-privacy-label { font-size: 13px; color: var(--muted); }
 
 /* Selection mode: whole card is the tap target; inner controls stand down. */
 .sites-selecting .website-card { cursor: pointer; }
