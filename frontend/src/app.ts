@@ -164,6 +164,8 @@ const els = {
   siteSelToggle: byId<HTMLButtonElement>('site-sel-toggle'),
   siteSelBar: byId('site-select-bar'),
   siteSelCount: byId('site-sel-count'),
+  siteSelAll: byId<HTMLButtonElement>('site-sel-all'),
+  siteSelInvert: byId<HTMLButtonElement>('site-sel-invert'),
   siteSelEnable: byId<HTMLButtonElement>('site-sel-enable'),
   siteSelDisable: byId<HTMLButtonElement>('site-sel-disable'),
   siteSelMerge: byId<HTMLButtonElement>('site-sel-merge'),
@@ -1374,6 +1376,24 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
           if (res.ok && data.cookie) { w.cookie = data.cookie; renderWebsites(); }
         } catch (e) { if (!e || !e.unauthorized) toast('Network error', 'error'); }
       } else {
+        // The frontend thinks there's no jar — but our cached view can be stale
+        // (app resume, a dropped refresh, an SSE re-render), and a jar the user
+        // already imported may still live on the server. Re-verify before making
+        // them paste again: PATCH-enable returns the jar when it exists and 404s
+        // only when genuinely absent. So enabling reuses the stored cookie; the
+        // import field opens only when the server truly has nothing.
+        try {
+          const res = await apiFetch('/api/websites/' + encodeURIComponent(key) + '/cookies', {
+            method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: true }),
+          });
+          if (res.ok) {
+            const data = await res.json().catch(() => ({}));
+            if (data.cookie && data.cookie.present) { w.cookie = data.cookie; renderWebsites(); return; }
+          } else if (res.status !== 404) {
+            return; // a real server error — don't fall through to a spurious re-import
+          }
+        } catch (e) { if (e && e.unauthorized) return; }
+        // Genuinely no jar on the server → open the import field to add one.
         paste.classList.remove('hidden'); pasteActions.classList.remove('hidden'); paste.focus();
       }
       return;
@@ -1418,9 +1438,37 @@ function selectedSiteKeys(): string[] {
 
 function updateSiteSelBar(): void {
   const n = siteSelected.size;
-  els.siteSelBar.classList.toggle('hidden', !siteSelectMode || n === 0);
+  // Visible whenever select mode is on (even with nothing picked) so the
+  // select-all / invert buttons stay reachable — mirrors the home list.
+  els.siteSelBar.classList.toggle('hidden', !siteSelectMode);
   els.siteSelCount.textContent = t('sites.selectedN', { n });
   els.siteSelMerge.disabled = n < 2;
+  els.siteSelEnable.disabled = n === 0;
+  els.siteSelDisable.disabled = n === 0;
+  els.siteSelDelete.disabled = n === 0;
+  // Select-all / invert act on the visible (filtered) cards.
+  const visible = filteredWebsites().length;
+  els.siteSelAll.disabled = visible === 0;
+  els.siteSelInvert.disabled = visible === 0;
+  els.siteSelAll.textContent = visible > 0 && n >= visible ? t('sel.clear') : t('sel.all');
+}
+
+// "Select all" over the visible (filtered) cards; toggles to "clear" once every
+// visible card is selected (one button covers select-all and none).
+function selectAllSites(): void {
+  const keys = filteredWebsites().map((w) => w.key);
+  const allSelected = keys.length > 0 && keys.every((k) => siteSelected.has(k));
+  if (allSelected) keys.forEach((k) => siteSelected.delete(k));
+  else keys.forEach((k) => siteSelected.add(k));
+  renderWebsites();
+}
+
+// Flip each visible card's membership (selected ⇄ unselected).
+function invertSiteSelection(): void {
+  filteredWebsites().forEach((w) => {
+    if (siteSelected.has(w.key)) siteSelected.delete(w.key); else siteSelected.add(w.key);
+  });
+  renderWebsites();
 }
 
 async function batchSetEnabled(enabled: boolean): Promise<void> {
@@ -1676,6 +1724,8 @@ document.addEventListener('click', (e) => {
 els.sitesAdd.addEventListener('click', () => openSiteEdit(null));
 els.siteSearch.addEventListener('input', debounce(() => { siteQuery = els.siteSearch.value; renderWebsites(); }, 150));
 els.siteSelToggle.addEventListener('click', () => setSiteSelectMode(!siteSelectMode));
+els.siteSelAll.addEventListener('click', selectAllSites);
+els.siteSelInvert.addEventListener('click', invertSiteSelection);
 els.siteSelEnable.addEventListener('click', () => batchSetEnabled(true));
 els.siteSelDisable.addEventListener('click', () => batchSetEnabled(false));
 els.siteSelMerge.addEventListener('click', batchMergeSites);
@@ -2119,9 +2169,17 @@ els.history.addEventListener('click', (e) => {
   if (isNativeApp) {
     const bl = target.closest('.item.blurred:not(.revealed)') as HTMLElement | null;
     if (bl) {
-      e.preventDefault();
-      revealBlurred(bl);
-      return;
+      // Only the blurred visual area (thumbnail / title / uploader) reveals-then-
+      // waits. The action buttons are never blurred (see .item.blurred CSS), so a
+      // tap on one reveals the card AND activates the button in a single tap —
+      // no second press. The play overlay counts as blurred content (reveal first).
+      const onAction = target.closest('[data-act]');
+      if (!onAction) {
+        e.preventDefault();
+        revealBlurred(bl);
+        return;
+      }
+      revealBlurred(bl); // reveal, then fall through to run the button's action
     }
   }
   if (head) {

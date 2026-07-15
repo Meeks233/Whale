@@ -9,6 +9,7 @@
 # Local Claude Code automation harness (rebuild/verify/push) — local-only
 /CLAUDE.md
 /.claude/
+/.opencode/
 /scripts/
 .cc-*
 
