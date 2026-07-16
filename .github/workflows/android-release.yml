@@ -73,6 +73,14 @@ jobs:
       - name: Install cargo-tauri
         run: cargo binstall -y 'tauri-cli@2.11.4'
 
+      # The Tauri app embeds web/ (frontendDist). That bundle is committed, so a
+      # stale one would ship silently — rebuild it here rather than trusting the
+      # working tree (ci.yml only *checks* freshness, and this job doesn't need it).
+      - name: Build frontend bundle
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run build
+
       - name: Decode release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.ORCA_ANDROID_KEYSTORE_BASE64 }}
@@ -92,6 +100,28 @@ jobs:
           install -m 0644 app/src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab "dist/orca-$version.aab"
           install -m 0644 app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk "dist/orca-$version.apk"
           sha256sum dist/orca-* > dist/SHA256SUMS
+          # R8 is on (isMinifyEnabled), so without this Play shows obfuscated
+          # stack traces. Kept out of SHA256SUMS: it is a debug aid, not a release
+          # artifact users verify.
+          mapping="app/src-tauri/gen/android/app/build/outputs/mapping/universalRelease/mapping.txt"
+          if [ -f "$mapping" ]; then install -m 0644 "$mapping" dist/mapping.txt; fi
+
+      # Play's "what's new" is generated from the fastlane changelogs so there is
+      # ONE source of truth per locale. The filename must be the versionCode,
+      # which tauri-cli derives from tauri.conf.json's version — deriving it the
+      # same way here means a version bump can't silently ship a stale changelog.
+      - name: Assemble Play changelogs
+        run: |
+          code="$(node -p "const [a,b,c]=require('./app/src-tauri/tauri.conf.json').version.split('.').map(Number); a*1000000+b*1000+c")"
+          mkdir -p dist/whatsnew
+          for loc in en-US zh-CN; do
+            src="fastlane/metadata/android/$loc/changelogs/$code.txt"
+            if [ ! -f "$src" ]; then
+              echo "::error::missing changelog $src for versionCode $code" >&2
+              exit 1
+            fi
+            install -m 0644 "$src" "dist/whatsnew/whatsnew-$loc"
+          done
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -104,7 +134,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "Orca $GITHUB_REF_NAME"
+        # Explicit list, not dist/*: that glob would now pick up the whatsnew/
+        # directory (gh rejects it) and the R8 mapping, which is a Play debug aid
+        # rather than something users download.
+        run: gh release create "$GITHUB_REF_NAME" dist/orca-* dist/SHA256SUMS --verify-tag --generate-notes --title "Orca $GITHUB_REF_NAME"
 
   play:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_play
@@ -129,4 +162,7 @@ jobs:
           releaseFiles: dist/*.aab
           tracks: ${{ inputs.play_track }}
           status: completed
-          whatsNewDirectory: distribution/whatsnew
+          # Generated from fastlane/metadata/**/changelogs/<versionCode>.txt by the
+          # build job, and downloaded here as part of the release artifact.
+          whatsNewDirectory: dist/whatsnew
+          mappingFile: dist/mapping.txt

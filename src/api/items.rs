@@ -237,7 +237,19 @@ pub async fn list(
 pub async fn get(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
     let item = item_by_slug(&state, &slug).await?;
     let sites = state.db.list_websites().await.unwrap_or_default();
-    Ok(Json(decorate_item(&item, &sites)).into_response())
+    let mut value = decorate_item(&item, &sites);
+    // Live percent/speed/eta for a running download. The Android notification
+    // service polls this endpoint (it cannot hold the SSE stream open across
+    // process death), so without this it could only show a spinner.
+    if let Some(p) = state.queue.live_progress(item.id) {
+        value["progress"] = json!({
+            "percent": p.percent,
+            "speed": p.speed,
+            "eta": p.eta,
+            "phase": p.phase,
+        });
+    }
+    Ok(Json(value).into_response())
 }
 
 /// POST /api/items/:slug/retry — re-queue a failed item.

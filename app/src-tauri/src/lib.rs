@@ -88,6 +88,47 @@ fn request_notification_permission<R: tauri::Runtime>(
     Err("Android permissions are unavailable on this platform".into())
 }
 
+/// Hand a download submitted from inside the app to the Android foreground
+/// service that owns download notifications, so an in-app download notifies the
+/// same way a shared link does. No-op off Android.
+#[tauri::command]
+fn track_download<R: tauri::Runtime>(_app: tauri::AppHandle<R>, _slug: String) {
+    #[cfg(target_os = "android")]
+    {
+        let _ = _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin::<serde_json::Value>(
+                "trackDownload",
+                serde_json::json!({ "slug": _slug }),
+            );
+    }
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct PendingDeeplink {
+    /// Absent whenever no notification tap is pending.
+    #[serde(default)]
+    slug: Option<String>,
+}
+
+/// Drain the item slug stashed by a download-notification tap, so the frontend
+/// can scroll to that row. Returns `None` when nothing is pending.
+#[tauri::command]
+fn take_pending_deeplink<R: tauri::Runtime>(_app: tauri::AppHandle<R>) -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin::<PendingDeeplink>("takePendingDeeplink", ())
+            .ok()
+            .and_then(|d| d.slug);
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
@@ -98,7 +139,9 @@ pub fn run() {
             save_share_creds,
             android_permission_status,
             request_notification_permission,
-            request_background_permission
+            request_background_permission,
+            track_download,
+            take_pending_deeplink
         ]);
 
     #[cfg(target_os = "android")]
