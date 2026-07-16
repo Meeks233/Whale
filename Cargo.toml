@@ -1,11 +1,11 @@
 [package]
-name = "whale"
+name = "orca"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/Meeks233/Whale"
-homepage = "https://github.com/Meeks233/Whale"
+repository = "https://github.com/Meeks233/Orca"
+homepage = "https://github.com/Meeks233/Orca"
 readme = "README.md"
 
 [dependencies]

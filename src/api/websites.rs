@@ -313,7 +313,7 @@ fn migrate_download_folder(state: &AppState, src: &Website, target: &Website) {
     });
 }
 
-/// The download subfolder name Whale would use for a site (Title-cased key/name).
+/// The download subfolder name Orca would use for a site (Title-cased key/name).
 fn folder_name(name: &str, key: &str) -> String {
     let seed = if name.trim().is_empty() { key } else { name };
     let cleaned: String = seed.chars().filter(|c| c.is_ascii_alphanumeric()).collect();

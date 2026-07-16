@@ -13,22 +13,50 @@ val tauriProperties = Properties().apply {
     }
 }
 
+fun releaseSecret(name: String): String? =
+    providers.environmentVariable(name).orNull
+        ?: providers.gradleProperty(name).orNull
+
+val releaseStorePath = releaseSecret("ORCA_ANDROID_KEYSTORE_PATH")
+val releaseStorePassword = releaseSecret("ORCA_ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = releaseSecret("ORCA_ANDROID_KEY_ALIAS")
+val releaseKeyPassword = releaseSecret("ORCA_ANDROID_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseStorePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     compileSdk = 36
-    namespace = "com.whale.app"
+    namespace = "com.orca.app"
     defaultConfig {
-        // Allow http:// so the app can reach a self-hosted Whale server on a LAN.
+        // Allow http:// so the app can reach a self-hosted Orca server on a LAN.
         manifestPlaceholders["usesCleartextTraffic"] = "true"
-        applicationId = "com.whale.app"
+        applicationId = "com.orca.app"
         // Raised from 24 → 28: the share-target plugin requires Android 9+.
         minSdk = 28
-        // Kept at 34 (matching Seal): Android 16 / targetSdk 36 enforces
-        // "safer intents" intent-filter matching that blocks the system share
-        // sheet from launching our share target (startActivityAsCaller →
-        // ActivityNotFoundException). 34 restores working share-to-download.
-        targetSdk = 34
+        // Google Play requires API 36 for new apps and updates from 2026-08-31.
+        // ShareActivity remains opaque and uses explicit SEND/VIEW filters so it
+        // complies with Android 16's safer-intent handling.
+        targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
         versionName = tauriProperties.getProperty("tauri.android.versionName", "1.0")
+    }
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStorePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
+        }
     }
     buildTypes {
         getByName("debug") {
@@ -44,6 +72,7 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
+            signingConfigs.findByName("release")?.let { signingConfig = it }
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))

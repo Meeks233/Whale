@@ -11,7 +11,7 @@
 
 use super::AppState;
 use crate::error::AppError;
-use crate::types::Item;
+use crate::types::{Item, Status};
 use axum::body::Body;
 use axum::extract::{Path, Request, State};
 use axum::http::header;
@@ -70,6 +70,7 @@ pub async fn public_file(
     if !crate::types::is_public_live(&item) {
         return Err(AppError::NotFound);
     }
+    ensure_media_ready(item.status)?;
     // Tally external access so the owner can spot an abused link. Count a fresh
     // load or download once; skip seek/range continuations (a single video play
     // fires many partial requests) so the number tracks views, not chunks.
@@ -172,6 +173,7 @@ async fn resolve_stream_target(
         .find_by_slug(slug)
         .await?
         .ok_or(AppError::NotFound)?;
+    ensure_media_ready(item.status)?;
     // Defense in depth: re-validate the stored page URL before yt-dlp fetches it.
     crate::net_guard::guard(&item.webpage_url, state.cfg.allow_private_dns)
         .await
@@ -322,6 +324,7 @@ fn cookie_header_for(cookie_file: Option<&FsPath>, upstream: &str) -> Option<Str
 /// `root` is the configured download directory: the file is served only if it
 /// canonicalizes to a real file inside it (path-traversal guard).
 async fn serve_item(root: &FsPath, item: Item, req: Request) -> Result<Response, AppError> {
+    ensure_media_ready(item.status)?;
     let query = req.uri().query().unwrap_or("").to_string();
     let stored = match item.filepath.as_deref() {
         Some(p) if !p.is_empty() => p,
@@ -354,6 +357,14 @@ async fn serve_item(root: &FsPath, item: Item, req: Request) -> Result<Response,
         .headers
         .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     Ok(Response::from_parts(parts, Body::new(body)).into_response())
+}
+
+fn ensure_media_ready(status: Status) -> Result<(), AppError> {
+    if status == Status::Completed {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest("item media is not ready".into()))
+    }
 }
 
 /// Build an attachment `Content-Disposition` with an RFC 5987 UTF-8 filename so
@@ -398,6 +409,19 @@ mod tests {
     fn ascii_filename_round_trips() {
         let d = content_disposition("Video-01_final.mp4");
         assert_eq!(d, "attachment; filename*=UTF-8''Video-01_final.mp4");
+    }
+
+    #[test]
+    fn media_is_served_only_after_completion() {
+        assert!(ensure_media_ready(Status::Completed).is_ok());
+        for status in [
+            Status::Queued,
+            Status::Running,
+            Status::Failed,
+            Status::Duplicate,
+        ] {
+            assert!(ensure_media_ready(status).is_err());
+        }
     }
 
     fn write_cookies(body: &str) -> tempfile::NamedTempFile {

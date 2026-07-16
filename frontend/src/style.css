@@ -508,7 +508,6 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
    app reveals on tap (JS adds .revealed for a few seconds). Only the visual
    content is blurred — status/actions stay usable so downloads still work. */
 .item.blurred .thumb,
-.item.blurred .thumb-wrap,
 .item.blurred .title span,
 .item.blurred .uploader {
   filter: blur(9px);
@@ -517,11 +516,9 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 .item.blurred .title span,
 .item.blurred .uploader { user-select: none; }
 .item.blurred:hover .thumb,
-.item.blurred:hover .thumb-wrap,
 .item.blurred:hover .title span,
 .item.blurred:hover .uploader,
 .item.blurred.revealed .thumb,
-.item.blurred.revealed .thumb-wrap,
 .item.blurred.revealed .title span,
 .item.blurred.revealed .uploader {
   filter: none;
@@ -676,6 +673,24 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 .thumb-wrap.portrait, .thumb-wrap.portrait .thumb { width: 68px; }
 .thumb-wrap.portrait .thumb { aspect-ratio: 9 / 16; }
 .thumb-empty { background: var(--surface-2); }
+.item .thumb-wrap.media-pending .thumb,
+.group-head .thumb-wrap.media-pending .thumb {
+  filter: blur(7px);
+  opacity: .62;
+}
+.media-loader {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 3px rgba(0,0,0,.8));
+}
+.media-pending .media-loader { display: flex; }
+.media-loader svg { display: block; animation: spin .8s linear infinite; }
 /* Duration pill: bottom-left of the thumbnail box. */
 .dur {
   position: absolute;

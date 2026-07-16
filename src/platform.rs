@@ -20,7 +20,7 @@ pub struct Platform {
     pub login_url: &'static str,
 }
 
-/// The catalog of sites Whale offers per-platform cookies for. Ordered for the UI.
+/// The catalog of sites Orca offers per-platform cookies for. Ordered for the UI.
 pub static CATALOG: &[Platform] = &[
     Platform {
         key: "youtube",

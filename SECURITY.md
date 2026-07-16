@@ -24,4 +24,4 @@ and any proposed mitigation. Do not access data or systems you do not own.
 - update from CI-verified immutable image tags
 
 Public share URLs are bearer capabilities. Revoke a link immediately if disclosed;
-Whale destroys the capability and creates a different one on the next share.
+Orca destroys the capability and creates a different one on the next share.

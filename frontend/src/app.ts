@@ -1,4 +1,4 @@
-// Whale web UI — the whole client. Bundled (with i18n) and minified into
+// Orca web UI — the whole client. Bundled (with i18n) and minified into
 // ../web/app.js by build.ts. Importing i18n for its side effect installs
 // window.i18n before any app code runs.
 import './i18n';
@@ -19,6 +19,7 @@ interface Item {
   thumbnail_url?: string;
   duration?: number | null;
   extractor?: string;
+  site_name?: string;
   video_id?: string;
   uploader?: string;
   error?: string;
@@ -72,7 +73,16 @@ const t = (key: string, params?: Params): string => window.i18n.t(key, params);
 const statusLabel = (s: string): string => window.i18n.t('status.' + s) || s;
 
 // ---- Token persistence ----------------------------------------------------
-const TOKEN_KEY = 'whale_token';
+function migrateLegacyStorage(current: string, suffix: string): void {
+  const previous = ['wha', 'le_', suffix].join('');
+  if (localStorage.getItem(current) == null) {
+    const value = localStorage.getItem(previous);
+    if (value != null) localStorage.setItem(current, value);
+  }
+  localStorage.removeItem(previous);
+}
+const TOKEN_KEY = 'orca_token';
+migrateLegacyStorage(TOKEN_KEY, 'token');
 function getToken(): string { return localStorage.getItem(TOKEN_KEY) || ''; }
 function setToken(tok: string): void {
   if (tok) localStorage.setItem(TOKEN_KEY, tok);
@@ -91,8 +101,9 @@ function mirrorShareCreds(): void {
 
 // ---- Server base URL ------------------------------------------------------
 // Empty in a browser (same-origin, unchanged). The native app (Tauri) sets this
-// to the remote Whale server so the identical UI can talk to it cross-origin.
-const BASE_KEY = 'whale_api_base';
+// to the remote Orca server so the identical UI can talk to it cross-origin.
+const BASE_KEY = 'orca_api_base';
+migrateLegacyStorage(BASE_KEY, 'api_base');
 function apiBase(): string { return (localStorage.getItem(BASE_KEY) || '').replace(/\/+$/, ''); }
 function setApiBase(b: string): void {
   b = (b || '').trim().replace(/\/+$/, '');
@@ -152,7 +163,7 @@ function isInsecurePublicBase(raw: string): boolean {
   return !ipLiteral || isPublicIpHost(host);
 }
 
-// Canonical public domain the operator declared via WHALE_PUBLIC_URL, fetched
+// Canonical public domain the operator declared via ORCA_PUBLIC_URL, fetched
 // from /api/health on boot. Empty until loaded (or if unset) — publicUrl()
 // then falls back to the server base / current origin.
 let serverPublicUrl = '';
@@ -354,7 +365,7 @@ function setServerStatus(up: boolean): void {
 }
 
 // ---- Total-downloaded readout (beside the heartbeat) ----------------------
-// A small pill showing how many files Whale has stored and their combined size
+// A small pill showing how many files Orca has stored and their combined size
 // — the familiar "N items · X GB" storage summary. Refreshed on boot, on each
 // completion, and after deletes. Hidden until the first successful fetch.
 const STATS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>`;
@@ -474,7 +485,7 @@ const streamPrewarmObserver = new IntersectionObserver((entries) => {
 
 // Tokenless public link, keyed by the item's random slug (not its id, so it
 // can't be guessed by enumeration). Prefers the operator-declared public
-// domain (WHALE_PUBLIC_URL) so links carry the real domain regardless of the
+// domain (ORCA_PUBLIC_URL) so links carry the real domain regardless of the
 // origin the UI was loaded from; falls back to the app's server base, then the
 // current origin.
 function publicUrl(slug: string): string {
@@ -579,6 +590,13 @@ const CLOUD_BADGE = `<span class="cloud-badge" title="Cloud only — plays from 
 // thumbnail opens the in-app fullscreen player (see openPlayer).
 const PLAY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>`;
 const PLAY_BADGE = `<span class="play-badge" aria-hidden="true">${PLAY_ICON}</span>`;
+const MEDIA_LOADER = `<span class="media-loader" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>`;
+
+function isMediaPending(item: Item, status = item.status): boolean {
+  // Resolution jobs emit running events for an already-completed item. Its old
+  // file remains valid, so only the first download receives the pending mask.
+  return item.status !== 'completed' && (status === 'queued' || status === 'running');
+}
 
 // A completed item with a file is playable in-app (local file or cloud fallback).
 function isPlayable(item: Item): boolean {
@@ -621,13 +639,14 @@ function sourceLogoHtml(extractor: string | undefined): string {
 // (top-right), duration (bottom-left), play (bottom-right). The source is now
 // shown as a logo before the title (see rowHtml), not on the thumbnail.
 function thumbHtml(item: Item, thumb: string, dur: string, cloud: string): string {
-  const overlays = `${thumb}${dur}${cloud}`;
+  const pending = isMediaPending(item) ? ' media-pending' : '';
+  const overlays = `${thumb}${dur}${cloud}${MEDIA_LOADER}`;
   if (isPlayable(item)) {
     const cloudOnly = !item.local_available ? '1' : '';
-    return `<div class="thumb-wrap thumb-play" role="button" tabindex="0" aria-label="Play"
+    return `<div class="thumb-wrap thumb-play${pending}" role="button" tabindex="0" aria-label="Play"
       data-play="1" data-id="${item.id}" data-cloud="${cloudOnly}">${overlays}${PLAY_BADGE}</div>`;
   }
-  return `<a class="thumb-wrap" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${overlays}</a>`;
+  return `<a class="thumb-wrap${pending}" href="${esc(item.webpage_url)}" target="_blank" rel="noopener">${overlays}</a>`;
 }
 
 function rowHtml(item: Item): string {
@@ -800,10 +819,11 @@ function updateGroupHeader(gkey: string): void {
       </div>`;
   const head = g.li.querySelector('.group-head') as HTMLElement;
   head.innerHTML = `
-    <div class="thumb-wrap group-thumb">
+    <div class="thumb-wrap group-thumb${isMediaPending(first) ? ' media-pending' : ''}">
       ${thumb}
       <span class="group-count">${items.length}</span>
       ${play}
+      ${MEDIA_LOADER}
     </div>
     <div class="group-info">
       <div class="title">${sourceLogoHtml(first.extractor)}<span>${esc(base)}</span></div>
@@ -862,6 +882,10 @@ function updateGroupProgress(gkey: string): void {
   const fill = head.querySelector('.group-progress .progress-fill') as HTMLElement | null;
   const statusEl = head.querySelector('.group-status') as HTMLElement | null;
   const speedEl = head.querySelector('.group-speed') as HTMLElement | null;
+  head.querySelector('.group-thumb')?.classList.toggle(
+    'media-pending',
+    isMediaPending(items[0]!, statusOf(items[0]!)),
+  );
   if (bar) bar.classList.toggle('hidden', !active);
   if (fill) fill.style.width = pct + '%';
   const prefix = statusEl?.dataset.prefix || '';
@@ -932,6 +956,11 @@ function patchRow(ev: ProgressEv): void {
   state.progress.set(ev.id, { percent: ev.percent ?? null, speed: ev.speed || '', status: ev.status, shown });
   const li = state.rows.get(ev.id);
   if (!li) return; // unknown row; will appear on next list load
+  const persisted = state.items.get(ev.id);
+  li.querySelector('.thumb-wrap')?.classList.toggle(
+    'media-pending',
+    !!persisted && isMediaPending(persisted, ev.status),
+  );
   const badge = li.querySelector('.badge');
   if (badge) {
     badge.textContent = statusLabel(ev.status);
@@ -1823,7 +1852,8 @@ if (els.serverSave) {
 type AppPermissionStatus = { notifications: boolean; background: boolean };
 let appPermissions: AppPermissionStatus | null = null;
 const requestingPermissions = new Set<keyof AppPermissionStatus>();
-const PERMISSION_PROMPT_NEVER = 'whale_permissions_prompt_never';
+const PERMISSION_PROMPT_NEVER = 'orca_permissions_prompt_never';
+migrateLegacyStorage(PERMISSION_PROMPT_NEVER, 'permissions_prompt_never');
 
 function renderAppPermission(kind: keyof AppPermissionStatus): void {
   const granted = appPermissions?.[kind] ?? null;
@@ -1899,7 +1929,7 @@ els.permissionsPromptLater.addEventListener('click', () => dismissPermissionProm
 els.permissionsPromptNever.addEventListener('click', () => dismissPermissionPrompt(true));
 
 // ---- Seal / yt-dlp download archive editor --------------------------------
-// Not just import: the textarea shows every dedup key Whale has recorded so the
+// Not just import: the textarea shows every dedup key Orca has recorded so the
 // user can edit history in place. Save reconciles the edited list against what
 // was loaded — added lines are imported, removed lines are deleted.
 let sealLoaded = new Set<string>(); // keys present when the editor was last loaded
@@ -1930,7 +1960,7 @@ async function loadArchive(): Promise<void> {
 
 // ---- Max-resolution setting -----------------------------------------------
 // Server-side cap on the resolution yt-dlp downloads. Highest by default; a
-// WHALE_MAX_HEIGHT env var pins it (the control then reads locked/disabled).
+// ORCA_MAX_HEIGHT env var pins it (the control then reads locked/disabled).
 async function loadSettings(): Promise<void> {
   if (!els.maxRes || !getToken()) return;
   try {
@@ -2839,7 +2869,7 @@ function dismissTopLayer(): boolean {
 if (isNativeApp) {
   let exitArmed = false;
   let exitArmedAt = 0;
-  const armSentinel = () => history.pushState({ whaleBack: true }, '');
+  const armSentinel = () => history.pushState({ orcaBack: true }, '');
 
   // The sentinel exists only to consume Android Back; its captured scroll offset
   // must never compete with the player's explicit list-position restoration.
@@ -2979,31 +3009,37 @@ function setupAppPermissionRefresh(): void {
   window.addEventListener('focus', refresh);
 }
 
-// Android notification id base — MUST match ShareActivity.NOTIF_BASE so the
-// in-app progress notification and the share-target poller's notification for the
-// SAME item share one id and collapse into a single slot. Without this alignment,
-// sharing a link while the app is open posted TWO notifications per download (id
-// `ev.id` here vs `NOTIF_BASE + itemId` there) — the "ghost / duplicate
-// notification" the user saw.
+// Android notification IDs must match ShareActivity: hash the private slug with
+// Java's String.hashCode(), then map it into the same positive integer range.
 const NOTIF_BASE = 200000;
+function itemNotificationId(slug: string): number {
+  let hash = 0;
+  for (let i = 0; i < slug.length; i += 1) hash = (Math.imul(31, hash) + slug.charCodeAt(i)) | 0;
+  return NOTIF_BASE + (hash & 0x0fffffff);
+}
 
 // Drive a per-item notification from progress ticks. Throttled so we replace one
-// ongoing notification (by item id) instead of spamming a stack of them.
+// ongoing notification (keyed by private slug) instead of spamming a stack.
 function notifyProgress(ev: ProgressEv): void {
   const N = window.__TAURI__ && window.__TAURI__.notification;
   if (!N || !notif.granted) return;
-  const notifId = NOTIF_BASE + ev.id;
+  // An unknown item was submitted by the headless ShareActivity. Its native
+  // poller owns that notification; posting from SSE as well creates a duplicate
+  // numeric-id notification that cannot be cleared when the item is deleted.
+  const item = state.items.get(ev.id);
+  if (!item) return;
+  const notifId = itemNotificationId(item.slug);
   const li = state.rows.get(ev.id);
   // Privacy blur: a blurred site's real title must not leak into a persistent
   // (ongoing) notification the user has to clear by hand — show the source's own
   // video id (e.g. the tweet / youtube id) instead, which identifies the download
   // without exposing its title. Falls back to the internal id only if unknown.
-  const item = state.items.get(ev.id);
   const titleEl = li && li.querySelector('.title');
-  const masked = (item && item.video_id) ? ('Video ' + item.video_id) : ('Item #' + ev.id);
-  const title = (item && isItemBlurred(item))
-    ? masked
-    : ((titleEl && titleEl.textContent) || masked);
+  const siteName = item.site_name || item.extractor || 'Orca';
+  const videoName = isItemBlurred(item)
+    ? (item.video_id || 'Download')
+    : ((titleEl && titleEl.textContent) || item.title || String(ev.id));
+  const title = siteName + ' · ' + videoName;
   try {
     if (ev.status === 'completed') {
       N.sendNotification({ id: notifId, icon: 'ic_notification', title, body: '✓ Download complete', ongoing: false, autoCancel: true });
@@ -3117,7 +3153,8 @@ if (els.langToggle) {
 // Follows the OS by default; the sun/moon button cycles System → Light → Dark.
 // A forced choice sets html[data-theme] (see style.css); "system" removes it so
 // prefers-color-scheme governs again. The glyph shows the *effective* theme.
-const THEME_KEY = 'whale_theme';
+const THEME_KEY = 'orca_theme';
+migrateLegacyStorage(THEME_KEY, 'theme');
 const THEME_ORDER = ['system', 'light', 'dark'];
 const SUN_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>`;
 const MOON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"/></svg>`;

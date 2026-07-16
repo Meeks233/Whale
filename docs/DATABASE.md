@@ -1,6 +1,6 @@
 # Database
 
-Whale uses SQLite at `$WHALE_DATA_DIR/whale.db` through SQLx. Migrations in
+Orca uses SQLite at `$ORCA_DATA_DIR/orca.db` through SQLx. Migrations in
 `migrations/` run automatically in lexical order and must never be edited after
 release.
 
@@ -37,6 +37,6 @@ rotating public share capabilities from private resource slugs.
 
 ## Backup
 
-Stop writes or use SQLite's online backup tooling, then capture `whale.db`,
+Stop writes or use SQLite's online backup tooling, then capture `orca.db`,
 `archive.txt`, `cookies/`, and downloads consistently. Copying only the database
 does not preserve cookies, dedup archive state, or media files.

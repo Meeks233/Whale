@@ -1,4 +1,4 @@
-//! Whale app shell. The UI is the exact same `web/` frontend the server serves;
+//! Orca app shell. The UI is the exact same `web/` frontend the server serves;
 //! this Tauri wrapper just hosts it in a native WebView (Android/desktop) and,
 //! on mobile, bridges the Android share intent into a URL submission.
 
@@ -15,9 +15,9 @@ struct AndroidPermissions<R: tauri::Runtime>(tauri::plugin::PluginHandle<R>);
 
 #[cfg(target_os = "android")]
 fn android_permissions_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
-    tauri::plugin::Builder::new("whale-permissions")
+    tauri::plugin::Builder::new("orca-permissions")
         .setup(|app, api| {
-            let handle = api.register_android_plugin("com.whale.app", "PermissionsPlugin")?;
+            let handle = api.register_android_plugin("com.orca.app", "PermissionsPlugin")?;
             app.manage(AndroidPermissions(handle));
             Ok(())
         })
@@ -25,7 +25,7 @@ fn android_permissions_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin
 }
 
 /// Mirror the server base URL + token from the WebView's localStorage into a
-/// file the native `ShareActivity` can read (`<app_data_dir>/whale_share_creds.json`).
+/// file the native `ShareActivity` can read (`<app_data_dir>/orca_share_creds.json`).
 ///
 /// The "Quick Download" share target submits to the backend IN THE BACKGROUND
 /// without opening the WebView, so it can't read localStorage. The frontend
@@ -36,7 +36,7 @@ fn save_share_creds(app: tauri::AppHandle, base: String, token: String) {
     if let Ok(dir) = app.path().app_data_dir() {
         let _ = std::fs::create_dir_all(&dir);
         let body = serde_json::json!({ "base": base, "token": token }).to_string();
-        let _ = std::fs::write(dir.join("whale_share_creds.json"), body);
+        let _ = std::fs::write(dir.join("orca_share_creds.json"), body);
     }
 }
 
@@ -115,5 +115,5 @@ pub fn run() {
 
     builder
         .run(tauri::generate_context!())
-        .expect("error while running Whale app");
+        .expect("error while running Orca app");
 }

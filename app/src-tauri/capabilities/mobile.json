@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/mobile-schema.json",
   "identifier": "mobile",
-  "description": "Mobile-only permissions for the Whale app window.",
+  "description": "Mobile-only permissions for the Orca app window.",
   "windows": ["main"],
   "platforms": ["android", "iOS"],
   "permissions": ["mobile-sharetarget:default"]

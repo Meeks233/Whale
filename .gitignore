@@ -15,3 +15,13 @@
 
 # Frontend build tooling deps (esbuild/typescript) — output in web/ is committed
 /frontend/node_modules
+
+# Android release credentials and generated distribution artifacts
+*.jks
+*.keystore
+*.p12
+*.pfx
+**/keystore.properties
+**/key.properties
+**/play-service-account*.json
+/dist/

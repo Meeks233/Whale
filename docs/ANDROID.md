@@ -1,7 +1,7 @@
 # Android App
 
 The `app/` Tauri 2 shell embeds the committed `web/` bundle and connects to a
-remote Whale server selected in Settings. The generated Android project includes
+remote Orca server selected in Settings. The generated Android project includes
 the normal WebView activity plus a share-target activity for background URL
 submission.
 
@@ -32,10 +32,13 @@ cargo tauri android build --debug --apk --target aarch64 armv7
 ```
 
 The debug APK is for development and CI artifacts only. It is debug-signed and is
-never attached to a GitHub Release. A public Android release requires a protected
-release keystore, non-debuggable release build, version derived from the tag, and
-published checksums; that signing policy is intentionally not automated without
-repository secrets.
+never attached to a GitHub Release. Signed local builds use
+`app/scripts/release-android.sh`; tagged CI releases use the protected keystore
+configuration in `.github/workflows/android-release.yml`. F-Droid builds run
+unsigned from source through `app/scripts/build-fdroid.sh`.
+
+See [Android Store Release](RELEASING_ANDROID.md) for signing secrets, Play and
+F-Droid submission steps, metadata, privacy declarations, and versioning.
 
 The Gradle wrapper distribution checksum is pinned. Generated Android sources are
-tracked because they contain Whale-specific share-target and permission behavior.
+tracked because they contain Orca-specific share-target and permission behavior.

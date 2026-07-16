@@ -131,7 +131,7 @@ jobs:
         id: meta
         shell: bash
         run: |
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/whale"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/orca"
           tags="$image:sha-$GITHUB_SHA"
           version="sha-$GITHUB_SHA"
           if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then

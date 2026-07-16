@@ -97,7 +97,7 @@ impl StreamUrlCache {
 ///
 /// Sites like X/Twitter serve video only to logged-in requests: a guest probe
 /// gets the tweet but no media, so yt-dlp reports the cryptic "No video could be
-/// found in this tweet". Left as-is that reads like a bug in Whale. When the
+/// found in this tweet". Left as-is that reads like a bug in Orca. When the
 /// error matches a known "needs login" shape we append a short hint naming the
 /// platform and pointing at the per-platform cookie setting — the actual fix.
 /// Non-auth errors are returned unchanged.

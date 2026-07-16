@@ -1,5 +1,5 @@
 <resources>
-    <string name="app_name">"Whale"</string>
-    <string name="main_activity_title">"Whale"</string>
+    <string name="app_name">"Orca"</string>
+    <string name="main_activity_title">"Orca"</string>
     <string name="share_target_label">"Quick Download"</string>
 </resources>

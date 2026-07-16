@@ -11,14 +11,14 @@ because `<video>` and download links cannot set request headers. Errors are
 For an owner token or trusted-client passphrase, calculate `auth_hash =
 SHA-256(credential)`, then:
 
-- `key_id = SHA-256("whale-e2ee-kid-v1" || 0x00 || auth_hash)`, lowercase hex
-- `key = SHA-256("whale-e2ee-key-v1" || 0x00 || auth_hash)`
+- `key_id = SHA-256("orca-e2ee-kid-v1" || 0x00 || auth_hash)`, lowercase hex
+- `key = SHA-256("orca-e2ee-key-v1" || 0x00 || auth_hash)`
 
-Set `X-Whale-E2EE: 1` and `X-Whale-Key-Id: <key_id>`. When a request has a body,
-set `X-Whale-Encrypted-Body: 1` and send a JSON envelope
+Set `X-Orca-E2EE: 1` and `X-Orca-Key-Id: <key_id>`. When a request has a body,
+set `X-Orca-Encrypted-Body: 1` and send a JSON envelope
 `{"v":1,"n":"<base64 nonce>","c":"<base64 ciphertext+tag>"}`. Nonces are
 12 random bytes and tags are 16 bytes. Request AAD is
-`METHOD + "\n" + path_and_query`. Encrypted responses carry `X-Whale-E2EE: 1`
+`METHOD + "\n" + path_and_query`. Encrypted responses carry `X-Orca-E2EE: 1`
 and use `status_code + "\n" + path_and_query` as AAD. Authentication failures
 remain plaintext `401` responses because the server has not accepted a key.
 

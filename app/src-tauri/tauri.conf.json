@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Whale",
+  "productName": "Orca",
   "version": "0.1.0",
-  "identifier": "com.whale.app",
+  "identifier": "com.orca.app",
   "build": {
     "frontendDist": "../../web"
   },
@@ -10,7 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Whale",
+        "title": "Orca",
         "label": "main"
       }
     ],

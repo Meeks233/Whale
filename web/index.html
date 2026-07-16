@@ -6,10 +6,11 @@
   <!-- Single theme-color meta, kept in sync with the effective theme by app.js
        (so a manual Light/Dark override also tints the Android status bar). -->
   <meta name="theme-color" id="theme-color-meta" content="#000000">
-  <title>Whale</title>
+  <title>Orca</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/style.css">
-  <link rel="icon" href="/icons/192.png">
+  <link rel="icon" type="image/x-icon" href="/favicon.ico">
+  <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
   <link rel="apple-touch-icon" href="/icons/apple-touch-180.png">
   <!-- Anti-FOUC: apply a forced Light/Dark override before first paint. Absent
        (or "system") it falls through to the CSS prefers-color-scheme default. -->
@@ -128,7 +129,7 @@
     <div class="modal-card permission-prompt-card">
       <button id="permissions-prompt-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
       <h2 id="permissions-prompt-title" class="modal-heading" data-i18n="permissionsPrompt.title">App permissions</h2>
-      <p class="hint-muted" data-i18n="permissionsPrompt.hint">Allow these so Whale can report downloads reliably in the background.</p>
+      <p class="hint-muted" data-i18n="permissionsPrompt.hint">Allow these so Orca can report downloads reliably in the background.</p>
       <div class="permission-box">
         <button class="permission-item" type="button" data-permission="notifications" data-state="checking">
           <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
@@ -209,7 +210,7 @@
       <div id="server-row">
         <label for="server" data-i18n="settings.serverUrl">Server URL</label>
         <div class="row">
-          <input id="server" type="url" inputmode="url" autocomplete="off" placeholder="https://whale.example.com (blank = this site)" data-i18n-ph="ph.server">
+          <input id="server" type="url" inputmode="url" autocomplete="off" placeholder="https://orca.example.com (blank = this site)" data-i18n-ph="ph.server">
           <button id="server-save" class="btn" data-i18n="btn.save">Save</button>
         </div>
       </div>
@@ -242,7 +243,7 @@
       <hr class="sep">
       <label for="seal-archive" data-i18n="settings.archive">Seal / yt-dlp download archive</label>
       <p class="hint-muted" data-i18n-html="settings.archiveHint">
-        Every entry Whale has ever recorded, one <code>extractor id</code> per line
+        Every entry Orca has ever recorded, one <code>extractor id</code> per line
         (e.g. <code>youtube dQw4w9WgXcQ</code>). Edit freely — add lines to mark items
         as already downloaded, or delete lines to let them re-download — then Save.
       </p>
@@ -262,15 +263,16 @@
           <button id="logs-copy" class="btn btn-ghost" data-i18n="logs.copyAll">Copy all</button>
         </div>
       </div>
-      <p class="hint-muted" data-i18n="settings.logsHint">The most recent errors Whale hit while reading or downloading links. Tap a row to expand.</p>
+      <p class="hint-muted" data-i18n="settings.logsHint">The most recent errors Orca hit while reading or downloading links. Tap a row to expand.</p>
       <div id="log-list" class="log-list"></div>
       <p id="log-empty" class="hint-muted hidden" data-i18n="settings.logsEmpty">No errors recorded yet.</p>
 
       <!-- Repo / issue link: gives users a one-tap path to file a bug. -->
       <p class="settings-footer" data-i18n-html="settings.issue">
         Having problems? File a bug here:
-        <a href="https://github.com/Meeks233/Whale/issues" target="_blank" rel="noopener noreferrer">github.com/Meeks233/Whale</a>
+        <a href="https://github.com/Meeks233/Orca/issues" target="_blank" rel="noopener noreferrer">github.com/Meeks233/Orca</a>
       </p>
+      <p class="settings-footer"><a href="https://github.com/Meeks233/Orca/blob/main/docs/PRIVACY.md" target="_blank" rel="noopener noreferrer">Privacy policy</a> · <a href="https://github.com/Meeks233/Orca" target="_blank" rel="noopener noreferrer">Source code</a> · <a href="/third-party-notices.txt" target="_blank" rel="noopener noreferrer">Licenses</a></p>
     </div>
   </div>
 
@@ -300,7 +302,7 @@
           <button id="max-res-save" class="btn" data-i18n="btn.save">Save</button>
         </div>
         <p id="max-res-hint" class="hint-muted" data-i18n="settings.maxResHint">Caps the quality yt-dlp downloads. Highest picks the best available.</p>
-        <p id="max-res-locked" class="hint hidden" data-i18n="settings.maxResLocked">Pinned by the WHALE_MAX_HEIGHT environment variable.</p>
+        <p id="max-res-locked" class="hint hidden" data-i18n="settings.maxResLocked">Pinned by the ORCA_MAX_HEIGHT environment variable.</p>
       </div>
 
       <div class="sites-toolbar">

@@ -1,13 +1,13 @@
 /// <reference lib="webworker" />
 
-// Whale service worker. Built to ../web/sw.js by build.ts. Registered at the
+// Orca service worker. Built to ../web/sw.js by build.ts. Registered at the
 // origin root (/sw.js) so its scope covers the whole app.
 export {};
 declare const self: ServiceWorkerGlobalScope;
 
 // Cache name is versioned so activate() can purge stale generations. The fetch
 // handler below is network-first, so code edits load without bumping this.
-const CACHE = 'whale-shell-v6';
+const CACHE = 'orca-shell-v6';
 const SHELL = [
   '/',
   '/index.html',
@@ -15,6 +15,9 @@ const SHELL = [
   '/theme.js',
   '/style.css',
   '/manifest.webmanifest',
+  '/favicon.ico',
+  '/icons/favicon-32.png',
+  '/third-party-notices.txt',
   '/icons/192.png',
   '/icons/512.png',
 ];

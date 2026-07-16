@@ -9,20 +9,20 @@
 ## Install
 
 ```bash
-git clone https://github.com/Meeks233/Whale.git
-cd Whale
+git clone https://github.com/Meeks233/Orca.git
+cd Orca
 install -d -o 10001 -g 10001 data downloads
-export WHALE_TOKEN="$(openssl rand -hex 24)"
+export ORCA_TOKEN="$(openssl rand -hex 24)"
 docker compose up -d
 ```
 
 `docker-compose.yml` listens on `127.0.0.1:8080`. Visit that address, open
-Settings, enter `WHALE_TOKEN`, and save it. The token stays in browser local
+Settings, enter `ORCA_TOKEN`, and save it. The token stays in browser local
 storage and is mirrored to native app storage when running under Tauri.
 
 ## First Download
 
-Paste an HTTP or HTTPS media URL and submit it. Whale normalizes common shared
+Paste an HTTP or HTTPS media URL and submit it. Orca normalizes common shared
 URLs, rejects disallowed destinations, runs an yt-dlp metadata probe, checks the
 SQLite/archive dedup key, then queues the download. Progress arrives over SSE.
 
