@@ -20,11 +20,11 @@ in SQLite unless `ORCA_MAX_HEIGHT` pins them.
 | `ORCA_CONCURRENT_FRAGMENTS` | `4` | yt-dlp fragments per job |
 | `ORCA_LIMIT_RATE` | `10M` | Total rate cap; `0`, `none`, or `off` disables it |
 | `ORCA_IMPERSONATE` | unset | yt-dlp client impersonation target |
-| `ORCA_CONTAINER` | `mkv` | Output container: `mkv` or `mp4` |
+| `ORCA_CONTAINER` | `mkv` | Output container: `mkv`, `mp4`, `webm`, `mov`, `avi`, or `flv`. When set, it overrides the global and per-site pickers in the UI |
 | `ORCA_FORMAT` | `bv*+ba/b` | Custom yt-dlp format selector |
 | `ORCA_MAX_HEIGHT` | unset | Positive pixel cap; `0`, `highest`, or `best` means uncapped |
 | `ORCA_OUTPUT_TEMPLATE` | uploader/title/id | yt-dlp output template |
-| `ORCA_SUBS` | `true` | Write/embed subtitles |
+| `ORCA_SUBS` | `true` | Write/embed subtitles. When set, it overrides the global and per-site pickers in the UI |
 | `ORCA_AUTO_SUBS` | `false` | Include automatic subtitles |
 | `ORCA_SUB_LANGS` | `all,-live_chat` | yt-dlp subtitle language expression |
 | `ORCA_EMBED_THUMBNAIL` | `true` | Embed thumbnails |

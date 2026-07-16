@@ -218,6 +218,14 @@ const els = {
   maxResSave: byId<HTMLButtonElement>('max-res-save'),
   maxResHint: byId('max-res-hint'),
   maxResLocked: byId('max-res-locked'),
+  format: byId<HTMLSelectElement>('format'),
+  formatSave: byId<HTMLButtonElement>('format-save'),
+  formatLocked: byId('format-locked'),
+  subsToggle: byId<HTMLButtonElement>('subs-toggle'),
+  subsSave: byId<HTMLButtonElement>('subs-save'),
+  subsLocked: byId('subs-locked'),
+  pasteBtn: byId<HTMLButtonElement>('paste-btn'),
+  toTop: byId<HTMLButtonElement>('to-top'),
   sealArchive: byId<HTMLTextAreaElement>('seal-archive'),
   sealImport: byId<HTMLButtonElement>('seal-import'),
   logList: byId('log-list'),
@@ -529,27 +537,17 @@ function hitsHtml(item: Item): string {
 // the primary filesize. Vanishes when the size is unknown. Resolution lives in
 // its own button to the right of this chip (see resButtonHtml).
 function metaChipsHtml(item: Item): string {
-  // Duration rides in the capsule ("1:23 | 2.7MB") only for PORTRAIT items — CSS
-  // gates it on .portrait-media, since orientation is only known once the
-  // thumbnail loads (see the `load` handler). On a 9:16 thumb the bottom-left
-  // duration pill collides with the bottom-right play button, so it moves here.
-  // Portrait clips under a minute drop the duration entirely: for a 20s Reel the
-  // number is noise, and most short verticals then need no capsule at all.
-  const dur = item.duration && item.duration >= 60 ? fmtDuration(item.duration) : '';
   // No local file (stream-only "None" mode, or a copy backed away to the cloud)
-  // → no on-disk footprint to report, so no size part.
-  const size = item.local_available ? fmtSize(item.total_filesize || item.filesize) : '';
-  return metaChip(dur, size);
+  // → no on-disk footprint to report, so the size chip vanishes entirely.
+  if (!item.local_available) return '';
+  return metaChip('', fmtSize(item.total_filesize || item.filesize));
 }
 
-// Build a meta capsule from the (possibly empty) duration | size parts. Each
-// part is its own span so CSS can show/hide the duration per orientation; the
-// " | " separator is drawn by .chip-dur::after only when a size follows.
-function metaChip(dur: string, size: string): string {
-  if (!dur && !size) return '';
-  const d = dur ? `<span class="chip-dur">${esc(dur)}</span>` : '';
-  const s = size ? `<span class="chip-size">${esc(size)}</span>` : '';
-  return `<span class="meta-chip">${d}${s}</span>`;
+// Build a meta capsule from the (possibly empty) resolution | size parts.
+function metaChip(res: string, size: string): string {
+  const parts = [res, size].filter(Boolean);
+  if (!parts.length) return '';
+  return `<span class="meta-chip">${esc(parts.join(' | '))}</span>`;
 }
 
 // Stacked "layers" glyph — the industry-standard affordance for "multiple
@@ -663,7 +661,11 @@ function rowHtml(item: Item): string {
   const thumb = item.thumbnail_url
     ? `<img class="thumb" src="${esc(item.thumbnail_url)}" alt="" loading="lazy">`
     : `<div class="thumb thumb-empty"></div>`;
-  const dur = item.duration ? `<span class="dur">${esc(fmtDuration(item.duration))}</span>` : '';
+  // Clips under a minute are tagged so CSS can drop the pill on portrait thumbs,
+  // where it would crowd the play button and where "0:20" on a Reel is just
+  // noise. Landscape keeps every duration (see .dur in style.css).
+  const durShort = item.duration && item.duration < 60 ? ' dur-short' : '';
+  const dur = item.duration ? `<span class="dur${durShort}">${esc(fmtDuration(item.duration))}</span>` : '';
   const cloud = item.status === 'completed' && !item.local_available ? CLOUD_BADGE : '';
   const logo = sourceLogoHtml(item.extractor);
   const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
@@ -1063,6 +1065,90 @@ function topUpIfNeeded(): void {
 }
 
 // ---- Submit ---------------------------------------------------------------
+// ---- Pasted-link parsing --------------------------------------------------
+// Mirrors src/url_normalize.rs (itself ported from the old Flutter client's
+// UrlUtils), so a pasted blob folds and dedupes here the same way the backend
+// would. The backend still re-normalizes authoritatively on submit — doing it
+// client-side is what lets the paste button drop tracking params on sight and
+// report an honest "2 links, 1 duplicate removed".
+
+// A link runs to the first whitespace/quote/bracket, including the CJK
+// full-width closers that commonly hug a pasted URL.
+const LINK_RE = /https?:\/\/[^\s'"<>。！？、）」］)\]]+/gi;
+
+const TRACKING = new Set([
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+  'ref', 'ref_src', 'ref_url', 'source', 'feature', 'spm_id_from',
+]);
+
+// Everything but the known tracking params; the `?` goes away when nothing
+// meaningful survives.
+function stripTracking(u: URL): string {
+  const kept = new URLSearchParams();
+  u.searchParams.forEach((v, k) => { if (!TRACKING.has(k)) kept.append(k, v); });
+  const base = `${u.protocol}//${u.hostname}${u.pathname}`;
+  const q = kept.toString();
+  return q ? `${base}?${q}` : base;
+}
+
+function normalizeLink(raw: string): string {
+  // Trailing punctuation clings to links pasted out of prose.
+  const trimmed = raw.trim().replace(/[.,;!\])]+$/, '');
+  let u: URL;
+  try { u = new URL(trimmed); } catch (_) { return trimmed; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return trimmed;
+  const host = u.hostname.toLowerCase();
+  const segs = u.pathname.split('/').filter(Boolean);
+
+  if (host.includes('youtube.com') || host.includes('youtu.be')) {
+    if (host.includes('youtu.be') && segs[0]) return `https://www.youtube.com/watch?v=${segs[0]}`;
+    for (const marker of ['shorts', 'embed']) {
+      const i = segs.indexOf(marker);
+      if (i >= 0 && segs[i + 1]) return `https://www.youtube.com/watch?v=${segs[i + 1]}`;
+    }
+    const v = u.searchParams.get('v');
+    // Discard a stray `?si=` glued onto the id.
+    if (v) return `https://www.youtube.com/watch?v=${v.split('?')[0]}`;
+    return stripTracking(u);
+  }
+  if (host.includes('twitter.com') || host.includes('x.com')) {
+    const i = segs.indexOf('status');
+    if (i >= 0 && segs[i + 1]) return `https://twitter.com/i/status/${segs[i + 1]}`;
+    return `https://twitter.com${u.pathname}`;
+  }
+  if (host.includes('bilibili.com')) {
+    const bv = segs.find((s) => s.startsWith('BV'));
+    return bv ? `https://www.bilibili.com/video/${bv}` : `https://www.bilibili.com${u.pathname}`;
+  }
+  if (host.includes('tiktok.com') || host.includes('xiaohongshu.com')) {
+    return `${u.protocol}//${host}${u.pathname}`;
+  }
+  return stripTracking(u);
+}
+
+// Every link in a blob of text, normalized and deduped (first occurrence wins).
+function parseLinks(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of text.match(LINK_RE) || []) {
+    const n = normalizeLink(m);
+    if (n && !seen.has(n)) { seen.add(n); out.push(n); }
+  }
+  return out;
+}
+
+// Submit every link in the box, one at a time. Sequential rather than parallel:
+// the backend paces downloads politely, and a burst of concurrent probes is
+// exactly the batch-downloader signature the queue works to avoid.
+async function submitInput(): Promise<void> {
+  const raw = els.url.value.trim();
+  if (!raw) return;
+  const links = parseLinks(raw);
+  // A lone unparseable string still goes to the backend, which surfaces the real
+  // error — silently dropping it would be worse than a clear "probe failed".
+  for (const link of (links.length ? links : [raw])) await submitUrl(link);
+}
+
 async function submitUrl(url: string): Promise<void> {
   if (!url) return;
   if (!getToken()) { showTokenField(false); toast(t('toast.setToken'), 'error'); return; }
@@ -1168,6 +1254,10 @@ interface Website {
   login_url: string;
   enabled: boolean;
   max_height: number | null;
+  /// Per-site container; null = follow the global default.
+  container: string | null;
+  /// Per-site subtitle capture; null = follow the global default.
+  subs: boolean | null;
   no_download: boolean;
   blur: boolean;
   sort: number;
@@ -1228,6 +1318,38 @@ function siteResSelectHtml(w: Website): string {
   const opts = [opt('global', t('sites.followGlobal')), opt('none', t('res.noneLabel'))]
     .concat(SITE_RES_LADDER.map((h) => opt(String(h), resLabel(h) || h + 'p')));
   return `<select class="select site-res-select" data-act="res" aria-label="${esc(t('sites.maxRes'))}">${opts.join('')}</select>`;
+}
+
+// The containers offered per site, mirroring the global picker's list (and the
+// backend's `CONTAINERS`). Labels are the conventional uppercase spellings.
+const SITE_FORMATS: Array<[string, string]> = [
+  ['mkv', 'MKV'], ['mp4', 'MP4'], ['webm', 'WebM'],
+  ['mov', 'MOV'], ['avi', 'AVI'], ['flv', 'FLV'],
+];
+
+function siteFormatSelectHtml(w: Website): string {
+  // '' (empty) is the "follow global" sentinel the backend uses to clear the
+  // per-site container.
+  const active = w.container || '';
+  const opt = (val: string, label: string): string =>
+    `<option value="${val}"${active === val ? ' selected' : ''}>${esc(label)}</option>`;
+  const opts = [opt('', t('sites.followGlobal'))]
+    .concat(SITE_FORMATS.map(([val, label]) => opt(val, label)));
+  return `<select class="select site-res-select" data-act="fmt" aria-label="${esc(t('sites.format'))}">${opts.join('')}</select>`;
+}
+
+function siteSubsSelectHtml(w: Website): string {
+  // Three states — follow global / force on / force off — so this is a <select>
+  // rather than the two-state pill switch used elsewhere on the card.
+  const active = w.subs === null || w.subs === undefined ? 'global' : (w.subs ? 'on' : 'off');
+  const opt = (val: string, label: string): string =>
+    `<option value="${val}"${active === val ? ' selected' : ''}>${esc(label)}</option>`;
+  const opts = [
+    opt('global', t('sites.subsGlobal')),
+    opt('on', t('sites.subsOn')),
+    opt('off', t('sites.subsOff')),
+  ];
+  return `<select class="select site-res-select" data-act="subs" aria-label="${esc(t('sites.subs'))}">${opts.join('')}</select>`;
 }
 
 // Cookie health as a single traffic-light dot (mature status-indicator pattern),
@@ -1293,6 +1415,14 @@ function websiteCardHtml(w: Website): string {
       <div class="site-row">
         <span class="site-row-label">${esc(t('sites.maxRes'))}</span>
         <div class="site-row-ctl">${siteResSelectHtml(w)}</div>
+      </div>
+      <div class="site-row">
+        <span class="site-row-label">${esc(t('sites.format'))}</span>
+        <div class="site-row-ctl">${siteFormatSelectHtml(w)}</div>
+      </div>
+      <div class="site-row">
+        <span class="site-row-label">${esc(t('sites.subs'))}</span>
+        <div class="site-row-ctl">${siteSubsSelectHtml(w)}</div>
       </div>
       <div class="site-row">
         <span class="site-row-label">
@@ -1403,6 +1533,21 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
       if (cap === 'global') await saveWebsite(key, { max_height: 0, no_download: false });
       else if (cap === 'none') await saveWebsite(key, { no_download: true, max_height: 0 });
       else await saveWebsite(key, { max_height: Number(cap), no_download: false });
+      return;
+    }
+    case 'fmt': {
+      // The card's video-format dropdown (change event). '' clears the per-site
+      // container back to "follow global".
+      await saveWebsite(key, { container: (el as HTMLSelectElement).value });
+      return;
+    }
+    case 'subs': {
+      // The card's subtitle dropdown (change event). `subs_global` is how the
+      // API expresses "clear back to follow-global", since a null `subs` in JSON
+      // is indistinguishable from an omitted field.
+      const v = (el as HTMLSelectElement).value;
+      if (v === 'global') await saveWebsite(key, { subs_global: true });
+      else await saveWebsite(key, { subs: v === 'on' });
       return;
     }
     case 'menu': {
@@ -1805,12 +1950,13 @@ els.websiteList.addEventListener('click', (e) => {
   if (!btn || btn.tagName === 'SELECT') return;
   websiteAction(card.dataset.key!, btn.dataset.act!, btn);
 });
-// The maximum-resolution dropdown reports via change, not click.
+// The per-site dropdowns (resolution / format / subtitles) report via change,
+// not click — the click handler above deliberately ignores SELECTs.
 els.websiteList.addEventListener('change', (e) => {
-  const sel = (e.target as HTMLElement).closest('select[data-act="res"]') as HTMLSelectElement | null;
+  const sel = (e.target as HTMLElement).closest('select[data-act]') as HTMLSelectElement | null;
   if (!sel || siteSelectMode) return;
   const card = sel.closest('.website-card') as HTMLElement;
-  websiteAction(card.dataset.key!, 'res', sel);
+  websiteAction(card.dataset.key!, sel.dataset.act!, sel);
 });
 // Click outside any open kebab menu closes it.
 document.addEventListener('click', (e) => {
@@ -1984,7 +2130,28 @@ async function loadSettings(): Promise<void> {
     els.maxRes.disabled = locked;
     els.maxResSave.disabled = locked;
     els.maxResLocked.classList.toggle('hidden', !locked);
+
+    // Global container + subtitle defaults; each can be independently env-pinned.
+    els.format.value = String(data.container || 'mkv');
+    const fLocked = !!data.container_locked;
+    els.format.disabled = fLocked;
+    els.formatSave.disabled = fLocked;
+    els.formatLocked.classList.toggle('hidden', !fLocked);
+
+    setSwitch(els.subsToggle, !!data.subs);
+    const sLocked = !!data.subs_locked;
+    els.subsToggle.disabled = sLocked;
+    els.subsSave.disabled = sLocked;
+    els.subsLocked.classList.toggle('hidden', !sLocked);
   } catch (_) { /* offline / unauthorized — leave the control as-is */ }
+}
+
+// Paint a pill switch's on/off state (class + ARIA together, so the two can't
+// drift apart).
+function setSwitch(btn: HTMLButtonElement, on: boolean): void {
+  btn.classList.toggle('on', on);
+  btn.classList.toggle('off', !on);
+  btn.setAttribute('aria-checked', String(on));
 }
 
 // ---- Diagnostics error log ------------------------------------------------
@@ -2228,6 +2395,59 @@ if (els.maxResSave) {
   });
 }
 
+// The global container + subtitle saves. PUT /api/settings is a partial patch, so
+// each sends only its own field and leaves the others untouched.
+if (els.formatSave) {
+  els.formatSave.addEventListener('click', async () => {
+    els.formatSave.disabled = true;
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ container: els.format.value }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return; }
+      els.format.value = String(data.container || 'mkv');
+      toast(t('toast.settingsSaved'), 'ok');
+    } catch (e) {
+      if (!isUnauthorized(e)) toast('Network error', 'error');
+    } finally {
+      els.formatSave.disabled = false;
+    }
+  });
+}
+
+// The toggle only stages the choice; Save commits it (same shape as the pickers
+// beside it, so the whole block reads consistently).
+if (els.subsToggle) {
+  els.subsToggle.addEventListener('click', () => {
+    if (els.subsToggle.disabled) return;
+    setSwitch(els.subsToggle, els.subsToggle.getAttribute('aria-checked') !== 'true');
+  });
+}
+
+if (els.subsSave) {
+  els.subsSave.addEventListener('click', async () => {
+    els.subsSave.disabled = true;
+    try {
+      const res = await apiFetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subs: els.subsToggle.getAttribute('aria-checked') === 'true' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) { toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error'); return; }
+      setSwitch(els.subsToggle, !!data.subs);
+      toast(t('toast.settingsSaved'), 'ok');
+    } catch (e) {
+      if (!isUnauthorized(e)) toast('Network error', 'error');
+    } finally {
+      els.subsSave.disabled = false;
+    }
+  });
+}
+
 if (els.sealImport) {
   els.sealImport.addEventListener('click', async () => {
     const now = parseArchiveKeys();
@@ -2269,8 +2489,53 @@ if (els.sealImport) {
 
 els.submitForm.addEventListener('submit', (e) => {
   e.preventDefault();
-  submitUrl(els.url.value.trim());
+  submitInput();
 });
+
+// Paste button: pull the clipboard, keep every link in it, and stage them in the
+// box for review rather than submitting behind the user's back.
+if (els.pasteBtn) {
+  els.pasteBtn.addEventListener('click', async () => {
+    let text = '';
+    try {
+      text = await navigator.clipboard.readText();
+    } catch (_) {
+      // Denied permission, or a browser without the async clipboard read.
+      toast(t('toast.pasteFail'), 'error');
+      return;
+    }
+    const links = parseLinks(text);
+    if (!links.length) { toast(t('toast.pasteEmpty'), 'info'); return; }
+    const dropped = (text.match(LINK_RE) || []).length - links.length;
+    els.url.value = links.join(' ');
+    els.url.focus();
+    toast(
+      dropped
+        ? t('toast.pastedDedup', { n: links.length, d: dropped })
+        : t('toast.pastedN', { n: links.length }),
+      'ok',
+    );
+  });
+}
+
+// ---- Back to top ----------------------------------------------------------
+// Revealed once the page is scrolled a couple of viewports down — far enough
+// that scrolling back by hand is a chore, not so eager that it covers content
+// during normal browsing. Hidden while the player owns the screen.
+function setupBackToTop(): void {
+  if (!els.toTop) return;
+  const THRESHOLD = 600;
+  const sync = (): void => {
+    const show = window.scrollY > THRESHOLD && !document.body.classList.contains('player-open');
+    els.toTop.classList.toggle('hidden', !show);
+  };
+  window.addEventListener('scroll', sync, { passive: true });
+  els.toTop.addEventListener('click', () => {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  });
+  sync();
+}
+setupBackToTop();
 
 els.search.addEventListener('input', debounce(() => {
   state.q = els.search.value.trim();
@@ -2335,8 +2600,12 @@ els.history.addEventListener('click', (e) => {
       // Only the blurred visual area (thumbnail / title / uploader) reveals-then-
       // waits. The action buttons are never blurred (see .item.blurred CSS), so a
       // tap on one reveals the card AND activates the button in a single tap —
-      // no second press. The play overlay counts as blurred content (reveal first).
-      const onAction = target.closest('[data-act]');
+      // no second press. The play badge is one of those controls, not blurred
+      // content — blur only touches .thumb/.title/.uploader, so the badge is
+      // already sharp on top of it. Tapping it plays on the first tap instead of
+      // spending that tap on an unblur. Tapping the blurred image itself still
+      // peeks, so the privacy gesture is intact.
+      const onAction = target.closest('[data-act], .play-badge');
       if (!onAction) {
         e.preventDefault();
         revealBlurred(bl);
@@ -2775,6 +3044,9 @@ function playCurrentInQueue(): void {
 
 function openPlayer(id: number, cloud: boolean, poster?: string): void {
   const v = els.playerVideo;
+  // Also runs when a fold advances to the next clip, so the previous item's
+  // tracks never carry over.
+  clearSubtitles();
   const opening = els.player.classList.contains('hidden');
   if (opening) {
     playerScrollY = window.scrollY;
@@ -2806,7 +3078,45 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
     v.src = fileUrl(id);
     v.load();
     play();
+    loadSubtitles(id);
   }
+}
+
+// Attach the item's subtitle sidecars as <track> elements. Local playback only:
+// a cloud/stream item has no sidecars on disk. Subtitles are also muxed into the
+// file itself (yt-dlp `--embed-subs`), but the browser won't surface embedded
+// tracks from a progressive <video>, so the preview needs them served alongside.
+// Best-effort — a failure here must never break playback.
+async function loadSubtitles(id: number): Promise<void> {
+  const slug = state.items.get(id)?.slug;
+  if (!slug || !getToken()) return;
+  try {
+    const res = await apiFetch(itemPath(id, '/subs'));
+    if (!res.ok) return;
+    const data = await res.json();
+    const subs: Array<{ lang: string; label: string }> = data.subs || [];
+    // The player may have moved on (closed, or advanced to the next clip of a
+    // fold) while this was in flight — don't graft stale tracks onto it.
+    if (els.player.classList.contains('hidden')) return;
+    if (playQueue.length && playQueue[playIndex]?.id !== id) return;
+    const tok = encodeURIComponent(getToken());
+    subs.forEach((s, i) => {
+      const track = document.createElement('track');
+      track.kind = 'subtitles';
+      track.srclang = s.lang;
+      track.label = s.label || s.lang;
+      // Token rides in the query — a <track> can't set headers, same as <video>.
+      track.src = apiUrl(itemPath(id, '/subs/' + encodeURIComponent(s.lang)) + '?token=' + tok);
+      if (i === 0) track.default = true;
+      els.playerVideo.appendChild(track);
+    });
+  } catch (_) { /* no subtitles is a normal, silent outcome */ }
+}
+
+// Drop any <track> elements from a previous item so they can't bleed into the
+// next one.
+function clearSubtitles(): void {
+  els.playerVideo.querySelectorAll('track').forEach((tr) => tr.remove());
 }
 
 // Hide the player and release the media. `pop` true rewinds the history entry
@@ -2817,6 +3127,7 @@ function closePlayer(pop: boolean): void {
   v.pause();
   v.removeAttribute('src');
   v.removeAttribute('poster');
+  clearSubtitles();
   v.load();
   els.player.classList.add('hidden');
   els.player.setAttribute('aria-hidden', 'true');

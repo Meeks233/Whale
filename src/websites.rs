@@ -78,6 +78,8 @@ mod tests {
             login_url: String::new(),
             enabled: true,
             max_height: None,
+            container: None,
+            subs: None,
             no_download: false,
             blur: false,
             sort: 0,

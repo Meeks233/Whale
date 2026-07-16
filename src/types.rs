@@ -173,6 +173,13 @@ pub struct Website {
     pub enabled: bool,
     /// Per-site resolution cap; `None` follows the global `max_height` setting.
     pub max_height: Option<i64>,
+    /// Per-site merge container (`"mkv"`, `"mp4"`, …); `None` follows the global
+    /// container setting.
+    #[serde(default)]
+    pub container: Option<String>,
+    /// Per-site subtitle capture; `None` follows the global `subs` setting.
+    #[serde(default)]
+    pub subs: Option<bool>,
     /// Per-site stream-only default (no local downloads for this site).
     #[serde(default)]
     pub no_download: bool,

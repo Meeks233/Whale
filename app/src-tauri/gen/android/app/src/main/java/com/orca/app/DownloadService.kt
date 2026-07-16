@@ -81,6 +81,10 @@ class DownloadService : Service() {
   override fun onDestroy() {
     poller?.interrupt()
     poller = null
+    // Explicitly drop ONLY the foreground summary. Per-item notifications —
+    // including the "Download complete" one posted moments earlier — are not
+    // tied to the service lifecycle and must outlive it.
+    ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
     super.onDestroy()
   }
 
@@ -158,7 +162,7 @@ class DownloadService : Service() {
 
     when (item.optString("status")) {
       "completed" -> {
-        postItem(slug, title, "Download complete ✓", -1, ongoing = false)
+        postItem(slug, title, "Download complete", -1, ongoing = false)
         untrack(slug)
       }
       "failed" -> {
@@ -223,7 +227,7 @@ class DownloadService : Service() {
             ok = true
             slug = resp.optJSONObject("item")?.optString("slug") ?: ""
             duplicate = resp.optBoolean("duplicate")
-            if (duplicate) "Already downloaded" else "Download queued ✓"
+            if (duplicate) "Already downloaded" else "Download queued"
           }
           code == 422 || resp.optString("error") == "probe_failed" ->
             resp.optString("message").ifEmpty { "Couldn't read that link" }
@@ -447,10 +451,16 @@ class DownloadService : Service() {
           .setStyle(Notification.BigTextStyle().bigText(body))
           .setOnlyAlertOnce(true)
           .setOngoing(ongoing)
+          // Dismissed only by the user (tap or swipe) — never on its own.
           .setAutoCancel(!ongoing)
-          .setGroup(GROUP)
           .setContentIntent(tap)
         if (ongoing) {
+          // Only LIVE progress joins the group under the foreground summary. A
+          // terminal notification must stand alone: the summary is removed the
+          // moment the service stops — which happens immediately after
+          // "Download complete" posts — and a group child can be swept with it.
+          // That is why the completion notice flashed up and vanished.
+          b.setGroup(GROUP)
           if (pct >= 0) b.setProgress(100, pct, false) else b.setProgress(0, 0, true)
         }
         notificationManager(ctx).notify(notifId, b.build())

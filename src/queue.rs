@@ -226,6 +226,49 @@ async fn resolve_max_height(
         .filter(|h| *h > 0)
 }
 
+/// The effective merge container for a download, same precedence ladder as
+/// `resolve_max_height`: `ORCA_CONTAINER` > per-site override > UI-stored global
+/// > the built-in default carried on Config.
+async fn resolve_container(
+    cfg: &Config,
+    db: &Db,
+    sites: &[crate::types::Website],
+    url: &str,
+) -> crate::config::Container {
+    if cfg.container_user_set {
+        return cfg.container;
+    }
+    if let Some(c) = crate::websites::detect(sites, url)
+        .and_then(|w| w.container.as_deref())
+        .and_then(crate::config::Container::parse)
+    {
+        return c;
+    }
+    db.get_setting("container")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| crate::config::Container::parse(&v))
+        .unwrap_or(cfg.container)
+}
+
+/// Whether to capture subtitles for a download: `ORCA_SUBS` > per-site override
+/// > UI-stored global > the Config default (on).
+async fn resolve_subs(cfg: &Config, db: &Db, sites: &[crate::types::Website], url: &str) -> bool {
+    if cfg.subs_user_set {
+        return cfg.subs;
+    }
+    if let Some(s) = crate::websites::detect(sites, url).and_then(|w| w.subs) {
+        return s;
+    }
+    db.get_setting("subs")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v == "1")
+        .unwrap_or(cfg.subs)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_job(
     cfg: &Config,
@@ -279,8 +322,9 @@ async fn run_job(
         }
     });
 
-    // Load the website registry once for this job — it drives both the per-site
-    // resolution cap and the per-site cookie selection (incl. user-added sites).
+    // Load the website registry once for this job — it drives the per-site
+    // resolution cap, container, subtitle toggle, and cookie selection (incl.
+    // user-added sites).
     let sites = db.list_websites().await.unwrap_or_default();
     let site_key = crate::websites::detect(&sites, &item.webpage_url).map(|w| w.key.clone());
 
@@ -292,6 +336,11 @@ async fn run_job(
     };
     let mut job_cfg = cfg.clone();
     job_cfg.format = cfg.format_capped(cap);
+    // Container and subtitle capture resolve identically for a variant and the
+    // primary — a 720p copy of a video should land in the same container, with
+    // the same subtitles, as the original.
+    job_cfg.container = resolve_container(cfg, db, &sites, &item.webpage_url).await;
+    job_cfg.subs = resolve_subs(cfg, db, &sites, &item.webpage_url).await;
 
     // Register a cancel handle (keyed per item+variant) so a delete / deselect can
     // kill this download's yt-dlp child mid-flight instead of leaving it running.

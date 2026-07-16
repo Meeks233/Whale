@@ -43,7 +43,10 @@
 
   <section class="submit">
     <form id="submit-form" class="row">
-      <input id="url" type="url" inputmode="url" autocomplete="off" placeholder="Paste a video URL…" data-i18n-ph="ph.url" required>
+      <!-- type=text, not url: the box accepts several links at once (see
+           parseLinks), which native url validation would reject outright. -->
+      <input id="url" type="text" inputmode="url" autocomplete="off" placeholder="Paste a video URL…" data-i18n-ph="ph.url" required>
+      <button id="paste-btn" class="icon-btn paste-btn" type="button" aria-label="Paste" title="Paste" data-i18n-aria="aria.paste" data-i18n-title="aria.paste"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v4"/><path d="M21 14H11"/><path d="m15 10-4 4 4 4"/></svg></button>
       <button id="submit-btn" class="btn" type="submit" data-i18n="btn.download">Download</button>
     </form>
   </section>
@@ -69,6 +72,12 @@
       <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-loader-circle"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
     </div>
   </main>
+
+  <!-- Floating "back to top" affordance: revealed once the page is scrolled well
+       past the fold (see setupBackToTop), hidden again near the top. -->
+  <button id="to-top" class="to-top hidden" type="button" aria-label="Back to top" title="Back to top" data-i18n-aria="aria.toTop" data-i18n-title="aria.toTop">
+    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 3h14"/><path d="m18 13-6-6-6 6"/><path d="M12 7v14"/></svg>
+  </button>
 
   <!-- Batch action bar: shown in multi-select mode (toolbar toggle or long-press
        a card). Acts on the checked items — download / share / copy links. -->
@@ -303,6 +312,36 @@
         </div>
         <p id="max-res-hint" class="hint-muted" data-i18n="settings.maxResHint">Caps the quality yt-dlp downloads. Highest picks the best available.</p>
         <p id="max-res-locked" class="hint hidden" data-i18n="settings.maxResLocked">Pinned by the ORCA_MAX_HEIGHT environment variable.</p>
+      </div>
+
+      <!-- Global default container: the fallback format for any site that doesn't
+           pin its own. -->
+      <div class="sites-global">
+        <label for="format" data-i18n="settings.format">Video format</label>
+        <div class="row">
+          <select id="format" class="select">
+            <option value="mkv">MKV</option>
+            <option value="mp4">MP4</option>
+            <option value="webm">WebM</option>
+            <option value="mov">MOV</option>
+            <option value="avi">AVI</option>
+            <option value="flv">FLV</option>
+          </select>
+          <button id="format-save" class="btn" data-i18n="btn.save">Save</button>
+        </div>
+        <p id="format-hint" class="hint-muted" data-i18n="settings.formatHint">The container downloads are merged into. MKV fits every codec and any number of subtitle tracks; MP4 is the most widely compatible.</p>
+        <p id="format-locked" class="hint hidden" data-i18n="settings.formatLocked">Pinned by the ORCA_CONTAINER environment variable.</p>
+      </div>
+
+      <!-- Global default subtitle capture; each site can opt out on its own card. -->
+      <div class="sites-global">
+        <label for="subs-toggle" data-i18n="settings.subs">Subtitles</label>
+        <div class="row row-toggle">
+          <button id="subs-toggle" class="site-subs-toggle off" type="button" role="switch" aria-checked="false" data-i18n-title="settings.subs" title="Subtitles"><span class="knob"></span></button>
+          <button id="subs-save" class="btn" data-i18n="btn.save">Save</button>
+        </div>
+        <p id="subs-hint" class="hint-muted" data-i18n="settings.subsHint">Downloads subtitles, embeds them in the video for offline playback, and keeps the original subtitle files alongside it.</p>
+        <p id="subs-locked" class="hint hidden" data-i18n="settings.subsLocked">Pinned by the ORCA_SUBS environment variable.</p>
       </div>
 
       <div class="sites-toolbar">

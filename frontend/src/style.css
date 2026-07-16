@@ -460,6 +460,30 @@ html:not(.app-native) #server-row { display: none; }
 
 .submit { margin-bottom: 12px; }
 
+/* Paste button: sits between the URL box and Download, styled as a quiet
+   secondary control (input shell, muted glyph) so it reads as an accessory to
+   the field rather than competing with the accent-filled Download button. */
+.paste-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 42px;
+  padding: 0;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: color .15s ease, border-color .15s ease;
+}
+.paste-btn:hover { color: var(--accent); border-color: var(--accent); }
+
+/* A settings row whose control is a switch, not a full-width field: keep the
+   switch at its natural size and let the Save button sit beside it. */
+.row-toggle { align-items: center; }
+.row-toggle .site-subs-toggle { margin-top: 0; }
+.row-toggle .btn { margin-left: auto; }
+
 .controls {
   display: flex;
   flex-wrap: wrap;
@@ -585,9 +609,9 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   font-size: 11px; font-weight: 700; line-height: 1;
   color: #fff; background: rgba(0,0,0,.72); border-radius: 5px;
 }
-/* Whole-list play button: bottom-right, tappable (unlike the passive item badge).
-   Two-class selector so it beats the later `.play-badge { pointer-events:none }`. */
-.play-badge.group-play { pointer-events: auto; cursor: pointer; border: none; padding: 0; }
+/* Whole-list play button: bottom-right. A real <button>, so it needs the button
+   reset the item badge (a passive <span>) does not. */
+.play-badge.group-play { cursor: pointer; border: none; padding: 0; }
 .group-play:hover, .group-play:focus-visible { background: var(--accent); transform: scale(1.08); }
 .group-info { flex: 1 1 auto; min-width: 0; padding-top: 1px; }
 .group-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
@@ -650,6 +674,35 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   border-radius: 14px;
   box-shadow: 0 8px 30px rgba(0,0,0,.45);
 }
+/* ---- Back to top ----
+   A floating affordance in the same visual family as .select-bar (same surface,
+   border, and shadow), but squarer: a softly-rounded square rather than a pill,
+   so it reads as a distinct control instead of a second action bar. Sits below
+   the select-bar's z-index so batch mode always wins the corner. */
+.to-top {
+  position: fixed;
+  right: calc(12px + env(safe-area-inset-right));
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 45;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.45);
+  cursor: pointer;
+  transition: transform .15s ease, border-color .15s ease, color .15s ease;
+}
+.to-top:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-2px); }
+.to-top svg { display: block; }
+/* Multi-select raises the batch bar along the bottom edge; lift clear of it. */
+body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-inset-bottom)); }
+
 .select-count { font-size: 13px; font-weight: 600; white-space: nowrap; }
 .select-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .select-bar .btn { padding: 8px 12px; font-size: 13px; border-radius: 10px; }
@@ -706,23 +759,12 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 }
 .media-pending .media-loader { display: flex; }
 .media-loader svg { display: block; animation: spin .8s linear infinite; }
-/* Portrait thumbs are only 68px wide, so the bottom-left duration pill ends up
-   underneath the bottom-right play button. Drop it there and let the capsule in
-   the card body carry the duration instead (see .chip-dur / metaChipsHtml). */
-.portrait-media .dur { display: none; }
-
-/* Duration inside the size capsule: "1:23 | 2.7MB". Hidden by default — the
-   landscape thumbnail already shows it in its own pill, where there's room. */
-.chip-dur { display: none; }
-.chip-dur::after { content: " | "; opacity: .55; }
-/* No size part follows (cloud-only item) → nothing to separate from. */
-.chip-dur:last-child::after { content: ""; }
-.portrait-media .chip-dur { display: inline; }
-/* A capsule holding only the (hidden) duration would render as an empty pill —
-   that happens for a landscape cloud-only item, which has no size part. Restore
-   the base inline-flex (not `inline`) when portrait makes the duration visible. */
-.meta-chip:not(:has(.chip-size)) { display: none; }
-.portrait-media .meta-chip:has(.chip-dur) { display: inline-flex; }
+/* Portrait thumbs are only 68px wide, so a bottom-left duration pill lands under
+   the bottom-right play button. Move it to the top-left, which is free (the
+   cloud badge sits top-right), and drop it entirely for clips under a minute —
+   "0:20" on a Reel is noise. Landscape has room and is untouched. */
+.portrait-media .dur { top: 5px; bottom: auto; }
+.portrait-media .dur-short { display: none; }
 
 /* Duration pill: bottom-left of the thumbnail box. */
 .dur {
@@ -763,7 +805,11 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   color: #fff;
   background: rgba(0,0,0,.42);
   border-radius: 999px;
-  pointer-events: none;
+  /* A real hit target, not decoration. The whole thumbnail already plays, so
+     this changes nothing there — but on a privacy-blurred card the badge must be
+     distinguishable from the blurred image under it, so that tapping it plays
+     immediately while tapping the image still peeks (see the click handler). */
+  pointer-events: auto;
   transition: background .15s ease, transform .15s ease;
 }
 .play-badge svg { width: 14px; height: 14px; margin-left: 1px; /* optical centre */ }
@@ -1229,22 +1275,26 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 /* Enable/disable, cookie, and privacy-blur pill switches (one shared style). */
 .site-toggle,
 .site-blur-toggle,
-.site-cookie-toggle {
+.site-cookie-toggle,
+.site-subs-toggle {
   position: relative; width: 40px; height: 22px; border-radius: 999px; flex-shrink: 0; margin-top: 1px;
   border: 1px solid var(--border); background: var(--surface-2); cursor: pointer; padding: 0;
 }
 .site-toggle .knob,
 .site-blur-toggle .knob,
-.site-cookie-toggle .knob {
+.site-cookie-toggle .knob,
+.site-subs-toggle .knob {
   position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
   background: var(--muted); transition: left .15s, background .15s;
 }
 .site-toggle.on,
 .site-blur-toggle.on,
-.site-cookie-toggle.on { background: color-mix(in oklab, var(--accent) 30%, var(--surface-2)); border-color: var(--accent); }
+.site-cookie-toggle.on,
+.site-subs-toggle.on { background: color-mix(in oklab, var(--accent) 30%, var(--surface-2)); border-color: var(--accent); }
 .site-toggle.on .knob,
 .site-blur-toggle.on .knob,
-.site-cookie-toggle.on .knob { left: 20px; background: var(--accent); }
+.site-cookie-toggle.on .knob,
+.site-subs-toggle.on .knob { left: 20px; background: var(--accent); }
 
 /* Overflow (kebab) menu: collapses the rarely-used per-site actions. */
 .site-menu-wrap { position: relative; flex-shrink: 0; }
