@@ -1,0 +1,45 @@
+Categories:
+  - Internet
+License: GPL-3.0-or-later
+AuthorName: Meeks233 and Orca contributors
+WebSite: https://github.com/Meeks233/Orca
+SourceCode: https://github.com/Meeks233/Orca
+IssueTracker: https://github.com/Meeks233/Orca/issues
+Changelog: https://github.com/Meeks233/Orca/releases
+
+AutoName: Orca
+Summary: Submit media links to your self-hosted download server
+Description: |-
+  Orca is a client for an Orca server you control. Share or paste a media URL,
+  monitor the server-side yt-dlp download, search history, manage cookies and
+  resolution preferences, and play or share completed media.
+
+  The app has no ads, analytics, account service, or proprietary SDK. A separate
+  self-hosted Orca server is required.
+
+RepoType: git
+Repo: https://github.com/Meeks233/Orca.git
+
+Builds:
+  - versionName: 0.1.0
+    versionCode: 1000
+    commit: v0.1.0
+    timeout: 10800
+    sudo:
+      - apt-get update
+      - apt-get install -y npm build-essential curl pkg-config libssl-dev
+    init:
+      - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.97.0
+      - source $$HOME$$/.cargo/env
+      - rustup target add aarch64-linux-android armv7-linux-androideabi
+      - cargo install tauri-cli --version 2.11.4 --locked
+    build:
+      - source $$HOME$$/.cargo/env
+      - bash app/scripts/build-fdroid.sh
+    ndk: r27c
+    output: app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+
+AutoUpdateMode: Version v%v
+UpdateCheckMode: Tags ^v[0-9]+\.[0-9]+\.[0-9]+$
+CurrentVersion: 0.1.0
+CurrentVersionCode: 1000

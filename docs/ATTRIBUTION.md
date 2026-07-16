@@ -3,12 +3,12 @@
 ## Seal
 
 [Seal](https://github.com/JunkFood02/Seal) is a GPL-3.0-or-later Android video/audio
-downloader and the primary product inspiration for Whale's submit, format, archive,
-share-target, and mobile download workflow. Whale adds a server-owned Rust/Axum
+downloader and the primary product inspiration for Orca's submit, format, archive,
+share-target, and mobile download workflow. Orca adds a server-owned Rust/Axum
 architecture, SQLite history, Docker/OCI deployment, remote clients, web/PWA UI,
 server-side media proxy, and public capability links.
 
-Whale supports importing Seal backup conventions for interoperability. Seal is not
+Orca supports importing Seal backup conventions for interoperability. Seal is not
 vendored, linked, or required at runtime. Contributors who adapt nontrivial Seal
 source, text, or assets must identify the upstream file and revision here, preserve
 its copyright notices, mark the modification, and confirm GPL compatibility before

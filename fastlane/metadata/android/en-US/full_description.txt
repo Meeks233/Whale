@@ -1,0 +1,7 @@
+Orca connects to an Orca server that you operate.
+
+Share or paste a media URL, monitor server-side downloads, search history, manage per-site cookies and resolution preferences, and play or share completed media.
+
+The Android app is a thin client. Downloads run on your own server through yt-dlp. Orca has no ads, analytics, tracking SDK, or hosted account service.
+
+Use Orca only for media you are authorized to access and download.

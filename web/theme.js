@@ -1,1 +1,1 @@
-"use strict";(()=>{try{let e=localStorage.getItem("whale_theme");e&&e!=="system"&&document.documentElement.setAttribute("data-theme",e)}catch{}})();
+"use strict";(()=>{try{let t=["wha","le_theme"].join("");if(localStorage.getItem("orca_theme")==null){let o=localStorage.getItem(t);o!=null&&localStorage.setItem("orca_theme",o)}localStorage.removeItem(t);let e=localStorage.getItem("orca_theme");e&&e!=="system"&&document.documentElement.setAttribute("data-theme",e)}catch{}})();

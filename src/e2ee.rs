@@ -12,12 +12,12 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const HEADER_E2EE: &str = "x-whale-e2ee";
-pub const HEADER_KEY_ID: &str = "x-whale-key-id";
-pub const HEADER_ENCRYPTED_BODY: &str = "x-whale-encrypted-body";
+pub const HEADER_E2EE: &str = "x-orca-e2ee";
+pub const HEADER_KEY_ID: &str = "x-orca-key-id";
+pub const HEADER_ENCRYPTED_BODY: &str = "x-orca-encrypted-body";
 const MAX_ENVELOPE_BYTES: usize = 3 * 1024 * 1024;
-const KID_DOMAIN: &[u8] = b"whale-e2ee-kid-v1\0";
-const KEY_DOMAIN: &[u8] = b"whale-e2ee-key-v1\0";
+const KID_DOMAIN: &[u8] = b"orca-e2ee-kid-v1\0";
+const KEY_DOMAIN: &[u8] = b"orca-e2ee-key-v1\0";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Envelope {
@@ -139,7 +139,7 @@ pub async fn encrypt_response(
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static("application/vnd.whale.e2ee+json"),
+        HeaderValue::from_static("application/vnd.orca.e2ee+json"),
     );
     parts.headers.insert(
         header::CACHE_CONTROL,
@@ -188,7 +188,7 @@ mod tests {
         assert_eq!(response.headers().get(HEADER_E2EE).unwrap(), "1");
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE).unwrap(),
-            "application/vnd.whale.e2ee+json"
+            "application/vnd.orca.e2ee+json"
         );
     }
 

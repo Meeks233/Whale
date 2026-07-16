@@ -1,9 +1,9 @@
-# Whale app (Tauri 2)
+# Orca app (Tauri 2)
 
-A native Android/desktop shell that **reuses the exact `web/` UI** the Whale server
+A native Android/desktop shell that **reuses the exact `web/` UI** the Orca server
 serves — one frontend codebase for browser, PWA, and app. The shell adds only:
 
-- **Server URL** setting (`whale_api_base`) so the same UI talks to a remote Whale
+- **Server URL** setting (`orca_api_base`) so the same UI talks to a remote Orca
   server cross-origin. Authenticated JSON traffic uses token-derived AES-GCM;
   media streams retain bearer/query authentication.
 - **Android share sheet** integration: shared URLs are submitted to the server.
@@ -50,9 +50,9 @@ cargo tauri dev
 adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
 ```
 
-1. Open **Whale** → tap ⚙ → set **Server URL** (e.g. `http://192.168.1.x:8080`) and your **API token** → Save.
+1. Open **Orca** → tap ⚙ → set **Server URL** (e.g. `http://192.168.1.x:8080`) and your **API token** → Save.
 2. The full web UI loads against your server (history, search, play, cloud-only fallback, etc.).
-3. In any app (YouTube, browser, Twitter), **Share → Whale**. The URL is submitted to your
+3. In any app (YouTube, browser, Twitter), **Share → Orca**. The URL is submitted to your
    server, which downloads it (respecting polite/sequential mode).
 
 ## Notes / caveats
@@ -63,4 +63,4 @@ adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-u
   `AndroidManifest.xml` (share intent-filter), `gradle.properties`, and `build.gradle.kts`
   (minSdk, cleartext). Re-running `cargo tauri android init` regenerates these — re-apply the
   three edits if you ever do.
-- The share plugin requires `tauri_app_lib_name=whale_app_lib` in `gradle.properties`.
+- The share plugin requires `tauri_app_lib_name=orca_app_lib` in `gradle.properties`.

@@ -19,6 +19,15 @@ async fn item_by_slug(state: &AppState, slug: &str) -> AppResult<Item> {
     state.db.find_by_slug(slug).await?.ok_or(AppError::NotFound)
 }
 
+fn decorate_item(item: &Item, sites: &[crate::types::Website]) -> serde_json::Value {
+    let mut value = serde_json::to_value(item).unwrap_or_else(|_| json!({}));
+    if let Some(site) = crate::websites::detect(sites, &item.webpage_url) {
+        value["blur"] = json!(site.blur);
+        value["site_name"] = json!(site.name);
+    }
+    value
+}
+
 /// POST /api/items — submit a URL: probe → dedup → enqueue.
 pub async fn submit(
     State(state): State<AppState>,
@@ -75,7 +84,7 @@ pub async fn submit(
             // One greppable record per probe failure — the metadata stage had no
             // logging at all, so an X/Twitter (or any) link that couldn't be read
             // failed silently server-side. Filter with
-            // `level=warn target=whale::api::items`.
+            // `level=warn target=orca::api::items`.
             tracing::warn!(
                 url = %url,
                 platform,
@@ -171,6 +180,9 @@ pub async fn submit(
         let mut v =
             serde_json::to_value(SubmitResponse { item, duplicate }).unwrap_or_else(|_| json!({}));
         v["item"]["blur"] = json!(blur);
+        if let Some(site) = site {
+            v["item"]["site_name"] = json!(site.name);
+        }
         Ok((status, Json(v)).into_response())
     } else {
         Ok((
@@ -210,7 +222,13 @@ pub async fn list(
             before_id: params.before_id,
         })
         .await?;
-    Ok(Json(json!({ "items": page.items, "next_cursor": page.next_cursor })).into_response())
+    let sites = state.db.list_websites().await.unwrap_or_default();
+    let items = page
+        .items
+        .iter()
+        .map(|item| decorate_item(item, &sites))
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "items": items, "next_cursor": page.next_cursor })).into_response())
 }
 
 /// GET /api/items/:slug — one item. Carries a computed `blur` flag (its site's
@@ -219,12 +237,7 @@ pub async fn list(
 pub async fn get(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
     let item = item_by_slug(&state, &slug).await?;
     let sites = state.db.list_websites().await.unwrap_or_default();
-    let blur = crate::websites::detect(&sites, &item.webpage_url)
-        .map(|w| w.blur)
-        .unwrap_or(false);
-    let mut v = serde_json::to_value(&item).unwrap_or_else(|_| json!({}));
-    v["blur"] = json!(blur);
-    Ok(Json(v).into_response())
+    Ok(Json(decorate_item(&item, &sites)).into_response())
 }
 
 /// POST /api/items/:slug/retry — re-queue a failed item.
@@ -541,7 +554,7 @@ mod tests {
 
 /// GET /api/settings — runtime-adjustable settings. `max_height` is the current
 /// effective cap (`null` = highest); `max_height_locked` is true when it's
-/// pinned by the `WHALE_MAX_HEIGHT` env var and can't be changed from the UI.
+/// pinned by the `ORCA_MAX_HEIGHT` env var and can't be changed from the UI.
 pub async fn get_settings(State(state): State<AppState>) -> AppResult<Response> {
     let locked = state.cfg.max_height.is_some();
     // The stored `max_height` value can be the sentinel "none" — the no-download
@@ -587,7 +600,7 @@ pub async fn put_settings(
 ) -> AppResult<Response> {
     if state.cfg.max_height.is_some() {
         return Err(AppError::BadRequest(
-            "max_height is pinned by the WHALE_MAX_HEIGHT environment variable".into(),
+            "max_height is pinned by the ORCA_MAX_HEIGHT environment variable".into(),
         ));
     }
     // "None" (no-download) wins when set; otherwise a missing / 0 / negative value
@@ -614,7 +627,7 @@ pub async fn health(State(state): State<AppState>) -> Response {
         "version": env!("CARGO_PKG_VERSION"),
         "ytdlp": state.ytdlp_version,
         // Canonical public domain for share links; null when the operator
-        // hasn't declared WHALE_PUBLIC_URL (UI falls back to its own origin).
+        // hasn't declared ORCA_PUBLIC_URL (UI falls back to its own origin).
         "public_url": state.cfg.public_url,
     }))
     .into_response()

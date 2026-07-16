@@ -1,4 +1,4 @@
-package com.whale.app
+package com.orca.app
 
 import android.content.res.Configuration
 import android.os.Bundle

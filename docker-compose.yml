@@ -1,18 +1,18 @@
 services:
-  whale:
-    image: ${WHALE_IMAGE:-ghcr.io/meeks233/whale:latest}
+  orca:
+    image: ${ORCA_IMAGE:-ghcr.io/meeks233/orca:latest}
     environment:
-      # Access token. If unset, Whale generates a random 32-char token on startup
+      # Access token. If unset, Orca generates a random 32-char token on startup
       # and prints it to the container log. Set it here to keep it stable.
-      # WHALE_TOKEN: "change-me"
-      WHALE_CONCURRENCY: "2"
+      # ORCA_TOKEN: "change-me"
+      ORCA_CONCURRENCY: "2"
       # Multi-threaded download: parallel fragments per job (Seal-style, default 4).
-      WHALE_CONCURRENT_FRAGMENTS: "4"
+      ORCA_CONCURRENT_FRAGMENTS: "4"
       # Total download-rate cap, split across concurrent jobs. "0"/"none" disables.
-      WHALE_LIMIT_RATE: "10M"
-      WHALE_CLIENT_TOFU: "false"
+      ORCA_LIMIT_RATE: "10M"
+      ORCA_CLIENT_TOFU: "false"
       # Opt in on hosts using fake-IP DNS proxies (for example Clash/sing-box).
-      WHALE_ALLOW_PRIVATE_DNS: "${WHALE_ALLOW_PRIVATE_DNS:-false}"
+      ORCA_ALLOW_PRIVATE_DNS: "${ORCA_ALLOW_PRIVATE_DNS:-false}"
     volumes:
       - ./data:/data
       - ./downloads:/downloads

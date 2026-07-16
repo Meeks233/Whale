@@ -69,6 +69,6 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: whale-android-debug
+          name: orca-android-debug
           path: app/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk
           if-no-files-found: error

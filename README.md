@@ -1,17 +1,17 @@
-# Whale
+# Orca
 
-Whale is a self-hosted, cloud-native yt-dlp download manager. Submit a media URL
-from the web UI, PWA, Android share sheet, or API; Whale probes it, deduplicates
+Orca is a self-hosted, cloud-native yt-dlp download manager. Submit a media URL
+from the web UI, PWA, Android share sheet, or API; Orca probes it, deduplicates
 it, downloads it in the background, and keeps searchable history and files on
 storage you control.
 
-Whale takes the practical mobile workflow popularized by
+Orca takes the practical mobile workflow popularized by
 [Seal](https://github.com/JunkFood02/Seal) and moves it to an always-on server.
 Seal remains the reference for an excellent local Android yt-dlp experience.
-Whale reinterprets that workflow as a Rust/Axum service with a SQLite control
+Orca reinterprets that workflow as a Rust/Axum service with a SQLite control
 plane, persistent queue state, Docker deployment, remote browser clients, public
 share links, and a thin Tauri Android client. Seal backup data can be imported;
-Whale does not bundle Seal or require it at runtime.
+Orca does not bundle Seal or require it at runtime.
 
 ## Capabilities
 
@@ -34,19 +34,19 @@ Whale does not bundle Seal or require it at runtime.
 ## Quick Start
 
 ```bash
-mkdir whale && cd whale
-curl -O https://raw.githubusercontent.com/Meeks233/Whale/main/docker-compose.yml
+mkdir orca && cd orca
+curl -O https://raw.githubusercontent.com/Meeks233/Orca/main/docker-compose.yml
 mkdir -p data downloads
 sudo chown -R 10001:10001 data downloads
-WHALE_TOKEN="$(openssl rand -hex 24)" docker compose up -d
+ORCA_TOKEN="$(openssl rand -hex 24)" docker compose up -d
 ```
 
 The checked-in Compose file binds `127.0.0.1:8080` by default. Open
 `http://127.0.0.1:8080`, enter the same token, and submit a URL. For LAN access,
-change the port binding explicitly. For internet access, keep Whale on loopback
+change the port binding explicitly. For internet access, keep Orca on loopback
 and put an HTTPS reverse proxy in front of it.
 
-The image defaults to `ghcr.io/meeks233/whale:latest`. Set `WHALE_IMAGE` to a
+The image defaults to `ghcr.io/meeks233/orca:latest`. Set `ORCA_IMAGE` to a
 version or immutable `sha-<full-commit>` tag for controlled deployments.
 
 ## Security Model
@@ -60,10 +60,10 @@ database IDs. Public share capabilities are separate and rotate whenever a share
 is created. Media streams retain bearer/query authentication so they remain
 incrementally streamable; use HTTPS outside a trusted LAN.
 
-Whale executes yt-dlp against user-provided URLs. Keep it behind authentication,
+Orca executes yt-dlp against user-provided URLs. Keep it behind authentication,
 use HTTPS outside a trusted LAN, mount only dedicated data directories, and do
 not expose the Docker socket. DNS answers resolving to private addresses are
-blocked by default; `WHALE_ALLOW_PRIVATE_DNS=1` is an explicit compatibility
+blocked by default; `ORCA_ALLOW_PRIVATE_DNS=1` is an explicit compatibility
 exception for fake-IP proxy environments.
 
 ## Documentation
@@ -79,13 +79,15 @@ exception for fake-IP proxy environments.
 - [Android app](docs/ANDROID.md)
 - [Seal import](docs/SEAL_IMPORT.md)
 - [Development and release](docs/DEVELOPMENT.md)
+- [Android store release](docs/RELEASING_ANDROID.md)
+- [Privacy policy](docs/PRIVACY.md)
 - [Attribution](docs/ATTRIBUTION.md)
 
 ## License
 
-Copyright (C) 2026 Meeks233 and Whale contributors.
+Copyright (C) 2026 Meeks233 and Orca contributors.
 
-Whale is free software licensed under the GNU General Public License, version 3
+Orca is free software licensed under the GNU General Public License, version 3
 or any later version (`GPL-3.0-or-later`). See [LICENSE](LICENSE),
 [COPYRIGHT](COPYRIGHT), and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-Use Whale only for media you are authorized to access and download.
+Use Orca only for media you are authorized to access and download.

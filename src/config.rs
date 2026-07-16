@@ -22,7 +22,7 @@ impl Container {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub token: String,
-    /// True when `token` was randomly generated because `WHALE_TOKEN` was unset.
+    /// True when `token` was randomly generated because `ORCA_TOKEN` was unset.
     pub token_generated: bool,
     /// Trust-on-first-use for self-registered clients: when true, a client that
     /// POSTs a new passphrase to `/api/clients/register` is trusted immediately
@@ -52,11 +52,11 @@ pub struct Config {
     pub container: Container,
     pub output_template: String,
     pub format: String,
-    /// True when `WHALE_FORMAT` was set explicitly by the operator. The
+    /// True when `ORCA_FORMAT` was set explicitly by the operator. The
     /// resolution cap (`max_height`) is only injected into the *default* format
     /// — an explicit custom format is an escape hatch we pass through verbatim.
     pub format_user_set: bool,
-    /// Max video pixel height passed in via `WHALE_MAX_HEIGHT` (e.g. 1080). When
+    /// Max video pixel height passed in via `ORCA_MAX_HEIGHT` (e.g. 1080). When
     /// `Some`, it is authoritative and overrides any UI-stored value (an env var
     /// the operator "actively passed in" wins). `None` = follow the stored
     /// setting, defaulting to highest.
@@ -71,7 +71,7 @@ pub struct Config {
     /// hostnames resolving to non-public addresses are rejected before yt-dlp.
     pub allow_private_dns: bool,
     /// Canonical public base URL the server is reachable at (e.g.
-    /// `https://whale.example.com`), declared by the operator. Used to build
+    /// `https://orca.example.com`), declared by the operator. Used to build
     /// share links so they carry the real domain instead of whatever origin
     /// the UI happens to be loaded from. `None` falls back to the UI origin.
     pub public_url: Option<String>,
@@ -100,7 +100,7 @@ fn env_opt(key: &str) -> Option<String> {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let (token, token_generated) = match env_opt("WHALE_TOKEN") {
+        let (token, token_generated) = match env_opt("ORCA_TOKEN") {
             Some(t) => (t, false),
             None => (random_token()?, true),
         };
@@ -110,47 +110,47 @@ impl Config {
         // through an industry-style weak-password screen (length, character
         // diversity, and a common-credential blocklist) so a guessable token
         // can't silently protect a server that streams cookies. The
-        // `WHALE_ALLOW_WEAK_TOKEN` escape hatch exists only for local dev.
-        if !token_generated && !env_bool("WHALE_ALLOW_WEAK_TOKEN", false) {
+        // `ORCA_ALLOW_WEAK_TOKEN` escape hatch exists only for local dev.
+        if !token_generated && !env_bool("ORCA_ALLOW_WEAK_TOKEN", false) {
             if let Err(reason) = token_strength(&token) {
                 return Err(anyhow!(
-                    "WHALE_TOKEN is too weak: {reason}. Choose a longer, random \
+                    "ORCA_TOKEN is too weak: {reason}. Choose a longer, random \
                      token (e.g. `openssl rand -hex 24`), or set \
-                     WHALE_ALLOW_WEAK_TOKEN=1 for local development only."
+                     ORCA_ALLOW_WEAK_TOKEN=1 for local development only."
                 ));
             }
         }
 
-        let bind: SocketAddr = env_or("WHALE_BIND", "0.0.0.0:8080")
+        let bind: SocketAddr = env_or("ORCA_BIND", "0.0.0.0:8080")
             .parse()
-            .context("WHALE_BIND must be a valid socket address")?;
+            .context("ORCA_BIND must be a valid socket address")?;
 
-        let data_dir = PathBuf::from(env_or("WHALE_DATA_DIR", "/data"));
-        let download_dir = PathBuf::from(env_or("WHALE_DOWNLOAD_DIR", "/downloads"));
+        let data_dir = PathBuf::from(env_or("ORCA_DATA_DIR", "/data"));
+        let download_dir = PathBuf::from(env_or("ORCA_DOWNLOAD_DIR", "/downloads"));
 
-        let concurrency: usize = env_or("WHALE_CONCURRENCY", "2")
+        let concurrency: usize = env_or("ORCA_CONCURRENCY", "2")
             .parse()
-            .context("WHALE_CONCURRENCY must be a positive integer")?;
+            .context("ORCA_CONCURRENCY must be a positive integer")?;
 
-        let client_tofu = env_bool("WHALE_CLIENT_TOFU", false);
+        let client_tofu = env_bool("ORCA_CLIENT_TOFU", false);
 
-        let polite = env_bool("WHALE_POLITE", true);
-        let sleep_min: u64 = env_or("WHALE_SLEEP_MIN", "2")
+        let polite = env_bool("ORCA_POLITE", true);
+        let sleep_min: u64 = env_or("ORCA_SLEEP_MIN", "2")
             .parse()
-            .context("WHALE_SLEEP_MIN must be a non-negative integer")?;
-        let sleep_max: u64 = env_or("WHALE_SLEEP_MAX", "7")
+            .context("ORCA_SLEEP_MIN must be a non-negative integer")?;
+        let sleep_max: u64 = env_or("ORCA_SLEEP_MAX", "7")
             .parse()
-            .context("WHALE_SLEEP_MAX must be a non-negative integer")?;
+            .context("ORCA_SLEEP_MAX must be a non-negative integer")?;
         let sleep_max = sleep_max.max(sleep_min);
-        let sleep_requests = env_opt("WHALE_SLEEP_REQUESTS");
-        let impersonate = env_opt("WHALE_IMPERSONATE");
+        let sleep_requests = env_opt("ORCA_SLEEP_REQUESTS");
+        let impersonate = env_opt("ORCA_IMPERSONATE");
 
-        let concurrent_fragments: usize = env_or("WHALE_CONCURRENT_FRAGMENTS", "4")
+        let concurrent_fragments: usize = env_or("ORCA_CONCURRENT_FRAGMENTS", "4")
             .parse()
-            .context("WHALE_CONCURRENT_FRAGMENTS must be a positive integer")?;
+            .context("ORCA_CONCURRENT_FRAGMENTS must be a positive integer")?;
 
         // Total rate cap across all concurrent jobs; empty/"0"/"none" disables it.
-        let limit_rate = match env_opt("WHALE_LIMIT_RATE") {
+        let limit_rate = match env_opt("ORCA_LIMIT_RATE") {
             None => Some("10M".to_string()),
             Some(v) => match v.trim().to_ascii_lowercase().as_str() {
                 "0" | "none" | "off" | "unlimited" => None,
@@ -158,7 +158,7 @@ impl Config {
             },
         };
 
-        let container = match env_or("WHALE_CONTAINER", "mkv")
+        let container = match env_or("ORCA_CONTAINER", "mkv")
             .to_ascii_lowercase()
             .as_str()
         {
@@ -166,37 +166,37 @@ impl Config {
             "mp4" => Container::Mp4,
             other => {
                 return Err(anyhow!(
-                    "WHALE_CONTAINER '{other}' is invalid; valid options: mkv, mp4"
+                    "ORCA_CONTAINER '{other}' is invalid; valid options: mkv, mp4"
                 ))
             }
         };
 
         let output_template = env_or(
-            "WHALE_OUTPUT_TEMPLATE",
+            "ORCA_OUTPUT_TEMPLATE",
             "%(uploader,channel|Unknown)s - %(title).150B [%(id)s].%(ext)s",
         );
-        let format_user_set = env_opt("WHALE_FORMAT").is_some();
-        let format = env_or("WHALE_FORMAT", "bv*+ba/b");
+        let format_user_set = env_opt("ORCA_FORMAT").is_some();
+        let format = env_or("ORCA_FORMAT", "bv*+ba/b");
         // Highest by default (unset). A value of 0 / "highest"/"best"/"none"
         // explicitly means no cap; any positive integer caps the height.
-        let max_height = match env_opt("WHALE_MAX_HEIGHT") {
+        let max_height = match env_opt("ORCA_MAX_HEIGHT") {
             None => None,
             Some(v) => match v.trim().to_ascii_lowercase().as_str() {
                 "0" | "highest" | "best" | "none" | "max" => None,
                 other => Some(other.trim_end_matches('p').parse::<i64>().context(
-                    "WHALE_MAX_HEIGHT must be an integer height (e.g. 1080), 'highest', or 0",
+                    "ORCA_MAX_HEIGHT must be an integer height (e.g. 1080), 'highest', or 0",
                 )?),
             },
         };
-        let subs = env_bool("WHALE_SUBS", true);
-        let auto_subs = env_bool("WHALE_AUTO_SUBS", false);
-        let sub_langs = env_or("WHALE_SUB_LANGS", "all,-live_chat");
-        let embed_thumbnail = env_bool("WHALE_EMBED_THUMBNAIL", true);
-        let cookies = env_opt("WHALE_COOKIES").map(PathBuf::from);
-        let ytdlp_path = env_or("WHALE_YTDLP_PATH", "yt-dlp");
-        let allow_private_dns = env_bool("WHALE_ALLOW_PRIVATE_DNS", false);
+        let subs = env_bool("ORCA_SUBS", true);
+        let auto_subs = env_bool("ORCA_AUTO_SUBS", false);
+        let sub_langs = env_or("ORCA_SUB_LANGS", "all,-live_chat");
+        let embed_thumbnail = env_bool("ORCA_EMBED_THUMBNAIL", true);
+        let cookies = env_opt("ORCA_COOKIES").map(PathBuf::from);
+        let ytdlp_path = env_or("ORCA_YTDLP_PATH", "yt-dlp");
+        let allow_private_dns = env_bool("ORCA_ALLOW_PRIVATE_DNS", false);
         // Strip trailing slashes so it concatenates cleanly with `/api/p/:slug`.
-        let public_url = env_opt("WHALE_PUBLIC_URL")
+        let public_url = env_opt("ORCA_PUBLIC_URL")
             .map(|u| u.trim().trim_end_matches('/').to_string())
             .filter(|u| !u.is_empty());
 
@@ -237,7 +237,7 @@ impl Config {
 
     /// The `-f` format value for a download, applying the effective resolution
     /// cap. `max_height` is the resolved cap (env override or stored setting);
-    /// `None` means highest. A custom operator-set `WHALE_FORMAT` is always
+    /// `None` means highest. A custom operator-set `ORCA_FORMAT` is always
     /// passed through untouched (the cap only shapes our default selector).
     pub fn format_capped(&self, max_height: Option<i64>) -> String {
         capped_format(&self.format, self.format_user_set, max_height)
@@ -335,7 +335,7 @@ fn parse_rate(s: &str) -> Option<u64> {
     Some((value * mult) as u64)
 }
 
-/// Industry-style weak-secret screen for an operator-supplied `WHALE_TOKEN`,
+/// Industry-style weak-secret screen for an operator-supplied `ORCA_TOKEN`,
 /// modelled on password-strength guidance (NIST SP 800-63B: length first, plus a
 /// breached/common-credential blocklist). The bearer token is the *only* thing
 /// standing between the internet and a server that streams saved cookies, so a
@@ -368,8 +368,8 @@ fn token_strength(token: &str) -> Result<(), String> {
         "default",
         "admin",
         "administrator",
-        "whale",
-        "whaletoken",
+        "orca",
+        "orcatoken",
         "token",
         "bearer",
         "12345678",

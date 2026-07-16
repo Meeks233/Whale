@@ -1,4 +1,4 @@
-package com.whale.app
+package com.orca.app
 
 import android.app.Activity
 import android.app.Notification
@@ -27,15 +27,15 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * "Quick Download" share target (mirrors Seal's QuickDownloadActivity).
  *
- * Tapping Whale's "Quick Download" in another app's share sheet must NOT open
- * the full Whale UI: it forwards the shared link to the configured Whale backend
+ * Tapping Orca's "Quick Download" in another app's share sheet must NOT open
+ * the full Orca UI: it forwards the shared link to the configured Orca backend
  * IN THE BACKGROUND and reports the result as a notification, then gets out of
- * the way. Whale downloads on a remote server, so "quick download" is just a
+ * the way. Orca downloads on a remote server, so "quick download" is just a
  * `POST /api/items` to that server — no local engine, no visible activity.
  *
  * Server base + token live in the WebView's localStorage, which native code
  * can't read. MainActivity's WebView mirrors them to
- * `<dataDir>/whale_share_creds.json` (via the `save_share_creds` Tauri command)
+ * `<dataDir>/orca_share_creds.json` (via the `save_share_creds` Tauri command)
  * on launch and whenever they change; we read that here. If creds are missing
  * (app never opened/configured), we fall back to forwarding the intent into
  * MainActivity so first-run setup still works.
@@ -53,7 +53,7 @@ class ShareActivity : Activity() {
     val url = extractUrl(extractSharedText(intent))
     if (url == null) {
       Log.w(TAG, "no URL extracted from intent — finishing silently")
-      toast(applicationContext, "Whale · no link found in share")
+      toast(applicationContext, "Orca · no link found in share")
       finish()
       return
     }
@@ -64,7 +64,7 @@ class ShareActivity : Activity() {
       // Not configured yet: open the full app so the user can set token/server,
       // handing the link over the way the WebView drain path expects.
       Log.w(TAG, "no creds — forwarding into MainActivity")
-      toast(applicationContext, "Whale · open the app to set server/token")
+      toast(applicationContext, "Orca · open the app to set server/token")
       startActivity(openAppWithUrl(this, url))
       finish()
       return
@@ -78,14 +78,14 @@ class ShareActivity : Activity() {
     // Headless quick download is otherwise invisible (a background notification is
     // easy to miss). Show an immediate on-screen Toast over the sharing app so the
     // user always sees the share was received and is being sent.
-    toast(appCtx, "Whale · sending…")
+    toast(appCtx, "Orca · sending…")
     Thread { submitAndNotify(appCtx, base, token, url) }.start()
     finish()
   }
 
   private fun readCreds(): Pair<String, String>? {
     return try {
-      val f = File(dataDir, "whale_share_creds.json")
+      val f = File(dataDir, "orca_share_creds.json")
       if (!f.exists()) return null
       val o = JSONObject(f.readText())
       val base = o.optString("base").trimEnd('/')
@@ -130,7 +130,7 @@ class ShareActivity : Activity() {
   }
 
   companion object {
-    private const val TAG = "WhaleShare"
+    private const val TAG = "OrcaShare"
     private const val CHANNEL_ID = "quick_download"
     // Notification-id base for per-item progress notifications. The private API
     // slug is hashed into Android's integer notification namespace.
@@ -143,9 +143,9 @@ class ShareActivity : Activity() {
 
     private fun e2eeCredential(token: String): E2eeCredential {
       val authHash = sha256(token.toByteArray(Charsets.UTF_8))
-      val keyId = sha256("whale-e2ee-kid-v1\u0000".toByteArray() + authHash)
+      val keyId = sha256("orca-e2ee-kid-v1\u0000".toByteArray() + authHash)
         .joinToString("") { "%02x".format(it.toInt() and 0xff) }
-      val key = sha256("whale-e2ee-key-v1\u0000".toByteArray() + authHash)
+      val key = sha256("orca-e2ee-key-v1\u0000".toByteArray() + authHash)
       return E2eeCredential(keyId, SecretKeySpec(key, "AES"))
     }
 
@@ -174,10 +174,10 @@ class ShareActivity : Activity() {
     }
 
     private fun configureE2ee(conn: HttpURLConnection, credential: E2eeCredential, hasBody: Boolean) {
-      conn.setRequestProperty("X-Whale-E2EE", "1")
-      conn.setRequestProperty("X-Whale-Key-Id", credential.keyId)
+      conn.setRequestProperty("X-Orca-E2EE", "1")
+      conn.setRequestProperty("X-Orca-Key-Id", credential.keyId)
       if (hasBody) {
-        conn.setRequestProperty("X-Whale-Encrypted-Body", "1")
+        conn.setRequestProperty("X-Orca-Encrypted-Body", "1")
         conn.setRequestProperty("Content-Type", "text/plain")
       }
     }
@@ -186,7 +186,7 @@ class ShareActivity : Activity() {
       val code = conn.responseCode
       val stream = if (code in 200..299) conn.inputStream else conn.errorStream
       val body = stream?.bufferedReader()?.use { it.readText() } ?: ""
-      val plaintext = if (conn.getHeaderField("X-Whale-E2EE") == "1") {
+      val plaintext = if (conn.getHeaderField("X-Orca-E2EE") == "1") {
         open(credential, body, "$code\n$path")
       } else body
       return Pair(code, plaintext)
@@ -203,7 +203,8 @@ class ShareActivity : Activity() {
       }
 
     private fun submitAndNotify(ctx: Context, base: String, token: String, url: String) {
-      var title = "Whale"
+      var title = "Orca"
+      var siteName = "Orca"
       var body: String
       var ok = false
       var itemSlug = ""
@@ -233,6 +234,7 @@ class ShareActivity : Activity() {
             itemSlug = item?.optString("slug") ?: ""
             videoId = item?.optString("video_id") ?: ""
             title = item?.optString("title")?.takeIf { it.isNotEmpty() } ?: "Link"
+            siteName = item?.optString("site_name")?.takeIf { it.isNotEmpty() } ?: "Orca"
             duplicate = resp.optBoolean("duplicate")
             // A privacy-blurred site's real title must never land in a persistent
             // notification the user has to clear by hand — mask it with the id.
@@ -241,17 +243,17 @@ class ShareActivity : Activity() {
           }
           code == 422 || resp.optString("error") == "probe_failed" ->
             resp.optString("message").ifEmpty { "Couldn't read that link" }
-          code == 401 -> "Auth failed — open Whale and set your token"
+          code == 401 -> "Auth failed — open Orca and set your token"
           else -> "Submit failed (HTTP $code)"
         }
         conn.disconnect()
       } catch (e: Exception) {
         Log.e(TAG, "POST failed", e)
-        body = "Can't reach the Whale server"
+        body = "Can't reach the Orca server"
       }
       // Visible result over the sharing app: success/duplicate/error all surface
       // as a Toast so the quick channel is never silent.
-      toast(ctx, "Whale · $body")
+      toast(ctx, "Orca · $body")
       // One notification per item, keyed by a stable id so progress updates
       // REPLACE it in place instead of stacking (one slot per item, never two).
       val notifId = if (itemSlug.isNotEmpty()) NOTIF_BASE + (itemSlug.hashCode() and 0x0fffffff) else (System.currentTimeMillis() % 100000).toInt()
@@ -262,28 +264,29 @@ class ShareActivity : Activity() {
         // the redundant buzz. The system notification first appears once the
         // download is actually running and then updates that SAME notification
         // through to completion (see pollProgress) — silent (onlyAlertOnce).
-        pollProgress(ctx, base, token, itemSlug, notifId, title, videoId, blur)
+        pollProgress(ctx, base, token, itemSlug, notifId, siteName, title, videoId, blur)
       } else if (!ok) {
         // A real failure still needs a tappable notification (the Toast is easy to
         // miss) so the user can reopen the app and retry with the actual error.
-        postNotif(ctx, notifId, notifTitle(title, blur, videoId), body, url, ongoing = false, indeterminate = false)
+        postNotif(ctx, notifId, notifTitle(siteName, title, blur, videoId), body, url, ongoing = false, indeterminate = false)
       }
       // success + duplicate: Toast only — it's already downloaded, nothing to track.
     }
 
-    /** Notification title, masking a privacy-blurred site's real name (which would
-     *  otherwise sit in a persistent notification the user must clear by hand).
-     *  Masks with the source's own video id (tweet / youtube id) — meaningful yet
-     *  title-free — falling back to the internal item id only when it's unknown. */
-    private fun notifTitle(title: String, blur: Boolean, videoId: String): String =
-      if (blur) (if (videoId.isNotEmpty()) "Video $videoId" else "Download") else title
+    /** Keep the real site name visible. Privacy blur only replaces the video's
+     *  title with its source id (tweet / YouTube id). */
+    private fun notifTitle(siteName: String, title: String, blur: Boolean, videoId: String): String {
+      val videoName = if (blur) videoId.ifEmpty { "Download" } else title
+      return "${siteName.ifEmpty { "Orca" }} · ${videoName.ifEmpty { "Download" }}"
+    }
 
     /** Poll the server for this item's status and update its notification in
      *  place until it finishes. Silent (no new sound) thanks to onlyAlertOnce.
      *  Bounded (~10 min) so a stuck download can't spin forever; best-effort —
      *  the process may be reclaimed while backgrounded, which is fine. */
-    private fun pollProgress(ctx: Context, base: String, token: String, itemSlug: String, notifId: Int, titleIn: String, videoIdIn: String, blurIn: Boolean) {
+    private fun pollProgress(ctx: Context, base: String, token: String, itemSlug: String, notifId: Int, siteNameIn: String, titleIn: String, videoIdIn: String, blurIn: Boolean) {
       var title = titleIn
+      var siteName = siteNameIn
       var videoId = videoIdIn
       var blur = blurIn
       var tries = 0
@@ -307,9 +310,10 @@ class ShareActivity : Activity() {
           conn.disconnect()
           val item = JSONObject(txt)
           item.optString("title").takeIf { it.isNotEmpty() }?.let { title = it }
+          item.optString("site_name").takeIf { it.isNotEmpty() }?.let { siteName = it }
           item.optString("video_id").takeIf { it.isNotEmpty() }?.let { videoId = it }
           blur = item.optBoolean("blur", blur) // may flip if the site setting changed
-          val shown = notifTitle(title, blur, videoId)
+          val shown = notifTitle(siteName, title, blur, videoId)
           when (item.optString("status")) {
             "completed" -> { postNotif(ctx, notifId, shown, "Download complete ✓", null, ongoing = false, indeterminate = false); return }
             "failed" -> {

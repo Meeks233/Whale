@@ -8,14 +8,14 @@ COPY migrations ./migrations
 COPY src ./src
 COPY web ./web
 # Cache mounts persist the cargo registry + target dir across builds, so an
-# incremental rebuild only recompiles the `whale` crate instead of every
+# incremental rebuild only recompiles the `orca` crate instead of every
 # dependency (minutes -> seconds in the dev loop). The compiled binary lives in
 # the cache mount, so copy it to a normal path for the runtime stage to pick up.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
     cargo build --release --locked \
-    && cp /app/target/release/whale /app/whale
+    && cp /app/target/release/orca /app/orca
 
 # ---- runtime ----
 # Pinned by digest for reproducible builds (debian:bookworm-slim as of 2026-07).
@@ -23,9 +23,9 @@ FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bb
 ARG YTDLP_VERSION=2026.07.04
 ARG VCS_REF=unknown
 ARG IMAGE_VERSION=dev
-LABEL org.opencontainers.image.title="Whale" \
+LABEL org.opencontainers.image.title="Orca" \
       org.opencontainers.image.description="Self-hosted cloud-native yt-dlp downloader" \
-      org.opencontainers.image.source="https://github.com/Meeks233/Whale" \
+      org.opencontainers.image.source="https://github.com/Meeks233/Orca" \
       org.opencontainers.image.revision="${VCS_REF}" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.licenses="GPL-3.0-or-later" \
@@ -39,13 +39,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && printf '%s  %s\n' "$(cat /tmp/YTDLP_SHA256)" /usr/local/bin/yt-dlp | sha256sum -c - \
     && chmod +x /usr/local/bin/yt-dlp \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/YTDLP_SHA256
-COPY --from=builder /app/whale /usr/local/bin/whale
-RUN useradd -m -u 10001 whale && mkdir -p /data /downloads && chown whale /data /downloads
-USER whale
-ENV WHALE_DATA_DIR=/data WHALE_DOWNLOAD_DIR=/downloads WHALE_BIND=0.0.0.0:8080
+COPY --from=builder /app/orca /usr/local/bin/orca
+RUN useradd -m -u 10001 orca && mkdir -p /data /downloads && chown orca /data /downloads
+USER orca
+ENV ORCA_DATA_DIR=/data ORCA_DOWNLOAD_DIR=/downloads ORCA_BIND=0.0.0.0:8080
 VOLUME ["/data", "/downloads"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s \
   CMD curl -fsS http://localhost:8080/api/health || exit 1
-ENTRYPOINT ["whale"]
+ENTRYPOINT ["orca"]
 CMD ["serve"]

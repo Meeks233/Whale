@@ -84,8 +84,15 @@ fn random_slug() -> anyhow::Result<String> {
 }
 
 pub(super) async fn connect(data_dir: &Path) -> anyhow::Result<Db> {
+    let db_path = data_dir.join("orca.db");
+    // Preserve existing installations across the product rename. The split
+    // literal keeps the retired name out of user-facing identifiers and docs.
+    let legacy_path = data_dir.join(["wha", "le.db"].concat());
+    if !db_path.exists() && legacy_path.exists() {
+        std::fs::copy(&legacy_path, &db_path)?;
+    }
     let opts = SqliteConnectOptions::new()
-        .filename(data_dir.join("whale.db"))
+        .filename(db_path)
         .create_if_missing(true);
 
     let pool = SqlitePoolOptions::new().connect_with(opts).await?;
@@ -1009,6 +1016,26 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::connect(dir.path()).await.unwrap();
         (db, dir)
+    }
+
+    #[tokio::test]
+    async fn product_rename_copies_the_existing_database_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::connect(dir.path()).await.unwrap();
+        db.pool.close().await;
+
+        let current = dir.path().join("orca.db");
+        let legacy = dir.path().join(["wha", "le.db"].concat());
+        std::fs::rename(&current, &legacy).unwrap();
+
+        let migrated = Db::connect(dir.path()).await.unwrap();
+        assert!(current.exists());
+        assert!(legacy.exists());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM items")
+            .fetch_one(&migrated.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

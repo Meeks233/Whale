@@ -160,7 +160,7 @@ impl Queue {
 }
 
 /// The effective max-height cap for a download: the env override if the operator
-/// set `WHALE_MAX_HEIGHT` (always wins), else the per-site cap from the website
+/// set `ORCA_MAX_HEIGHT` (always wins), else the per-site cap from the website
 /// registry for this URL, else the UI-stored global `max_height`, else `None`
 /// (highest).
 async fn resolve_max_height(
@@ -245,7 +245,7 @@ async fn run_job(
     let site_key = crate::websites::detect(&sites, &item.webpage_url).map(|w| w.key.clone());
 
     // Resolution cap: a variant pins exactly the requested height; the primary
-    // uses the effective cap (env `WHALE_MAX_HEIGHT`, else per-site, else global).
+    // uses the effective cap (env `ORCA_MAX_HEIGHT`, else per-site, else global).
     let cap = match variant {
         Some(h) => Some(h),
         None => resolve_max_height(cfg, db, &sites, &item.webpage_url).await,
@@ -405,7 +405,7 @@ async fn run_job(
             let msg = crate::ytdlp::explain_error(&item.webpage_url, &raw);
             // Structured error event: one greppable record per failure carrying
             // the fields you need to debug it (job id, source, url, extractor,
-            // the raw yt-dlp error tail) — filter with `level=error target=whale::queue`
+            // the raw yt-dlp error tail) — filter with `level=error target=orca::queue`
             // instead of scraping interpolated strings.
             tracing::error!(
                 job_id = id,
@@ -422,17 +422,54 @@ async fn run_job(
             // fine) — just clear the transient running state. A primary failure
             // marks the item Failed as before.
             if variant.is_none() {
-                if let Err(e) = db.set_status(id, Status::Failed, Some(&msg)).await {
-                    tracing::error!(job_id = id, error = %e, "set_status(failed) failed");
+                let existing = item.filepath.as_deref().filter(|p| !p.is_empty());
+                let has_existing =
+                    existing.and_then(|p| std::fs::metadata(p).ok().map(|m| (p, m.len() as i64)));
+                if let Some((path, size)) = has_existing {
+                    // A forced refresh may fail while its previous completed file
+                    // is still intact. Restore that known-good media instead of
+                    // stranding the row in Failed with an unusable local file.
+                    match db.set_completed(id, path, size, item.height).await {
+                        Ok(()) => {
+                            let _ = events.send(ProgressEvent {
+                                id,
+                                status: Status::Completed,
+                                percent: Some(100.0),
+                                speed: None,
+                                eta: None,
+                                phase: None,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(job_id = id, error = %e, "restore completed file failed");
+                            if let Err(status_error) =
+                                db.set_status(id, Status::Failed, Some(&msg)).await
+                            {
+                                tracing::error!(job_id = id, error = %status_error, "set_status(failed) failed");
+                            }
+                            let _ = events.send(ProgressEvent {
+                                id,
+                                status: Status::Failed,
+                                percent: None,
+                                speed: None,
+                                eta: None,
+                                phase: None,
+                            });
+                        }
+                    }
+                } else {
+                    if let Err(e) = db.set_status(id, Status::Failed, Some(&msg)).await {
+                        tracing::error!(job_id = id, error = %e, "set_status(failed) failed");
+                    }
+                    let _ = events.send(ProgressEvent {
+                        id,
+                        status: Status::Failed,
+                        percent: None,
+                        speed: None,
+                        eta: None,
+                        phase: None,
+                    });
                 }
-                let _ = events.send(ProgressEvent {
-                    id,
-                    status: Status::Failed,
-                    percent: None,
-                    speed: None,
-                    eta: None,
-                    phase: None,
-                });
             } else {
                 let _ = events.send(ProgressEvent {
                     id,

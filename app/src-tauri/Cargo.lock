@@ -4312,7 +4312,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "whale-app"
+name = "orca-app"
 version = "0.1.0"
 dependencies = [
  "serde",

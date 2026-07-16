@@ -4,8 +4,8 @@
 
 The production Compose file publishes loopback only. Use an HTTPS reverse proxy
 for remote access and forward normal HTTP, Range, and SSE traffic without response
-buffering. Do not expose Whale directly to the public internet over HTTP. Set
-`WHALE_PUBLIC_URL` to the canonical HTTPS origin.
+buffering. Do not expose Orca directly to the public internet over HTTP. Set
+`ORCA_PUBLIC_URL` to the canonical HTTPS origin.
 
 For deliberate LAN exposure, change the mapping to `8080:8080` and use a strong
 token. Native clients allow plaintext HTTP only for private literals, localhost,

@@ -1,8 +1,8 @@
 {
-  "name": "whale-frontend",
+  "name": "orca-frontend",
   "version": "0.1.0",
   "private": true,
-  "description": "TypeScript sources for the Whale web UI. Built (bundled + minified) into ../web, which the Rust backend embeds and the Tauri app ships verbatim.",
+  "description": "TypeScript sources for the Orca web UI. Built (bundled + minified) into ../web, which the Rust backend embeds and the Tauri app ships verbatim.",
   "type": "module",
   "engines": {
     "node": ">=20 <23"

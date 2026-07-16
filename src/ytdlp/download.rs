@@ -10,7 +10,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
-const PREFIX: &str = "__WHALE__";
+const PREFIX: &str = "__ORCA__";
 
 #[derive(Debug)]
 pub struct DownloadOutcome {
@@ -175,7 +175,7 @@ fn error_tail(lines: &[String]) -> String {
 }
 
 /// Parse one stdout line into a `ProgressEvent`, or `None` if it is not a
-/// `__WHALE__` progress line.
+/// `__ORCA__` progress line.
 pub(crate) fn parse_progress_line(id: i64, line: &str) -> Option<ProgressEvent> {
     let rest = line.strip_prefix(PREFIX)?;
     let mut parts = rest.split('|');
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn parses_full_progress_line() {
-        let ev = parse_progress_line(7, "__WHALE__ 63.4%|4.02MiB/s|00:19|vp9|none").unwrap();
+        let ev = parse_progress_line(7, "__ORCA__ 63.4%|4.02MiB/s|00:19|vp9|none").unwrap();
         assert_eq!(ev.id, 7);
         assert_eq!(ev.status, Status::Running);
         assert!((ev.percent.unwrap() - 63.4).abs() < 0.01);
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn maps_na_and_unknown_to_none() {
-        let ev = parse_progress_line(1, "__WHALE__100.0%|N/A|Unknown|none|opus").unwrap();
+        let ev = parse_progress_line(1, "__ORCA__100.0%|N/A|Unknown|none|opus").unwrap();
         assert!((ev.percent.unwrap() - 100.0).abs() < 0.01);
         assert_eq!(ev.speed, None);
         assert_eq!(ev.eta, None);
@@ -248,12 +248,12 @@ mod tests {
     #[test]
     fn progressive_file_has_no_phase() {
         // Single file carrying both codecs → no phase label (one continuous bar).
-        let ev = parse_progress_line(3, "__WHALE__ 10.0%|1MiB/s|00:05|avc1|mp4a").unwrap();
+        let ev = parse_progress_line(3, "__ORCA__ 10.0%|1MiB/s|00:05|avc1|mp4a").unwrap();
         assert_eq!(ev.phase, None);
     }
 
     #[test]
-    fn non_whale_line_is_none() {
+    fn non_orca_line_is_none() {
         assert!(parse_progress_line(1, "[download] 63.4% of 10MiB").is_none());
     }
 
@@ -344,7 +344,7 @@ mod tests {
     async fn cancel_kills_a_running_download() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("whale_cancel_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("orca_cancel_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let script: PathBuf = dir.join("fake-ytdlp.sh");
         // Ignores every yt-dlp arg it's handed and just blocks, standing in for a

@@ -2,7 +2,7 @@
 //!
 //! A client (Android app / installed PWA) generates its own passphrase and
 //! POSTs it to `/api/clients/register` — no owner token needed for that one
-//! route. With `WHALE_CLIENT_TOFU` explicitly enabled the passphrase is trusted
+//! route. With `ORCA_CLIENT_TOFU` explicitly enabled the passphrase is trusted
 //! immediately; otherwise it lands as *pending* until the owner approves it via
 //! `POST /api/clients/:id/trust` (token-required). The passphrase then works as
 //! a bearer credential only for `POST /api/items`.

@@ -1,16 +1,16 @@
 [package]
-name = "whale-app"
+name = "orca-app"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/Meeks233/Whale"
-description = "Whale Android/desktop shell — reuses the web UI"
-default-run = "whale-app"
+repository = "https://github.com/Meeks233/Orca"
+description = "Orca Android/desktop shell — reuses the web UI"
+default-run = "orca-app"
 
 # The mobile entry point is a cdylib/staticlib; desktop uses the bin below.
 [lib]
-name = "whale_app_lib"
+name = "orca_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -36,7 +36,7 @@ tauri-plugin-mobile-sharetarget = "2"
 
 # Strip the debug library. `cargo tauri android build --debug` compiles the
 # cdylib with the `dev` profile, which bakes ~100MB of DWARF debuginfo into
-# libwhale_app_lib.so — that alone was ~90% of the debug APK. AGP does NOT strip
+# liborca_app_lib.so — that alone was ~90% of the debug APK. AGP does NOT strip
 # native libs for debug variants, so we strip at the Rust link step instead. The
 # test APK is for functional testing, not native debugging, so full strip is fine
 # (drops the .so from ~112MB to ~20MB). Release already strips via ProGuard/AGP.

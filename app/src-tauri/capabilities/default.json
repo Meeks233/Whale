@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the Whale app window.",
+  "description": "Default capability for the Orca app window.",
   "windows": ["main"],
   "permissions": [
     "core:default",

@@ -1,7 +1,7 @@
 //! Per-platform cookie store: Netscape `cookies.txt` files under
 //! `<data_dir>/cookies/`, auto-applied by URL. Mirrors Seal's per-site login,
 //! adapted to a server: the browser can't read cross-origin login cookies, so
-//! the user pastes/exports a `cookies.txt` once and Whale reuses it per platform.
+//! the user pastes/exports a `cookies.txt` once and Orca reuses it per platform.
 //!
 //! On-disk layout (one file per platform `key`):
 //!   `<key>.txt`      → cookies present and **enabled** (default)
@@ -152,7 +152,7 @@ fn mtime_secs(m: &std::fs::Metadata) -> i64 {
 }
 
 /// Resolve the cookie file for a download of `url`: a platform-specific enabled
-/// cookie wins; otherwise fall back to the global `WHALE_COOKIES` file (if set).
+/// cookie wins; otherwise fall back to the global `ORCA_COOKIES` file (if set).
 pub fn resolve(store: &CookieStore, global: Option<&Path>, url: &str) -> Option<PathBuf> {
     let key = platform::from_url(url).map(|p| p.key);
     resolve_keyed(store, global, key)
@@ -184,7 +184,7 @@ fn bool_flag(b: bool) -> &'static str {
 }
 
 /// Cookie names (case-insensitive) that actually gate a logged-in session across
-/// the platforms Whale targets. The expiry warning keys off these: a jar's
+/// the platforms Orca targets. The expiry warning keys off these: a jar's
 /// throwaway CSRF/tracking cookies are short-lived by design and must NOT make a
 /// still-valid login read as "expired" — the false positive users hit on X, whose
 /// long-lived `auth_token` outlives its `ct0` / `guest_id` companions.

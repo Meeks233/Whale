@@ -1,4 +1,4 @@
-//! Whale — self-hosted yt-dlp cloud downloader. CLI dispatch: `serve` | `import`.
+//! Orca — self-hosted yt-dlp cloud downloader. CLI dispatch: `serve` | `import`.
 
 // The whole crate handles untrusted input (URLs, response headers, filenames,
 // file contents); there is no reason to reach for `unsafe`. Forbid it outright
@@ -28,7 +28,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "whale", version, about = "Self-hosted yt-dlp cloud downloader")]
+#[command(name = "orca", version, about = "Self-hosted yt-dlp cloud downloader")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -52,7 +52,7 @@ enum Command {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("WHALE_LOG")
+            tracing_subscriber::EnvFilter::try_from_env("ORCA_LOG")
                 .or_else(|_| tracing_subscriber::EnvFilter::try_from_default_env())
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
@@ -77,10 +77,10 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
 
     if cfg.token_generated {
         tracing::warn!(
-            "WHALE_TOKEN not set — generated a random access token: {}",
+            "ORCA_TOKEN not set — generated a random access token: {}",
             cfg.token
         );
-        tracing::warn!("Enter this token in the web UI to unlock it. Set WHALE_TOKEN in your environment to keep it stable across restarts.");
+        tracing::warn!("Enter this token in the web UI to unlock it. Set ORCA_TOKEN in your environment to keep it stable across restarts.");
     }
 
     let ytdlp_version = ytdlp::version(&cfg).await?;
@@ -150,7 +150,7 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
     let bind = cfg.bind;
     let router = api::router(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!("whale listening on {bind}");
+    tracing::info!("orca listening on {bind}");
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

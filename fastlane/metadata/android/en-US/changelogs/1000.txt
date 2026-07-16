@@ -1,0 +1,3 @@
+Initial Orca release.
+
+Encrypted self-hosted server access, Android share target, progress notifications, media playback, searchable history, and per-site settings.

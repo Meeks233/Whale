@@ -1,4 +1,4 @@
-package com.whale.app
+package com.orca.app
 
 import android.Manifest
 import android.app.Activity
@@ -57,7 +57,7 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
       return
     }
 
-    val prefs = activity.getSharedPreferences("whale_permissions", Context.MODE_PRIVATE)
+    val prefs = activity.getSharedPreferences("orca_permissions", Context.MODE_PRIVATE)
     val requestedBefore = prefs.getBoolean("notifications_requested", false)
     if (requestedBefore && !activity.shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
       openNotificationSettings()

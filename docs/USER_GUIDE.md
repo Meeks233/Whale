@@ -13,7 +13,7 @@ available actions. Playlist and multi-video entries are folded into groups.
 ## Playback and Files
 
 Completed local items play through a range-capable authenticated file endpoint.
-Stream-only or missing-local-file items use Whale's online proxy, which resolves
+Stream-only or missing-local-file items use Orca's online proxy, which resolves
 the upstream URL with the applicable cookie jar and proxies bytes from the server.
 The save action forces a browser download.
 

@@ -25,8 +25,8 @@ async function sha256(data: Bytes): Promise<Bytes> {
 
 async function derive(token: string): Promise<{ keyId: string; key: CryptoKey }> {
   const authHash = await sha256(encoder.encode(token));
-  const keyIdDomain = encoder.encode('whale-e2ee-kid-v1\0');
-  const keyDomain = encoder.encode('whale-e2ee-key-v1\0');
+  const keyIdDomain = encoder.encode('orca-e2ee-kid-v1\0');
+  const keyDomain = encoder.encode('orca-e2ee-key-v1\0');
   const keyIdInput = new Uint8Array(keyIdDomain.length + authHash.length);
   keyIdInput.set(keyIdDomain, 0);
   keyIdInput.set(authHash, keyIdDomain.length);
@@ -67,20 +67,20 @@ export async function encryptedFetch(url: string, path: string, token: string, o
   const { keyId, key } = await derive(token);
   const method = (opts.method || 'GET').toUpperCase();
   const headers = new Headers(opts.headers);
-  headers.set('X-Whale-E2EE', '1');
-  headers.set('X-Whale-Key-Id', keyId);
+  headers.set('X-Orca-E2EE', '1');
+  headers.set('X-Orca-Key-Id', keyId);
   const body = opts.body == null ? undefined : await seal(key, encoder.encode(String(opts.body)), `${method}\n${path}`);
   if (body !== undefined) {
-    headers.set('X-Whale-Encrypted-Body', '1');
+    headers.set('X-Orca-Encrypted-Body', '1');
     headers.set('Content-Type', 'text/plain');
   }
   const encrypted = await fetch(url, { ...opts, headers, body });
-  if (encrypted.status === 401 || encrypted.headers.get('X-Whale-E2EE') !== '1') return encrypted;
+  if (encrypted.status === 401 || encrypted.headers.get('X-Orca-E2EE') !== '1') return encrypted;
   const plaintext = await open(key, await encrypted.text(), `${encrypted.status}\n${path}`);
   const responseHeaders = new Headers(encrypted.headers);
   responseHeaders.delete('Content-Length');
   responseHeaders.delete('Content-Encoding');
-  responseHeaders.delete('X-Whale-E2EE');
+  responseHeaders.delete('X-Orca-E2EE');
   responseHeaders.set('Content-Type', 'application/json');
   return new Response(plaintext, {
     status: encrypted.status,
