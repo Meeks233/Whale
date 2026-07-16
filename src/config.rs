@@ -280,10 +280,10 @@ impl Config {
 fn capped_format(base: &str, user_set: bool, max_height: Option<i64>) -> String {
     match max_height {
         Some(h) if !user_set && h > 0 => {
-            // Best video+audio at/under the cap, then a capped progressive file,
-            // then fall back to the best available so a source whose smallest
-            // rendition exceeds the cap still downloads.
-            format!("bv*[height<={h}]+ba/b[height<={h}]/bv*+ba/b")
+            // Best video+audio at/under the cap, then a capped progressive file.
+            // If the source has no rendition under the cap, choose its smallest
+            // video instead of silently jumping to the unrestricted best quality.
+            format!("bv*[height<={h}]+ba/b[height<={h}]/wv*+ba/w")
         }
         _ => base.to_string(),
     }
@@ -432,7 +432,7 @@ mod tests {
         // Default format + a cap → height-limited selector with a fallback.
         assert_eq!(
             capped_format("bv*+ba/b", false, Some(1080)),
-            "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
+            "bv*[height<=1080]+ba/b[height<=1080]/wv*+ba/w"
         );
         // No cap (None or 0) → untouched default.
         assert_eq!(capped_format("bv*+ba/b", false, None), "bv*+ba/b");

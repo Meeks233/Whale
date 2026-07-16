@@ -13,10 +13,12 @@ use tokio::sync::{broadcast, mpsc, oneshot, Semaphore};
 /// One queued download: an item, and optionally a specific resolution `height`
 /// to fetch as an extra file (a "variant"). `height: None` is the item's primary
 /// download.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct Job {
     pub id: i64,
     pub height: Option<i64>,
+    /// Existing variants to remove only after this replacement downloads.
+    pub remove_after: Vec<i64>,
 }
 
 /// In-flight downloads → their cancel signal, keyed by (item id, variant height).
@@ -94,18 +96,25 @@ impl Queue {
             .send(Job {
                 id: item_id,
                 height: None,
+                remove_after: Vec::new(),
             })
             .await;
     }
 
-    /// Enqueue a specific-resolution variant download for an item (an extra file
-    /// at `height`, kept alongside the primary).
-    pub async fn enqueue_resolution(&self, item_id: i64, height: i64) {
+    /// Enqueue a variant and remove `remove_after` only after it lands. This keeps
+    /// the current primary playable throughout a resolution replacement.
+    pub async fn enqueue_resolution_replacing(
+        &self,
+        item_id: i64,
+        height: i64,
+        remove_after: Vec<i64>,
+    ) {
         let _ = self
             .tx
             .send(Job {
                 id: item_id,
                 height: Some(height),
+                remove_after,
             })
             .await;
     }
@@ -363,6 +372,17 @@ async fn run_job(
                 let _ = db
                     .upsert_resolution(id, h, &out.filepath, out.filesize)
                     .await;
+                // A replacement is now safely playable. Only now remove the old
+                // variants that the user deselected; if the download had failed,
+                // this block would never run and the old primary would survive.
+                for old_height in &job.remove_after {
+                    if let Ok(Some(path)) = db.delete_resolution(id, *old_height).await {
+                        if let Some(path) = crate::safepath::confined_file(&cfg.download_dir, &path)
+                        {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
+                }
                 // A newly-fetched variant may now be the highest version the item
                 // holds — repoint the primary so the card shows the best one (Req 3).
                 let _ = db.repoint_primary(id).await;

@@ -432,6 +432,14 @@ pub struct ResolutionsRequest {
     pub heights: Vec<i64>,
 }
 
+fn defer_resolution_removals(
+    have: &std::collections::BTreeSet<i64>,
+    desired: &std::collections::BTreeSet<i64>,
+    to_add: &[i64],
+) -> bool {
+    !to_add.is_empty() && have.is_disjoint(desired)
+}
+
 /// PUT /api/items/:slug/resolutions — reconcile the item's downloaded resolutions
 /// to the desired set: queue downloads for newly-selected heights, delete files
 /// for deselected ones. Rejects an empty set (a video must keep ≥1 version;
@@ -466,6 +474,15 @@ pub async fn set_resolutions(
 
     let to_add: Vec<i64> = desired.difference(&have).copied().collect();
     let to_remove: Vec<i64> = have.difference(&desired).copied().collect();
+    // Replacing every downloaded variant would temporarily clear `filepath` and
+    // force the client onto fragile upstream streaming. Keep the old files until
+    // a requested replacement succeeds; each new job carries the same cleanup
+    // list, so whichever lands first performs the atomic handoff.
+    let deferred_removals = if defer_resolution_removals(&have, &desired, &to_add) {
+        to_remove.clone()
+    } else {
+        Vec::new()
+    };
 
     // Queue downloads for newly-selected resolutions highest-first: `to_add` comes
     // from a BTreeSet difference (ascending), so `.rev()` enqueues high→low. The
@@ -473,15 +490,15 @@ pub async fn set_resolutions(
     // concurrency, finishes) first; run_job's repoint_primary then serves it the
     // moment it lands, without waiting for the lower variants (Req 2/3).
     for h in to_add.iter().rev() {
-        state.queue.enqueue_resolution(id, *h).await;
+        state
+            .queue
+            .enqueue_resolution_replacing(id, *h, deferred_removals.clone())
+            .await;
     }
 
-    // Delete deselected resolutions' files immediately — the user's intent when
-    // switching (e.g. 4K→1080p) is that the old version is freed right away, not
-    // retained until the replacement download lands. If this empties the item of
-    // every local file, the card falls back to the cloud/stream state until the
-    // queued replacement completes and repoint_primary re-pins the primary.
-    for h in &to_remove {
+    // Remove deselected files immediately when another selected local version is
+    // already available. A full replacement defers this cleanup to the jobs above.
+    for h in to_remove.iter().filter(|h| !deferred_removals.contains(h)) {
         state.queue.cancel_variant(id, *h);
         if let Some(path) = state.db.delete_resolution(id, *h).await? {
             if let Some(p) = crate::safepath::confined_file(&state.cfg.download_dir, &path) {
@@ -503,6 +520,23 @@ pub async fn set_resolutions(
 
     let downloaded: Vec<i64> = remaining.into_iter().map(|r| r.height).collect();
     Ok(Json(json!({ "downloaded": downloaded, "queued": to_add })).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::defer_resolution_removals;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn resolution_replacement_keeps_a_playable_primary_until_new_file_lands() {
+        let have = BTreeSet::from([1920]);
+        let desired = BTreeSet::from([568]);
+        assert!(defer_resolution_removals(&have, &desired, &[568]));
+
+        let have = BTreeSet::from([1920, 720]);
+        let desired = BTreeSet::from([720, 568]);
+        assert!(!defer_resolution_removals(&have, &desired, &[568]));
+    }
 }
 
 /// GET /api/settings — runtime-adjustable settings. `max_height` is the current
