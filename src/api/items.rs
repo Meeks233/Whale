@@ -564,11 +564,39 @@ mod tests {
     }
 }
 
+/// The effective global container: env-pinned value wins, else the stored
+/// setting, else the built-in default carried on Config.
+pub(super) async fn global_container(state: &AppState) -> crate::config::Container {
+    if state.cfg.container_user_set {
+        return state.cfg.container;
+    }
+    match state.db.get_setting("container").await {
+        Ok(Some(v)) => crate::config::Container::parse(&v).unwrap_or(state.cfg.container),
+        _ => state.cfg.container,
+    }
+}
+
+/// The effective global subtitle toggle: env-pinned value wins, else the stored
+/// setting, else the Config default.
+pub(super) async fn global_subs(state: &AppState) -> bool {
+    if state.cfg.subs_user_set {
+        return state.cfg.subs;
+    }
+    match state.db.get_setting("subs").await {
+        Ok(Some(v)) => v == "1",
+        _ => state.cfg.subs,
+    }
+}
+
 /// GET /api/settings — runtime-adjustable settings. `max_height` is the current
 /// effective cap (`null` = highest); `max_height_locked` is true when it's
 /// pinned by the `ORCA_MAX_HEIGHT` env var and can't be changed from the UI.
+/// `container` / `subs` follow the same shape, pinned by `ORCA_CONTAINER` /
+/// `ORCA_SUBS` respectively.
 pub async fn get_settings(State(state): State<AppState>) -> AppResult<Response> {
     let locked = state.cfg.max_height.is_some();
+    let container = global_container(&state).await;
+    let subs = global_subs(&state).await;
     // The stored `max_height` value can be the sentinel "none" — the no-download
     // ("None" resolution) default, where a submitted URL is kept as a stream-only
     // record and nothing is fetched. An env-pinned cap can't be "none".
@@ -589,6 +617,11 @@ pub async fn get_settings(State(state): State<AppState>) -> AppResult<Response> 
         "max_height": max_height,
         "max_height_locked": locked,
         "no_download": no_download,
+        "container": container.ext(),
+        "container_locked": state.cfg.container_user_set,
+        "containers": crate::config::CONTAINERS.iter().map(|c| c.ext()).collect::<Vec<_>>(),
+        "subs": subs,
+        "subs_locked": state.cfg.subs_user_set,
     }))
     .into_response())
 }
@@ -602,33 +635,73 @@ pub struct SettingsRequest {
     /// as stream-only records and nothing is downloaded. Overrides `max_height`.
     #[serde(default)]
     pub no_download: Option<bool>,
+    /// New global merge container (`"mkv"`, `"mp4"`, …). Absent = leave as-is.
+    #[serde(default)]
+    pub container: Option<String>,
+    /// New global subtitle toggle. Absent = leave as-is.
+    #[serde(default)]
+    pub subs: Option<bool>,
 }
 
-/// PUT /api/settings — update runtime settings. Rejected while a setting is
-/// env-pinned so a UI change can't silently contradict the operator's env var.
+/// PUT /api/settings — update runtime settings. This is a *partial patch*: a
+/// field absent from the body is left untouched, so saving one control can never
+/// clobber another. Each field is rejected individually while env-pinned, so a
+/// UI change can't silently contradict the operator's env var.
 pub async fn put_settings(
     State(state): State<AppState>,
     Json(req): Json<SettingsRequest>,
 ) -> AppResult<Response> {
-    if state.cfg.max_height.is_some() {
-        return Err(AppError::BadRequest(
-            "max_height is pinned by the ORCA_MAX_HEIGHT environment variable".into(),
-        ));
-    }
-    // "None" (no-download) wins when set; otherwise a missing / 0 / negative value
-    // is "highest" (clear the setting), and a positive value is the pixel cap.
-    let stored = if req.no_download.unwrap_or(false) {
-        Some("none".to_string())
-    } else {
-        match req.max_height {
-            Some(h) if h > 0 => Some(h.to_string()),
-            _ => None,
+    // A body carrying neither key isn't touching the cap at all — only guard and
+    // write when it actually is.
+    if req.max_height.is_some() || req.no_download.is_some() {
+        if state.cfg.max_height.is_some() {
+            return Err(AppError::BadRequest(
+                "max_height is pinned by the ORCA_MAX_HEIGHT environment variable".into(),
+            ));
         }
-    };
-    state
-        .db
-        .set_setting("max_height", stored.as_deref())
-        .await?;
+        // "None" (no-download) wins when set; otherwise a missing / 0 / negative value
+        // is "highest" (clear the setting), and a positive value is the pixel cap.
+        let stored = if req.no_download.unwrap_or(false) {
+            Some("none".to_string())
+        } else {
+            match req.max_height {
+                Some(h) if h > 0 => Some(h.to_string()),
+                _ => None,
+            }
+        };
+        state
+            .db
+            .set_setting("max_height", stored.as_deref())
+            .await?;
+    }
+
+    if let Some(raw) = req.container.as_deref() {
+        if state.cfg.container_user_set {
+            return Err(AppError::BadRequest(
+                "container is pinned by the ORCA_CONTAINER environment variable".into(),
+            ));
+        }
+        let c = crate::config::Container::parse(raw).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "container '{raw}' is invalid; valid options: {}",
+                crate::config::Container::valid_list()
+            ))
+        })?;
+        state.db.set_setting("container", Some(c.ext())).await?;
+    }
+
+    if let Some(subs) = req.subs {
+        if state.cfg.subs_user_set {
+            return Err(AppError::BadRequest(
+                "subtitles are pinned by the ORCA_SUBS environment variable".into(),
+            ));
+        }
+        state
+            .db
+            .set_setting("subs", Some(if subs { "1" } else { "0" }))
+            .await?;
+    }
+
     get_settings(State(state)).await
 }
 

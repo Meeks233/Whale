@@ -4,18 +4,55 @@ use anyhow::{anyhow, Context};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+/// A merge container yt-dlp can mux into (`--merge-output-format`). Mirrors
+/// yt-dlp's accepted set; `Mkv` is the default because it holds every codec
+/// combination and any number of subtitle tracks without re-encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Container {
     Mkv,
     Mp4,
+    Webm,
+    Mov,
+    Avi,
+    Flv,
 }
+
+/// Every container the UI offers, in menu order.
+pub const CONTAINERS: &[Container] = &[
+    Container::Mkv,
+    Container::Mp4,
+    Container::Webm,
+    Container::Mov,
+    Container::Avi,
+    Container::Flv,
+];
 
 impl Container {
     pub fn ext(&self) -> &'static str {
         match self {
             Container::Mkv => "mkv",
             Container::Mp4 => "mp4",
+            Container::Webm => "webm",
+            Container::Mov => "mov",
+            Container::Avi => "avi",
+            Container::Flv => "flv",
         }
+    }
+
+    /// Parse a stored/env container name, case-insensitively. `None` for anything
+    /// outside the known set.
+    pub fn parse(s: &str) -> Option<Container> {
+        let s = s.trim().to_ascii_lowercase();
+        CONTAINERS.iter().copied().find(|c| c.ext() == s)
+    }
+
+    /// Comma-separated list of valid names, for error messages.
+    pub fn valid_list() -> String {
+        CONTAINERS
+            .iter()
+            .map(|c| c.ext())
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 }
 
@@ -50,6 +87,10 @@ pub struct Config {
     /// `None` disables rate limiting.
     pub limit_rate: Option<String>,
     pub container: Container,
+    /// True when `ORCA_CONTAINER` was set explicitly by the operator. It then
+    /// overrides the stored global setting and every per-site override, and the
+    /// UI shows the picker as locked.
+    pub container_user_set: bool,
     pub output_template: String,
     pub format: String,
     /// True when `ORCA_FORMAT` was set explicitly by the operator. The
@@ -62,6 +103,9 @@ pub struct Config {
     /// setting, defaulting to highest.
     pub max_height: Option<i64>,
     pub subs: bool,
+    /// True when `ORCA_SUBS` was set explicitly by the operator — same lock
+    /// semantics as `container_user_set`.
+    pub subs_user_set: bool,
     pub auto_subs: bool,
     pub sub_langs: String,
     pub embed_thumbnail: bool,
@@ -158,18 +202,16 @@ impl Config {
             },
         };
 
-        let container = match env_or("ORCA_CONTAINER", "mkv")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "mkv" => Container::Mkv,
-            "mp4" => Container::Mp4,
-            other => {
-                return Err(anyhow!(
-                    "ORCA_CONTAINER '{other}' is invalid; valid options: mkv, mp4"
-                ))
-            }
-        };
+        // An explicitly-passed ORCA_CONTAINER is authoritative and locks the
+        // global/per-site pickers, mirroring how ORCA_MAX_HEIGHT behaves.
+        let container_user_set = env_opt("ORCA_CONTAINER").is_some();
+        let raw_container = env_or("ORCA_CONTAINER", "mkv");
+        let container = Container::parse(&raw_container).ok_or_else(|| {
+            anyhow!(
+                "ORCA_CONTAINER '{raw_container}' is invalid; valid options: {}",
+                Container::valid_list()
+            )
+        })?;
 
         let output_template = env_or(
             "ORCA_OUTPUT_TEMPLATE",
@@ -188,6 +230,7 @@ impl Config {
                 )?),
             },
         };
+        let subs_user_set = env_opt("ORCA_SUBS").is_some();
         let subs = env_bool("ORCA_SUBS", true);
         let auto_subs = env_bool("ORCA_AUTO_SUBS", false);
         let sub_langs = env_or("ORCA_SUB_LANGS", "all,-live_chat");
@@ -216,11 +259,13 @@ impl Config {
             concurrent_fragments,
             limit_rate,
             container,
+            container_user_set,
             output_template,
             format,
             format_user_set,
             max_height,
             subs,
+            subs_user_set,
             auto_subs,
             sub_langs,
             embed_thumbnail,

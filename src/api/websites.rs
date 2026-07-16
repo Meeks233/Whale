@@ -31,6 +31,13 @@ pub struct WebsiteBody {
     pub enabled: Option<bool>,
     /// Per-site resolution cap; `0`/negative clears it (follow global).
     pub max_height: Option<i64>,
+    /// Per-site merge container; an empty string clears it (follow global).
+    pub container: Option<String>,
+    /// Per-site subtitle capture; `null` is indistinguishable from "absent" in
+    /// JSON, so clearing back to "follow global" uses `subs_global: true`.
+    pub subs: Option<bool>,
+    #[serde(default)]
+    pub subs_global: bool,
     pub no_download: Option<bool>,
     pub blur: Option<bool>,
     pub sort: Option<i64>,
@@ -52,6 +59,8 @@ pub async fn upsert(
         login_url: String::new(),
         enabled: true,
         max_height: None,
+        container: None,
+        subs: None,
         no_download: false,
         blur: false,
         sort: 999,
@@ -74,6 +83,28 @@ pub async fn upsert(
             Some(h) if h > 0 => Some(h),
             Some(_) => None, // 0/negative explicitly clears the per-site cap
             None => base.max_height,
+        },
+        container: match body.container.as_deref().map(str::trim) {
+            // Empty string explicitly clears the per-site container.
+            Some("") => None,
+            Some(c) => Some(
+                crate::config::Container::parse(c)
+                    .ok_or_else(|| {
+                        AppError::BadRequest(format!(
+                            "container '{c}' is invalid; valid options: {}",
+                            crate::config::Container::valid_list()
+                        ))
+                    })?
+                    .ext()
+                    .to_string(),
+            ),
+            None => base.container,
+        },
+        subs: if body.subs_global {
+            None // explicitly back to "follow global"
+        } else {
+            // Absent means "leave as-is"; present means pin it on/off.
+            body.subs.or(base.subs)
         },
         no_download: body.no_download.unwrap_or(base.no_download),
         blur: body.blur.unwrap_or(base.blur),

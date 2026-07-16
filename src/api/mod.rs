@@ -7,6 +7,7 @@ mod cookies;
 mod events;
 mod items;
 mod media;
+mod subs;
 mod websites;
 
 use crate::archive::Archive;
@@ -42,6 +43,11 @@ pub fn router(state: AppState) -> Router {
             get(items::resolutions).put(items::set_resolutions),
         )
         .route("/api/items/:slug/public", post(items::set_public))
+        // The subtitle *listing* is ordinary JSON the UI fetches through the
+        // E2EE-aware client, so it authenticates like every other read route.
+        // Serving a track itself can't (a <track> sends no headers) — that route
+        // self-authorizes via `?token=` and lives in `public` below.
+        .route("/api/items/:slug/subs", get(subs::list))
         .route("/api/stats", get(items::stats))
         .route("/api/logs", get(items::logs))
         .route(
@@ -103,6 +109,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(items::health))
         .route("/api/events", get(events::events))
         .route("/api/items/:slug/file", get(media::file))
+        // One subtitle track for the player's <track> elements. Self-authorizes
+        // via `?token=` like /file, because a <track> can't send headers.
+        .route("/api/items/:slug/subs/:lang", get(subs::get))
         // Online-playback proxy keyed by the item's unguessable slug (not its
         // enumerable id). Self-authorizes via the token, like /file.
         .route("/api/stream/:slug", get(media::stream))
