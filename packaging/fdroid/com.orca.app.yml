@@ -36,10 +36,20 @@ Builds:
     build:
       - source $$HOME$$/.cargo/env
       - bash app/scripts/build-fdroid.sh
+    # web/ holds a committed esbuild bundle (minified JS), which `fdroid scan`
+    # rejects as a prebuilt binary. Deleting it before the scan is safe: the
+    # build regenerates it from frontend/ sources — see build-fdroid.sh.
+    scandelete:
+      - web
     ndk: r27c
     output: app/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
 
-AutoUpdateMode: Version v%v
-UpdateCheckMode: Tags ^v[0-9]+\.[0-9]+\.[0-9]+$
+# No auto-update: F-Droid's checkupdates reads versionCode out of the gradle
+# config, but ours comes from gen/android/app/tauri.properties, which tauri-cli
+# generates at build time and is gitignored — so there is nothing for it to find.
+# Each release adds a Builds entry (versionName/versionCode/commit) by hand;
+# versionCode is major*1000000 + minor*1000 + patch of tauri.conf.json's version.
+AutoUpdateMode: None
+UpdateCheckMode: None
 CurrentVersion: 0.1.0
 CurrentVersionCode: 1000

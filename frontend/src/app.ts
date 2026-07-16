@@ -529,17 +529,27 @@ function hitsHtml(item: Item): string {
 // the primary filesize. Vanishes when the size is unknown. Resolution lives in
 // its own button to the right of this chip (see resButtonHtml).
 function metaChipsHtml(item: Item): string {
+  // Duration rides in the capsule ("1:23 | 2.7MB") only for PORTRAIT items — CSS
+  // gates it on .portrait-media, since orientation is only known once the
+  // thumbnail loads (see the `load` handler). On a 9:16 thumb the bottom-left
+  // duration pill collides with the bottom-right play button, so it moves here.
+  // Portrait clips under a minute drop the duration entirely: for a 20s Reel the
+  // number is noise, and most short verticals then need no capsule at all.
+  const dur = item.duration && item.duration >= 60 ? fmtDuration(item.duration) : '';
   // No local file (stream-only "None" mode, or a copy backed away to the cloud)
-  // → no on-disk footprint to report, so the size chip vanishes entirely.
-  if (!item.local_available) return '';
-  return metaChip('', fmtSize(item.total_filesize || item.filesize));
+  // → no on-disk footprint to report, so no size part.
+  const size = item.local_available ? fmtSize(item.total_filesize || item.filesize) : '';
+  return metaChip(dur, size);
 }
 
-// Build a meta capsule from the (possibly empty) resolution | size parts.
-function metaChip(res: string, size: string): string {
-  const parts = [res, size].filter(Boolean);
-  if (!parts.length) return '';
-  return `<span class="meta-chip">${esc(parts.join(' | '))}</span>`;
+// Build a meta capsule from the (possibly empty) duration | size parts. Each
+// part is its own span so CSS can show/hide the duration per orientation; the
+// " | " separator is drawn by .chip-dur::after only when a size follows.
+function metaChip(dur: string, size: string): string {
+  if (!dur && !size) return '';
+  const d = dur ? `<span class="chip-dur">${esc(dur)}</span>` : '';
+  const s = size ? `<span class="chip-size">${esc(size)}</span>` : '';
+  return `<span class="meta-chip">${d}${s}</span>`;
 }
 
 // Stacked "layers" glyph — the industry-standard affordance for "multiple
@@ -940,7 +950,6 @@ function playGroup(gkey: string): void {
 
 // Patch a row in place from a ProgressEvent (does not rebuild full row).
 function patchRow(ev: ProgressEv): void {
-  notifyProgress(ev); // native download notification (mobile only; no-op elsewhere)
   // Compute a MONOTONIC display percent. A `bv*+ba` download runs two 0→100%
   // passes (video, then audio), so the raw tick percent legitimately jumps back
   // to 0 mid-download — which read as the bar "going backwards". We clamp the
@@ -1076,11 +1085,13 @@ async function submitUrl(url: string): Promise<void> {
     // Accept both single {item} and batch {items} shapes.
     if (Array.isArray(data.items)) {
       data.items.forEach((it: Item) => upsertRow(it, true));
+      data.items.forEach((it: Item) => trackDownload(it.slug));
       const dupes = data.duplicates || 0;
       toast(t('toast.queuedN', { n: data.items.length }) + (dupes ? t('toast.dupSuffix', { n: dupes }) : ''),
         dupes ? 'info' : 'ok');
     } else if (data.item) {
       upsertRow(data.item, true);
+      if (!data.duplicate) trackDownload(data.item.slug);
       toast(data.duplicate ? t('toast.alreadyDownloaded') : t('toast.queued'), data.duplicate ? 'info' : 'ok');
     } else {
       toast(t('toast.queued'), 'ok');
@@ -1882,7 +1893,6 @@ async function refreshAppPermissions(): Promise<AppPermissionStatus | null> {
   try {
     const status = await T.core.invoke('android_permission_status') as AppPermissionStatus;
     appPermissions = { notifications: !!status.notifications, background: !!status.background };
-    notif.granted = appPermissions.notifications;
     els.permRow.classList.remove('hidden');
     renderAppPermissions();
     if (appPermissions.notifications && appPermissions.background && !els.permissionsPrompt.classList.contains('hidden')) {
@@ -2350,6 +2360,14 @@ els.history.addEventListener('click', (e) => {
     toggleGroupExpand(gkey());
     return;
   }
+  // A title too long for its two lines expands in place on tap (and re-clamps on
+  // a second tap) — the disclosure pattern YouTube/Reddit use. Height only grows
+  // for the one row the user asked about, never the resting list.
+  const titleEl = target.closest('.title') as HTMLElement | null;
+  if (titleEl) {
+    const row = titleEl.closest('.item') as HTMLElement | null;
+    if (row) { row.classList.toggle('title-open'); return; }
+  }
   const play = target.closest('.thumb-play') as HTMLElement | null;
   if (play) { e.preventDefault(); openPlayer(Number(play.dataset.id), play.dataset.cloud === '1', thumbSrc(play)); return; }
 
@@ -2712,6 +2730,10 @@ els.history.addEventListener('load', (e) => {
   if (!(img instanceof HTMLImageElement) || !img.classList.contains('thumb')) return;
   const portrait = img.naturalHeight > img.naturalWidth * 1.05;
   img.closest('.thumb-wrap')?.classList.toggle('portrait', portrait);
+  // Also tag the whole card: the duration moves off the thumbnail and into the
+  // size capsule for portrait (see metaChipsHtml), and the capsule lives in
+  // .body — outside .thumb-wrap — so it needs a shared ancestor to key off.
+  img.closest('.item, .group-head')?.classList.toggle('portrait-media', portrait);
 }, true);
 
 // Keyboard access for the play thumbnail (it's a role="button").
@@ -2978,23 +3000,12 @@ function setupNativeShare(): void {
 }
 
 // ---- Native download notifications (mobile) -------------------------------
-// Seal-style: ask for the notification permission up front, then surface each
-// download's live progress as an ongoing notification that updates in place.
-const notif: { granted: boolean; last: Map<number, { pct: number; t: number; phase: string }> } = {
-  granted: false,
-  last: new Map(),
-};
-
-async function setupNotifications(): Promise<void> {
-  const N = window.__TAURI__ && window.__TAURI__.notification;
-  if (!N) return; // desktop browser or plugin absent
-  try {
-    // Permission is user-driven from the Settings permission box. Launching the
-    // app must never open a system prompt by itself.
-    notif.granted = !!(await N.isPermissionGranted());
-  } catch (_) { /* plugin missing/blocked — silently skip */ }
-}
-
+// The Android foreground service (DownloadService.kt) is the SINGLE owner of
+// download notifications. It polls the backend, so its progress survives the app
+// being backgrounded or its process reclaimed — neither of which the WebView
+// does. This file only hands it slugs to track; it never posts notifications
+// itself. Two owners writing the same notification id was why progress used to
+// stall and never reach "complete".
 function setupAppPermissionRefresh(): void {
   if (!isNativeApp) return;
   const refresh = () => { setTimeout(refreshAppPermissions, 100); };
@@ -3009,61 +3020,65 @@ function setupAppPermissionRefresh(): void {
   window.addEventListener('focus', refresh);
 }
 
-// Android notification IDs must match ShareActivity: hash the private slug with
-// Java's String.hashCode(), then map it into the same positive integer range.
-const NOTIF_BASE = 200000;
-function itemNotificationId(slug: string): number {
-  let hash = 0;
-  for (let i = 0; i < slug.length; i += 1) hash = (Math.imul(31, hash) + slug.charCodeAt(i)) | 0;
-  return NOTIF_BASE + (hash & 0x0fffffff);
+// Ask the native service to own this download's notification through to
+// completion. No-op on the web (where the tab must stay open anyway).
+function trackDownload(slug: string | undefined): void {
+  if (!isNativeApp || !slug) return;
+  try {
+    window.__TAURI__?.core?.invoke('track_download', { slug });
+  } catch (_) { /* best-effort — the download itself is unaffected */ }
 }
 
-// Drive a per-item notification from progress ticks. Throttled so we replace one
-// ongoing notification (keyed by private slug) instead of spamming a stack.
-function notifyProgress(ev: ProgressEv): void {
-  const N = window.__TAURI__ && window.__TAURI__.notification;
-  if (!N || !notif.granted) return;
-  // An unknown item was submitted by the headless ShareActivity. Its native
-  // poller owns that notification; posting from SSE as well creates a duplicate
-  // numeric-id notification that cannot be cleared when the item is deleted.
-  const item = state.items.get(ev.id);
-  if (!item) return;
-  const notifId = itemNotificationId(item.slug);
-  const li = state.rows.get(ev.id);
-  // Privacy blur: a blurred site's real title must not leak into a persistent
-  // (ongoing) notification the user has to clear by hand — show the source's own
-  // video id (e.g. the tweet / youtube id) instead, which identifies the download
-  // without exposing its title. Falls back to the internal id only if unknown.
-  const titleEl = li && li.querySelector('.title');
-  const siteName = item.site_name || item.extractor || 'Orca';
-  const videoName = isItemBlurred(item)
-    ? (item.video_id || 'Download')
-    : ((titleEl && titleEl.textContent) || item.title || String(ev.id));
-  const title = siteName + ' · ' + videoName;
+// A download notification was tapped: bring the user to that item's row. The
+// slug is stashed natively on the tap (MainActivity) and drained here, because
+// the WebView may not exist yet on a cold start.
+async function drainDeepLink(): Promise<void> {
+  if (!isNativeApp) return;
   try {
-    if (ev.status === 'completed') {
-      N.sendNotification({ id: notifId, icon: 'ic_notification', title, body: '✓ Download complete', ongoing: false, autoCancel: true });
-      notif.last.delete(ev.id);
-      return;
-    }
-    if (ev.status === 'failed') {
-      N.sendNotification({ id: notifId, icon: 'ic_notification', title, body: '✗ Download failed', ongoing: false, autoCancel: true });
-      notif.last.delete(ev.id);
-      return;
-    }
-    if (ev.status !== 'running') return;
-    const prev = notif.last.get(ev.id) || { pct: -10, t: 0, phase: '' };
-    const now = Date.now();
-    const pct = ev.percent == null ? prev.pct : ev.percent;
-    const phaseChanged = (ev.phase || '') !== prev.phase;
-    // Update at most ~1/s and only on a ≥2% move or a stage change.
-    if (!phaseChanged && now - prev.t < 900 && Math.abs(pct - prev.pct) < 2) return;
-    const stage = ev.phase ? ev.phase.charAt(0).toUpperCase() + ev.phase.slice(1) + ' · ' : '';
-    const pctStr = ev.percent == null ? 'Downloading' : Math.round(ev.percent) + '%';
-    const spd = ev.speed ? ' · ' + ev.speed : '';
-    N.sendNotification({ id: notifId, icon: 'ic_notification', title, body: `${stage}${pctStr}${spd}`, ongoing: true, silent: true });
-    notif.last.set(ev.id, { pct, t: now, phase: ev.phase || '' });
+    const slug = await window.__TAURI__?.core?.invoke('take_pending_deeplink');
+    if (typeof slug === 'string' && slug) focusItemBySlug(slug);
   } catch (_) { /* plugin call failed; ignore */ }
+}
+
+// A tap can arrive on a cold start (drained once at boot) or while the app is
+// already running in the background (tauri://resume, or the WebView regaining
+// visibility), so every one of those has to re-check.
+function setupDeepLinks(): void {
+  if (!isNativeApp) return;
+  drainDeepLink();
+  const T = window.__TAURI__;
+  T?.event?.listen?.('tauri://resume', () => { drainDeepLink(); });
+  T?.event?.listen?.('tauri://focus', () => { drainDeepLink(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) drainDeepLink(); });
+}
+
+// Scroll an item into view and flash it, so a notification tap lands somewhere
+// obvious rather than just opening the list at the top.
+function focusItemBySlug(slug: string): void {
+  const find = (): Item | undefined => {
+    for (const item of state.items.values()) if (item.slug === slug) return item;
+    return undefined;
+  };
+  const reveal = (item: Item): boolean => {
+    const row = state.rows.get(item.id);
+    if (!row) return false;
+    // The row may be inside a collapsed group — open it first, or the scroll
+    // target is hidden and the tap appears to do nothing.
+    const group = row.closest('.group-card') as HTMLElement | null;
+    const gkey = group?.dataset.group;
+    if (gkey && group?.classList.contains('collapsed')) toggleGroupExpand(gkey);
+    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    row.classList.add('focus-flash');
+    setTimeout(() => row.classList.remove('focus-flash'), 2000);
+    return true;
+  };
+  const item = find();
+  if (item && reveal(item)) return;
+  // Not rendered yet (a cold start races the first list load) — reload, then retry.
+  loadItems(true).then(() => {
+    const found = find();
+    if (found) reveal(found);
+  });
 }
 
 // ---- Pull-to-refresh ------------------------------------------------------
@@ -3286,5 +3301,5 @@ loadStats();
 if (getToken()) loadWebsites(); // populate per-site privacy-blur state for the home list
 handleShareParam();
 setupNativeShare();
-setupNotifications();
 setupAppPermissionRefresh();
+setupDeepLinks();

@@ -7,6 +7,12 @@
          request an exemption from battery optimizations (prompted on launch). -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- DownloadService keeps the process alive while a download runs so its
+         progress notification stays live through to "complete". Without a
+         foreground service the share target's polling thread was reclaimed with
+         the (already finished) activity's process. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
         android:icon="@mipmap/ic_launcher"
@@ -60,6 +66,15 @@
                 <data android:mimeType="audio/*" />
             </intent-filter>
         </activity>
+
+        <!-- Owns download-progress notifications: polls the backend for status
+             and updates one notification per item in place, deep-linking into
+             the matching row on tap. dataSync is the correct type — it mirrors
+             remote download state rather than doing local media playback. -->
+        <service
+            android:name=".DownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <provider
           android:name="androidx.core.content.FileProvider"

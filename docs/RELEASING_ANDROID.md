@@ -68,11 +68,40 @@ Current official requirements and setup:
 - New personal accounts created after 2023-11-13 need a closed test with at
   least 12 continuously opted-in testers for 14 days before production access.
 
-The store listing source is `fastlane/metadata/android/`. Before submission add
-at least two representative phone screenshots for each promoted locale and
-review the 512 px icon and 1024 x 500 feature graphic. The app is not designed
+The store listing source is `fastlane/metadata/android/`. The app is not designed
 for children and must be described as a client for a user-controlled server,
 not as a service for bypassing copyright or platform controls.
+
+Note that `r0adkll/upload-google-play` only ships the AAB, the changelog, and the
+R8 mapping. Title, descriptions, icon, and feature graphic are NOT uploaded by
+CI — keep `fastlane/metadata/` as the source of truth and mirror any edit into
+Play Console by hand (or move the job to `fastlane supply`).
+
+Changelogs live ONLY in `fastlane/metadata/android/<locale>/changelogs/<versionCode>.txt`.
+The release workflow copies them into the `whatsnew-<locale>` layout the upload
+action expects, and fails if the file for the current versionCode is missing, so
+a version bump cannot silently ship a stale changelog.
+
+### Screenshots
+
+Play requires **4** phone screenshots per promoted locale, each 320–3840 px per
+side with a long:short ratio no wider than 2:1 (we ship 1080x1920, exactly 9:16).
+An earlier set was 824x1830 (2.22:1) and would have been rejected at upload.
+
+Regenerate them against a running dev server (`http://127.0.0.1:8090`) with the
+chrome-devtools MCP tools:
+
+1. `emulate` viewport `540x960x2,mobile,touch` — 540x960 CSS px at DPR 2 renders
+   a native 1080x1920 PNG with no upscaling.
+2. `navigate_page` to the server with `packaging/screenshots/demo-data.js` as
+   `initScript`. This stubs `fetch` so the UI renders a curated fictional
+   library. **Never screenshot a real library**: the dev database holds real
+   titles, uploaders, archive ids, and error logs, none of which belongs in a
+   public listing.
+3. Capture home, settings, websites, and the share dialog into
+   `fastlane/metadata/android/<locale>/images/phoneScreenshots/`.
+4. For zh-CN, switch with `window.i18n.setLang('zh-Hans')` — the app's internal
+   code is `zh-Hans`, while Play's directory is `zh-CN`.
 
 Official references:
 

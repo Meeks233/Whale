@@ -97,14 +97,17 @@
 
 * { box-sizing: border-box; }
 
-/* Kill the default square tap-highlight (it ignores border-radius on pills);
-   interactive elements get their own rounded :active feedback instead. */
-a, button, summary, input, textarea, [role="button"],
-.act, .btn, .icon-btn, .ck-btn {
-  -webkit-tap-highlight-color: transparent;
-}
+/* Kill the default square tap-highlight: Android paints it as a RECTANGLE that
+   ignores border-radius, so it leaks outside the corners of every pill/capsule.
+   This is deliberately universal — the old enumerated list (a, button, .act,
+   .btn, .icon-btn, .ck-btn) silently missed anything that wasn't on it, which is
+   why the share-window <label>s still flashed a square. A new control now gets
+   the right behaviour by default instead of having to be added here. */
+* { -webkit-tap-highlight-color: transparent; }
 button { overflow: hidden; touch-action: manipulation; }
-.act:active, .btn:active, .ck-btn:active, .icon-btn:active {
+/* …and one shared rounded :active feedback in its place, keyed off what a
+   control IS rather than a hand-maintained class list. */
+a:active, button:active, summary:active, label:active, [role="button"]:active {
   opacity: .72;
 }
 
@@ -157,6 +160,8 @@ body {
 /* Respect reduced-motion: keep the color, drop the pulsing halo. */
 @media (prefers-reduced-motion: reduce) {
   .server-status.up { animation: none; }
+  /* The scroll still lands on the row; it just doesn't pulse. */
+  .item.focus-flash { animation: none; }
 }
 
 /* Total-downloaded readout: a compact "N files · X GB" pill to the right of the
@@ -485,6 +490,16 @@ html:not(.app-native) #server-row { display: none; }
   padding: 10px;
 }
 
+/* Arrived here from a download notification tap: pulse the row so the item the
+   user tapped is obvious after the app scrolls to it. */
+.item.focus-flash {
+  animation: focus-flash 2s ease-out;
+}
+@keyframes focus-flash {
+  0%, 55% { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 32%, transparent); }
+  100% { border-color: var(--border); box-shadow: 0 0 0 3px transparent; }
+}
+
 /* ---- Multi-select: natural card highlight (no in-card checkbox) ----
    Selection state lives on the card surface itself — the industry-standard
    pattern (Finder / file managers / Photos): an accent border, a soft accent
@@ -691,6 +706,24 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 }
 .media-pending .media-loader { display: flex; }
 .media-loader svg { display: block; animation: spin .8s linear infinite; }
+/* Portrait thumbs are only 68px wide, so the bottom-left duration pill ends up
+   underneath the bottom-right play button. Drop it there and let the capsule in
+   the card body carry the duration instead (see .chip-dur / metaChipsHtml). */
+.portrait-media .dur { display: none; }
+
+/* Duration inside the size capsule: "1:23 | 2.7MB". Hidden by default — the
+   landscape thumbnail already shows it in its own pill, where there's room. */
+.chip-dur { display: none; }
+.chip-dur::after { content: " | "; opacity: .55; }
+/* No size part follows (cloud-only item) → nothing to separate from. */
+.chip-dur:last-child::after { content: ""; }
+.portrait-media .chip-dur { display: inline; }
+/* A capsule holding only the (hidden) duration would render as an empty pill —
+   that happens for a landscape cloud-only item, which has no size part. Restore
+   the base inline-flex (not `inline`) when portrait makes the duration visible. */
+.meta-chip:not(:has(.chip-size)) { display: none; }
+.portrait-media .meta-chip:has(.chip-dur) { display: inline-flex; }
+
 /* Duration pill: bottom-left of the thumbnail box. */
 .dur {
   position: absolute;
@@ -746,13 +779,23 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
   align-items: flex-start;
   gap: 6px;
 }
-/* Title text sits next to the source logo and clamps to two lines. */
+/* Title text sits next to the source logo and clamps to two lines.
+   `-webkit-line-clamp` is the pattern YouTube/Netflix/Spotify all use: it cuts on
+   a line boundary and appends its own "…", so the card height is fixed at two
+   lines no matter how long the title is. Tapping expands it in place
+   (.title-open) rather than growing every row — see the click handler. */
 .title > span {
   overflow: hidden;
   text-overflow: ellipsis;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+  cursor: pointer;
+}
+/* Tapped open: show the whole title. Only this row grows, and only on demand. */
+.item.title-open .title > span {
+  -webkit-line-clamp: unset;
+  overflow: visible;
 }
 /* Per-site logo before the title: brand glyph on a small white chip so dark
    brand marks (X, TikTok) stay visible on the dark card. */

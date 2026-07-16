@@ -74,7 +74,16 @@ android {
             isMinifyEnabled = true
             signingConfigs.findByName("release")?.let { signingConfig = it }
             proguardFiles(
-                *fileTree(".") { include("**/*.pro") }
+                *fileTree(".") {
+                    include("**/*.pro")
+                    // fileTree(".") also walks build/, where AGP unpacks each
+                    // dependency's consumer ProGuard rules — so a warm build saw
+                    // .pro files a clean build never does, making the output
+                    // depend on whether build/ happened to be populated. F-Droid
+                    // verifies our APK by rebuilding it, so that has to be
+                    // deterministic.
+                    exclude("build/**")
+                }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
                     .toList().toTypedArray()
             )

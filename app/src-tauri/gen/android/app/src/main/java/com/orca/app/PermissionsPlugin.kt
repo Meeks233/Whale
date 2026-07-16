@@ -11,6 +11,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.core.app.NotificationManagerCompat
 import app.tauri.annotation.Command
+import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.Permission
 import app.tauri.annotation.PermissionCallback
 import app.tauri.annotation.TauriPlugin
@@ -19,6 +20,11 @@ import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
 
 private const val NOTIFICATIONS = "notifications"
+
+@InvokeArg
+class SlugArgs {
+  var slug: String? = null
+}
 
 @TauriPlugin(
   permissions = [Permission(strings = [Manifest.permission.POST_NOTIFICATIONS], alias = NOTIFICATIONS)]
@@ -42,6 +48,32 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
   @Command
   fun status(invoke: Invoke) {
     invoke.resolve(statusObject())
+  }
+
+  /**
+   * Hand a download submitted from inside the app to [DownloadService], so its
+   * notification comes from the same owner as a shared link's and survives the
+   * app being backgrounded. Called from the activity, which is foreground —
+   * a requirement for starting a foreground service.
+   */
+  @Command
+  fun trackDownload(invoke: Invoke) {
+    val slug = invoke.parseArgs(SlugArgs::class.java).slug
+    if (!slug.isNullOrEmpty()) DownloadService.track(activity, slug)
+    invoke.resolve()
+  }
+
+  /**
+   * Drain the slug stashed by a notification tap (see MainActivity). Returns
+   * `{ slug: null }` when there is nothing pending. The frontend polls this on
+   * launch/resume and scrolls to the matching row.
+   */
+  @Command
+  fun takePendingDeeplink(invoke: Invoke) {
+    val slug = MainActivity.takePendingSlug()
+    // Only set the key when there is one: putting a null would drop it anyway,
+    // and the Rust side defaults a missing `slug` to None.
+    invoke.resolve(JSObject().apply { if (slug != null) put("slug", slug) })
   }
 
   @Command

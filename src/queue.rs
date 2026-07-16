@@ -26,11 +26,18 @@ pub struct Job {
 /// registered while a job runs and removed when it finishes.
 type Cancels = Arc<Mutex<HashMap<(i64, Option<i64>), oneshot::Sender<()>>>>;
 
+/// Latest progress tick per running item id. SSE is fire-and-forget, so a client
+/// that is not holding the stream open (the Android notification service polls
+/// `GET /api/items/:slug` instead) had no way to read percent/speed/eta. This
+/// cache lets a plain GET answer "how far along is this download right now".
+type LiveProgress = Arc<Mutex<HashMap<i64, ProgressEvent>>>;
+
 #[derive(Clone)]
 pub struct Queue {
     tx: mpsc::Sender<Job>,
     events: broadcast::Sender<ProgressEvent>,
     cancels: Cancels,
+    live: LiveProgress,
 }
 
 impl Queue {
@@ -45,6 +52,29 @@ impl Queue {
         let (events, _) = broadcast::channel::<ProgressEvent>(1024);
         let semaphore = Arc::new(Semaphore::new(cfg.effective_concurrency()));
         let cancels: Cancels = Arc::new(Mutex::new(HashMap::new()));
+        let live: LiveProgress = Arc::new(Mutex::new(HashMap::new()));
+
+        // Mirror the broadcast into `live` from a plain subscriber, so no job code
+        // has to know this cache exists. A terminal tick drops the entry: the DB
+        // row is authoritative once a download stops running.
+        let live_writer = live.clone();
+        let mut live_rx = events.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match live_rx.recv().await {
+                    Ok(ev) => {
+                        let mut map = live_writer.lock().unwrap_or_else(|e| e.into_inner());
+                        if matches!(ev.status, Status::Completed | Status::Failed) {
+                            map.remove(&ev.id);
+                        } else {
+                            map.insert(ev.id, ev);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
 
         let worker_events = events.clone();
         let worker_cancels = cancels.clone();
@@ -86,7 +116,17 @@ impl Queue {
             tx,
             events,
             cancels,
+            live,
         }
+    }
+
+    /// Latest progress tick for a running item, if one is in flight.
+    pub fn live_progress(&self, item_id: i64) -> Option<ProgressEvent> {
+        self.live
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&item_id)
+            .cloned()
     }
 
     /// Enqueue an item's primary download.
