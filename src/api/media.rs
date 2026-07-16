@@ -27,6 +27,9 @@ use tower_http::services::ServeFile;
 const PROXY_UA: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
+/// Redirect hops allowed on a proxied upstream fetch before giving up.
+const MAX_REDIRECTS: u32 = 5;
+
 /// GET /api/items/:slug/file — stream by private slug. Requires a valid token (header or
 /// `?token=`). Add `?download=1` to force a download (Content-Disposition).
 pub async fn file(
@@ -128,12 +131,6 @@ pub async fn stream(
         return Err(AppError::Unauthorized);
     }
     let (item, upstream, cookie) = resolve_stream_target(&state, &slug).await?;
-    // The resolved CDN URL is now our fetch target — guard it too so a poisoned
-    // row can't make the *server* fetch an internal address (SSRF).
-    crate::net_guard::guard(&upstream, state.cfg.allow_private_dns)
-        .await
-        .map_err(|r| AppError::BadRequest(r.reason().into()))?;
-
     let cookie_header = cookie_header_for(cookie.as_deref(), &upstream);
     let range = req
         .headers()
@@ -141,7 +138,16 @@ pub async fn stream(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
-    proxy_upstream(&upstream, &item.webpage_url, cookie_header, range).await
+    // `proxy_upstream` guards the CDN URL and every redirect hop, so a poisoned
+    // row can't make the *server* fetch an internal address (SSRF).
+    proxy_upstream(
+        &upstream,
+        &item.webpage_url,
+        cookie_header,
+        range,
+        state.cfg.allow_private_dns,
+    )
+    .await
 }
 
 /// Resolve and cache an online stream URL without fetching media bytes. The UI
@@ -206,46 +212,68 @@ async fn proxy_upstream(
     referer: &str,
     cookie_header: Option<String>,
     range: Option<String>,
+    allow_private_dns: bool,
 ) -> Result<Response, AppError> {
     static CLIENT: tokio::sync::OnceCell<reqwest::Client> = tokio::sync::OnceCell::const_new();
     let client = CLIENT
         .get_or_try_init(|| async {
+            // Redirects are followed by hand below, so every hop can be run
+            // through the async DNS-resolving guard. reqwest's redirect hook is
+            // synchronous and so can only inspect the literal URL — it cannot
+            // resolve a hostname, which is exactly what the guard needs to do.
             reqwest::Client::builder()
-                // Follow CDN redirects, but never into an internal address (SSRF).
-                .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                    if let Some(host) = attempt.url().host_str() {
-                        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-                            if crate::net_guard::is_forbidden_ip(ip) {
-                                return attempt.error("redirect to forbidden address");
-                            }
-                        }
-                    }
-                    if attempt.previous().len() >= 5 {
-                        attempt.stop()
-                    } else {
-                        attempt.follow()
-                    }
-                }))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
         })
         .await
         .map_err(|e| AppError::Internal(format!("http client build failed: {e}")))?;
 
-    let mut rb = client
-        .get(upstream)
-        .header(reqwest::header::USER_AGENT, PROXY_UA)
-        .header(reqwest::header::REFERER, referer);
-    if let Some(c) = cookie_header {
-        rb = rb.header(reqwest::header::COOKIE, c);
-    }
-    if let Some(r) = &range {
-        rb = rb.header(reqwest::header::RANGE, r.clone());
-    }
+    let mut url = upstream.to_string();
+    let mut redirects = 0;
+    let resp = loop {
+        // Guard every hop, not just the first. A CDN redirect to a *hostname*
+        // that resolves to 169.254.169.254 or 127.0.0.1 is the whole SSRF, and
+        // only a resolving check sees it.
+        crate::net_guard::guard(&url, allow_private_dns)
+            .await
+            .map_err(|r| AppError::BadRequest(r.reason().into()))?;
 
-    let resp = rb
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(format!("upstream fetch failed: {e}")))?;
+        let mut rb = client
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, PROXY_UA)
+            .header(reqwest::header::REFERER, referer);
+        if let Some(c) = &cookie_header {
+            rb = rb.header(reqwest::header::COOKIE, c.clone());
+        }
+        if let Some(r) = &range {
+            rb = rb.header(reqwest::header::RANGE, r.clone());
+        }
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("upstream fetch failed: {e}")))?;
+
+        if !resp.status().is_redirection() {
+            break resp;
+        }
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AppError::Internal("upstream redirect without location".into()))?;
+        // Resolve against the current URL so a relative Location works.
+        let next = reqwest::Url::parse(&url)
+            .and_then(|base| base.join(location))
+            .map_err(|_| AppError::BadRequest("upstream redirect is not a valid url".into()))?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err(AppError::BadRequest("upstream redirect scheme".into()));
+        }
+        url = next.into();
+        redirects += 1;
+        if redirects > MAX_REDIRECTS {
+            return Err(AppError::BadRequest("too many upstream redirects".into()));
+        }
+    };
 
     let status = resp.status();
     let mut builder = Response::builder().status(status.as_u16());

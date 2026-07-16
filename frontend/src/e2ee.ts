@@ -63,12 +63,24 @@ async function open(key: CryptoKey, envelope: string, aad: string): Promise<Byte
   ));
 }
 
+/// Prove possession of the derived key for exactly this request. The key id is
+/// public and replayable, so it only names the key — this seal is the credential.
+/// Bound to the method and target, stamped, and nonced, so it cannot be lifted
+/// onto another route or replayed. Mirrors `verify_authenticator` in src/e2ee.rs.
+async function authenticator(key: CryptoKey, method: string, path: string): Promise<string> {
+  const nonce = hex(crypto.getRandomValues(new Uint8Array(16)));
+  const payload = JSON.stringify({ t: Math.floor(Date.now() / 1000), n: nonce });
+  const envelope = await seal(key, encoder.encode(payload), `orca-auth-v1\n${method}\n${path}`);
+  return btoa(envelope);
+}
+
 export async function encryptedFetch(url: string, path: string, token: string, opts: RequestInit): Promise<Response> {
   const { keyId, key } = await derive(token);
   const method = (opts.method || 'GET').toUpperCase();
   const headers = new Headers(opts.headers);
   headers.set('X-Orca-E2EE', '1');
   headers.set('X-Orca-Key-Id', keyId);
+  headers.set('X-Orca-Auth', await authenticator(key, method, path));
   const body = opts.body == null ? undefined : await seal(key, encoder.encode(String(opts.body)), `${method}\n${path}`);
   if (body !== undefined) {
     headers.set('X-Orca-Encrypted-Body', '1');
@@ -92,7 +104,12 @@ export async function encryptedFetch(url: string, path: string, token: string, o
 export async function encryptedEventSourceUrl(baseUrl: string, token: string): Promise<{ url: string; key: CryptoKey }> {
   const derived = await derive(token);
   const separator = baseUrl.includes('?') ? '&' : '?';
-  return { url: `${baseUrl}${separator}key_id=${encodeURIComponent(derived.keyId)}`, key: derived.key };
+  // EventSource cannot set headers, so the authenticator rides in the query like
+  // the key id does. Its AAD is the fixed route rather than the real target,
+  // which would otherwise have to contain the authenticator itself.
+  const auth = await authenticator(derived.key, 'GET', '/api/events');
+  const query = `key_id=${encodeURIComponent(derived.keyId)}&auth=${encodeURIComponent(auth)}`;
+  return { url: `${baseUrl}${separator}${query}`, key: derived.key };
 }
 
 export async function decryptEvent(key: CryptoKey, data: string): Promise<string> {

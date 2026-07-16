@@ -22,10 +22,23 @@ set `X-Orca-Encrypted-Body: 1` and send a JSON envelope
 and use `status_code + "\n" + path_and_query` as AAD. Authentication failures
 remain plaintext `401` responses because the server has not accepted a key.
 
-SSE uses `?key_id=...`; each `progress` event data field is an envelope with
-AAD `event\nprogress`. Legacy `?token=...` SSE remains available to clients that
-cannot decrypt events. Media Range and streaming routes retain query/header
-token authentication so bodies remain streaming rather than buffered.
+The `key_id` is **not a credential**. It is derived by a public function and
+travels in cleartext on every request, so it only names which key to use. Every
+E2EE request must also carry `X-Orca-Auth`: base64 of an envelope sealing
+`{"t":<unix seconds>,"n":"<unique nonce>"}` under `key`, with AAD
+`"orca-auth-v1" + "\n" + METHOD + "\n" + path_and_query`. The server opens it to
+prove you hold the key, rejects a `t` more than 300 seconds from its clock, and
+refuses any nonce it has already seen inside that window. Without this, anyone
+who observed a `key_id` could drive every bodyless side-effecting route (the
+encrypted response they could not read would not stop the delete from happening).
+
+SSE uses `?key_id=...&auth=...`, where `auth` is the same authenticator bound to
+`GET` and the literal target `/api/events` — the real query string cannot be
+bound, since it contains the authenticator. Each `progress` event data field is
+an envelope with AAD `event\nprogress`. Legacy `?token=...` SSE remains available
+to clients that cannot decrypt events. Media Range and streaming routes retain
+query/header token authentication so bodies remain streaming rather than
+buffered.
 
 ## Access Classes
 
@@ -51,7 +64,7 @@ token authentication so bodies remain streaming rather than buffered.
 | `GET` | `/api/stream/:slug` | Owner query/header | Online playback proxy |
 | `GET` | `/api/stream/:slug/prepare` | Owner query/header | Warm stream URL cache |
 | `GET` | `/api/p/:share_slug` | Capability | Live public file |
-| `GET` | `/api/events?key_id=...` | Owner query | Encrypted SSE progress |
+| `GET` | `/api/events?key_id=...&auth=...` | Owner query | Encrypted SSE progress |
 | `GET` | `/api/stats` | Owner | Download count and bytes |
 | `GET` | `/api/logs` | Owner | Bounded recent errors |
 | `GET`, `PUT` | `/api/settings` | Owner | Runtime resolution default |

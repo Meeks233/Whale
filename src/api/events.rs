@@ -11,7 +11,9 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 /// GET /api/events — one shared SSE stream of ProgressEvents. Browser SSE cannot
-/// set headers, so encrypted clients send a non-secret key id in the query.
+/// set headers, so encrypted clients send the key id in the query. The key id is
+/// public — it names the key but proves nothing — so the client must also present
+/// a sealed authenticator it could only have produced by holding that key.
 pub async fn events(State(state): State<AppState>, RawQuery(query): RawQuery) -> Response {
     let q = query.unwrap_or_default();
     let encryption_key = if let Some(requested_id) = super::auth::query_param(&q, "key_id") {
@@ -19,7 +21,22 @@ pub async fn events(State(state): State<AppState>, RawQuery(query): RawQuery) ->
         if !super::auth::ct_eq(&requested_id, &crate::e2ee::key_id(&hash)) {
             return AppError::Unauthorized.into_response();
         }
-        Some(crate::e2ee::encryption_key(&hash))
+        let Some(auth) = super::auth::query_param(&q, "auth") else {
+            return AppError::Unauthorized.into_response();
+        };
+        let key = crate::e2ee::encryption_key(&hash);
+        // The target is the fixed route, not the real one: the live query string
+        // contains this authenticator, so it cannot also be bound by it.
+        if let Err(e) = crate::e2ee::verify_authenticator(
+            &key,
+            &auth,
+            "GET",
+            "/api/events",
+            crate::types::now_unix(),
+        ) {
+            return e.into_response();
+        }
+        Some(key)
     } else {
         let token = super::auth::extract_token(&axum::http::HeaderMap::new(), &q);
         if !token

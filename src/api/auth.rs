@@ -137,7 +137,6 @@ async fn run_authenticated(
     next: Next,
     allow_client: bool,
 ) -> Result<Response, AppError> {
-    let credential = authenticate(state, request.headers(), allow_client).await?;
     let method = request.method().as_str().to_string();
     let target = request
         .uri()
@@ -145,6 +144,7 @@ async fn run_authenticated(
         .map(|v| v.as_str())
         .unwrap_or(request.uri().path())
         .to_string();
+    let credential = authenticate(state, request.headers(), allow_client, &method, &target).await?;
     let encrypted_body = request
         .headers()
         .contains_key(crate::e2ee::HEADER_ENCRYPTED_BODY);
@@ -168,6 +168,8 @@ async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
     allow_client: bool,
+    method: &str,
+    target: &str,
 ) -> Result<Credential, AppError> {
     let encrypted = headers
         .get(crate::e2ee::HEADER_E2EE)
@@ -178,11 +180,21 @@ async fn authenticate(
             .get(crate::e2ee::HEADER_KEY_ID)
             .and_then(|v| v.to_str().ok())
             .ok_or(AppError::Unauthorized)?;
+        // The key id only *names* a key — it is public and replayable, so it
+        // never authenticates on its own. Every candidate must still prove it
+        // holds the key by opening its sealed authenticator.
+        let authenticator = headers
+            .get(crate::e2ee::HEADER_AUTH)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::Unauthorized)?;
+        let now = crate::types::now_unix();
         let owner_hash = crate::e2ee::auth_hash(&state.cfg.token);
         if ct_eq(requested_id, &crate::e2ee::key_id(&owner_hash)) {
+            let key = crate::e2ee::encryption_key(&owner_hash);
+            crate::e2ee::verify_authenticator(&key, authenticator, method, target, now)?;
             return Ok(Credential {
                 context: AuthContext { client_id: None },
-                encryption_key: Some(crate::e2ee::encryption_key(&owner_hash)),
+                encryption_key: Some(key),
             });
         }
         if allow_client {
@@ -191,11 +203,13 @@ async fn authenticate(
                     continue;
                 };
                 if ct_eq(requested_id, &crate::e2ee::key_id(&hash)) {
+                    let key = crate::e2ee::encryption_key(&hash);
+                    crate::e2ee::verify_authenticator(&key, authenticator, method, target, now)?;
                     return Ok(Credential {
                         context: AuthContext {
                             client_id: Some(client_id),
                         },
-                        encryption_key: Some(crate::e2ee::encryption_key(&hash)),
+                        encryption_key: Some(key),
                     });
                 }
             }
