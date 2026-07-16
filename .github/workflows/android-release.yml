@@ -25,7 +25,7 @@ jobs:
     permissions:
       contents: write
     env:
-      ORCA_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/orca-release.jks
+      ORCA_ANDROID_KEYSTORE_PATH: /tmp/orca-release.jks
       ORCA_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ORCA_ANDROID_KEYSTORE_PASSWORD }}
       ORCA_ANDROID_KEY_ALIAS: ${{ secrets.ORCA_ANDROID_KEY_ALIAS }}
       ORCA_ANDROID_KEY_PASSWORD: ${{ secrets.ORCA_ANDROID_KEY_PASSWORD }}
