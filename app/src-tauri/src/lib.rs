@@ -161,23 +161,51 @@ struct LocalFile {
     url: String,
 }
 
+/// One item to look up, carrying the server's fingerprint for it so the native
+/// side can also recognise a copy it never recorded — see `MediaSaver.adopt`.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+struct LocalQuery {
+    slug: String,
+    /// Name the server serves the file under; empty when it has no local file.
+    #[serde(default)]
+    name: String,
+    /// Exact byte size of that file. 0 when unknown — no adoption is attempted.
+    #[serde(default)]
+    size: i64,
+    #[serde(default)]
+    height: i64,
+}
+
+/// The Android plugin bridge resolves a JSON *object*, never a bare array, so
+/// the batch answer rides in a one-field envelope. Same order as the request.
+#[cfg(target_os = "android")]
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct LocalFiles {
+    #[serde(default)]
+    files: Vec<LocalFile>,
+}
+
+/// Resolve a whole page of items at once. Batched deliberately: the folder is
+/// listed once per call rather than once per item, so recognising ten cards
+/// costs one directory read instead of ten.
 #[tauri::command]
-fn local_file<R: tauri::Runtime>(
+fn local_files<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
-    _slug: String,
-) -> Result<LocalFile, String> {
+    _items: Vec<LocalQuery>,
+) -> Result<Vec<LocalFile>, String> {
     #[cfg(target_os = "android")]
     {
         return _app
             .state::<AndroidPermissions<R>>()
             .0
-            .run_mobile_plugin("localFile", serde_json::json!({ "slug": _slug }))
+            .run_mobile_plugin::<LocalFiles>("localFiles", serde_json::json!({ "items": _items }))
+            .map(|r| r.files)
             .map_err(|e| e.to_string());
     }
     // Desktop has no local-save path at all, so "no local copy" is the honest
     // answer — and lets the caller use one code path on every platform.
     #[cfg(not(target_os = "android"))]
-    Ok(LocalFile::default())
+    Ok(_items.iter().map(|_| LocalFile::default()).collect())
 }
 
 /// Move saved downloads between `Downloads/Orca` and the hidden
@@ -246,6 +274,7 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             save_share_creds,
             android_permission_status,
@@ -253,7 +282,7 @@ pub fn run() {
             request_background_permission,
             request_storage_permission,
             save_media,
-            local_file,
+            local_files,
             set_hide_downloads,
             track_download,
             take_pending_deeplink

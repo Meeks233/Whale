@@ -17,6 +17,14 @@
   <script src="/theme.js"></script>
 </head>
 <body>
+  <!-- Only the topbar sticks (see .topbar): it carries the storage readout and
+       the settings/websites entry points, which are worth a permanent strip. The
+       submit row, the search box and everything below scroll away with the list —
+       pinning a second row cost real estate on a phone for something you touch
+       once per download.
+       The topbar is a direct child of <body> on purpose: a sticky element only
+       sticks while its own parent is in view, so wrapping it and the submit row
+       in a shared box would drag it off-screen as soon as that box scrolled. -->
   <header class="topbar">
     <div class="brand-wrap">
       <!-- Brand mark. Black line art on a transparent ground, inverted to white
@@ -25,8 +33,9 @@
       <!-- Server status heartbeat: green + breathing while the SSE stream is
             live, red when it drops. Driven by the EventSource lifecycle in app.js. -->
       <span id="server-status" class="server-status down" role="status" aria-label="Server status" data-i18n-aria="aria.serverStatus"></span>
-      <!-- Total downloaded readout: count + summed size of all downloads, sitting
-           to the right of the heartbeat. Populated from /api/stats by app.js. -->
+      <!-- Storage readout: a donut gauge + "58% · 1.2 TB" sitting to the right of
+           the heartbeat, amber then red as the disk fills. Populated from
+           /api/stats by app.js (renderDlStats). -->
       <span id="dl-stats" class="dl-stats hidden" role="status" aria-live="polite"></span>
     </div>
     <div class="topbar-actions">
@@ -50,12 +59,27 @@
         <input id="url" type="text" inputmode="url" autocomplete="off" placeholder="Paste a video URL…" data-i18n-ph="ph.url" required>
         <button id="paste-btn" class="field-btn" type="button" aria-label="Paste" title="Paste" data-i18n-aria="aria.paste" data-i18n-title="aria.paste"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v4"/><path d="M21 14H11"/><path d="m15 10-4 4 4 4"/></svg></button>
       </div>
-      <button id="submit-btn" class="btn" type="submit" data-i18n="btn.download">Download</button>
+      <!-- Icon, not the word "Download": the row already reads as "URL box →
+           action", and the label was the only thing forcing the button wide
+           enough to squeeze the field it feeds. The accessible name lives on
+           aria-label, which is also what keeps it translated. -->
+      <button id="submit-btn" class="btn btn-icon" type="submit" aria-label="Download" title="Download" data-i18n-aria="btn.download" data-i18n-title="btn.download"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 13v8l-4-4"/><path d="m12 21 4-4"/><path d="M4.393 15.269A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.436 8.284"/></svg></button>
     </form>
   </section>
 
   <section class="controls">
     <button id="select-toggle" class="icon-btn sel-toggle" aria-label="Select multiple" title="Select multiple" data-i18n-aria="aria.selectMultiple" data-i18n-title="aria.selectMultiple"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
+    <!-- Global pause / resume, in the same icon-btn style as the select toggle
+         beside it. One signal to the backend, which decides what it covers: pause
+         parks everything queued or running, resume releases every paused item in
+         the order it was submitted. Which of the two it shows is driven by the
+         server-wide paused count from /api/stats — NOT by the page of items the
+         client happens to be holding — so it still offers Resume when the paused
+         work is further down the list than you've scrolled. Permanent, like the
+         select toggle: with an idle queue it disables rather than disappearing
+         (see renderQueueToggle). Starts hidden only until that first render, so
+         it can't flash the wrong icon. -->
+    <button id="queue-toggle" class="icon-btn hidden" type="button"></button>
     <div class="field">
       <input id="search" type="search"
              placeholder="Search…  failed  twitter  user:rick  title:&quot;never gonna&quot;  -title:live"
@@ -230,32 +254,43 @@
       <button id="settings-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
       <h2 id="settings-title" class="modal-heading" data-i18n="settings.title">Settings</h2>
 
+      <!-- Grouping. Every block below is a .set-group: a heading naming the
+           group, its rows inside ONE bordered .form-box, and any explanatory or
+           conditional copy after that box. The box's edge is what separates one
+           group from the next, and the hairlines between its rows come from
+           .form-row + .form-row — so there are no free-standing <hr>s left to
+           place by eye, and no divider can appear anywhere a group doesn't
+           actually end. This is the grouped-list shape iOS Settings and GNOME
+           preferences use. -->
+
       <!-- Appearance. Both controls default to "Auto": the app already follows
            the OS language (navigator.languages) and the OS light/dark setting
            (prefers-color-scheme) with no help. These only exist to override it,
            which is why they live here rather than in the topbar. Applied on the
            spot — a theme or language you have to Save to see is just wrong. -->
-      <label data-i18n="settings.appearance">Appearance</label>
-      <div class="form-row">
-        <span class="form-row-label" data-i18n="settings.theme">Theme</span>
-        <div class="form-row-ctl">
-          <div class="segmented" role="radiogroup" aria-label="Theme" data-i18n-aria="aria.theme">
-            <label class="segment"><input type="radio" name="theme-pref" value="system" checked><span data-i18n="theme.system">System</span></label>
-            <label class="segment"><input type="radio" name="theme-pref" value="light"><span data-i18n="theme.light">Light</span></label>
-            <label class="segment"><input type="radio" name="theme-pref" value="dark"><span data-i18n="theme.dark">Dark</span></label>
+      <section class="set-group">
+        <label data-i18n="settings.appearance">Appearance</label>
+        <div class="form-box">
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.theme">Theme</span>
+            <div class="form-row-ctl">
+              <div class="segmented" role="radiogroup" aria-label="Theme" data-i18n-aria="aria.theme">
+                <label class="segment"><input type="radio" name="theme-pref" value="system" checked><span data-i18n="theme.system">System</span></label>
+                <label class="segment"><input type="radio" name="theme-pref" value="light"><span data-i18n="theme.light">Light</span></label>
+                <label class="segment"><input type="radio" name="theme-pref" value="dark"><span data-i18n="theme.dark">Dark</span></label>
+              </div>
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-row-label" for="lang-select" data-i18n="settings.language">Language</label>
+            <div class="form-row-ctl">
+              <!-- A <select>, not a segmented control: the language list grows with
+                   every locale added and would burst a segmented track. -->
+              <select id="lang-select" class="select"></select>
+            </div>
           </div>
         </div>
-      </div>
-      <div class="form-row">
-        <label class="form-row-label" for="lang-select" data-i18n="settings.language">Language</label>
-        <div class="form-row-ctl">
-          <!-- A <select>, not a segmented control: the language list grows with
-               every locale added and would burst a segmented track. -->
-          <select id="lang-select" class="select"></select>
-        </div>
-      </div>
-
-      <hr class="sep">
+      </section>
 
       <!-- Connection: which server, and the token to talk to it. Kept adjacent
            because they are one thought — you cannot use one without the other,
@@ -264,27 +299,31 @@
            short scalar values) rather than stacked label-over-input blocks.
            #server-row is app-only: hidden in browsers, where the origin already
            IS the server. See `html:not(.app-native) #server-row` in style.css. -->
-      <label data-i18n="settings.connection">Connection</label>
-      <div id="server-row" class="form-row">
-        <label class="form-row-label" for="server" data-i18n="settings.serverUrl">Server URL</label>
-        <div class="form-row-ctl">
-          <input id="server" class="input" type="url" inputmode="url" autocomplete="off" placeholder="https://orca.example.com (blank = this site)" data-i18n-ph="ph.server">
+      <section class="set-group">
+        <label data-i18n="settings.connection">Connection</label>
+        <div class="form-box">
+          <div id="server-row" class="form-row">
+            <label class="form-row-label" for="server" data-i18n="settings.serverUrl">Server URL</label>
+            <div class="form-row-ctl">
+              <input id="server" class="input" type="url" inputmode="url" autocomplete="off" placeholder="https://orca.example.com (blank = this site)" data-i18n-ph="ph.server">
+            </div>
+          </div>
+          <div class="form-row">
+            <label class="form-row-label" for="token" data-i18n="settings.token">API token</label>
+            <div class="form-row-ctl">
+              <input id="token" class="input" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="form-row">
-        <label class="form-row-label" for="token" data-i18n="settings.token">API token</label>
-        <div class="form-row-ctl">
-          <input id="token" class="input" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
-        </div>
-      </div>
-      <p id="token-hint" class="hint hidden" data-i18n="settings.tokenInvalid">Invalid token.</p>
+        <p id="token-hint" class="hint hidden" data-i18n="settings.tokenInvalid">Invalid token.</p>
+      </section>
 
       <!-- Permission state. Shown only while something is still missing — a list
            of green ticks is furniture, so once every permission is granted the
            whole block hides itself (see renderAppPermissions). The rows differ by
            platform: Android needs all three, the web build asks only about
            notifications and never insists. -->
-      <div id="perm-row" class="hidden">
+      <section id="perm-row" class="set-group hidden">
         <label data-i18n="settings.permissions">App permissions</label>
         <div class="permission-box">
           <button class="permission-item" type="button" data-permission="notifications" data-state="checking">
@@ -305,56 +344,89 @@
             <span class="permission-result" aria-hidden="true"></span>
           </button>
         </div>
-      </div>
+      </section>
 
-      <!-- App-only: where "Save" puts files, and whether that folder is hidden. -->
-      <div id="hide-dl-row" class="hidden">
-        <div class="form-row">
-          <span class="form-row-label" data-i18n="settings.hideDl">Hide my downloads</span>
-          <div class="form-row-ctl">
-            <button id="hide-dl-toggle" class="site-subs-toggle off" type="button" role="switch" aria-checked="false" data-i18n-title="settings.hideDl" title="Hide my downloads"><span class="knob"></span></button>
+      <!-- Downloads: everything about what lands on disk and how much of it —
+           how much room downloads may take, where the app puts saved files, and
+           the dedup archive that decides what gets fetched twice. These were three
+           separate groups saying "downloads" three times; as one group the storage
+           cap sits next to the archive you'd prune to stay under it, which is the
+           order you actually act in. Same .set-group shape as Appearance and
+           Connection above: heading, one bordered .form-box of rows, then the
+           copy that explains them. -->
+      <section class="set-group">
+        <label data-i18n="settings.downloads">Downloads</label>
+        <div class="form-box">
+          <!-- Storage cap. A number + unit pair rather than a free-text size:
+               "500 GB" typed by hand invites "500g", "0.5T" and typos that a
+               parser then has to guess at. The unit defaults to GB, which is the
+               scale nearly every install is actually at. -->
+          <div id="max-storage-row" class="form-row">
+            <label class="form-row-label" for="max-storage" data-i18n="settings.maxStorage">Storage limit</label>
+            <div class="form-row-ctl storage-ctl">
+              <input id="max-storage" class="input" type="number" min="0" step="0.01" inputmode="decimal" autocomplete="off" placeholder="0" data-i18n-ph="ph.maxStorage">
+              <select id="max-storage-unit" class="select">
+                <option value="MB">MB</option>
+                <option value="GB" selected>GB</option>
+                <option value="TB">TB</option>
+                <option value="PB">PB</option>
+              </select>
+            </div>
+          </div>
+          <!-- App-only: where "Save" puts files, and whether that folder is hidden. -->
+          <div id="hide-dl-row" class="form-row hidden">
+            <span class="form-row-label" data-i18n="settings.hideDl">Hide my downloads</span>
+            <div class="form-row-ctl">
+              <button id="hide-dl-toggle" class="site-subs-toggle off" type="button" role="switch" aria-checked="false" data-i18n-title="settings.hideDl" title="Hide my downloads"><span class="knob"></span></button>
+            </div>
           </div>
         </div>
-        <p class="hint-muted" data-i18n="settings.hideDlHint">Saves to Downloads/.Orca instead of Downloads/Orca, out of the gallery. Existing files move too.</p>
+        <p class="hint-muted" data-i18n="settings.maxStorageHint">Blank or 0 means unlimited. Once free space drops under 5%, new links are still recorded and still play online — they just wait to download until there's room.</p>
+        <p id="max-storage-locked" class="hint-muted hidden" data-i18n="settings.maxStorageLocked">Pinned by the ORCA_MAX_STORAGE environment variable.</p>
+        <p id="hide-dl-hint" class="hint-muted hidden" data-i18n="settings.hideDlHint">Saves to Downloads/.Orca instead of Downloads/Orca, out of the gallery. Existing files move too.</p>
         <p id="hide-dl-needs-perm" class="hint hidden" data-i18n="settings.hideDlNeedsPerm">Allow storage access first.</p>
-      </div>
 
-      <hr class="sep">
-      <div class="logs-head">
-        <label for="seal-archive" data-i18n="settings.archive">Download archive</label>
-        <div class="logs-actions">
-          <!-- Regret medicine. Reads "Discard changes" while the box is dirty and
-               "Restore previous" once it's clean — see renderArchiveRestore. -->
-          <button id="archive-restore" class="btn btn-ghost hidden" data-i18n="settings.archiveDiscard">Discard changes</button>
+        <div class="logs-head">
+          <label for="seal-archive" data-i18n="settings.archive">Download archive</label>
+          <div class="logs-actions">
+            <!-- Regret medicine. Reads "Discard changes" while the box is dirty and
+                 "Restore previous" once it's clean — see renderArchiveRestore. -->
+            <button id="archive-restore" class="btn btn-ghost hidden" data-i18n="settings.archiveDiscard">Discard changes</button>
+          </div>
         </div>
-      </div>
-      <p class="hint-muted" data-i18n-html="settings.archiveHint">
-        One <code>extractor id</code> per line. Delete a line to let it download again.
-      </p>
-      <textarea id="seal-archive" class="ta" rows="8"
-                placeholder="youtube dQw4w9WgXcQ&#10;twitter 1466...&#10;bilibili BV1..." data-i18n-ph="ph.archive"></textarea>
+        <p class="hint-muted" data-i18n-html="settings.archiveHint">
+          One <code>extractor id</code> per line. Newest first. Delete a line to let it download again.
+        </p>
+        <textarea id="seal-archive" class="ta" rows="8"
+                  placeholder="youtube dQw4w9WgXcQ&#10;twitter 1466...&#10;bilibili BV1..." data-i18n-ph="ph.archive"></textarea>
+      </section>
 
       <!-- Diagnostics log: the backend's bounded ring buffer of recent probe /
            download errors. Each row is a native <details> disclosure (industry-
            standard collapsible log line) — click to expand the full message,
            with per-row and copy-all buttons. -->
-      <hr class="sep">
-      <div class="logs-head">
-        <label data-i18n="settings.logs">Error log</label>
-        <div class="logs-actions">
-          <button id="logs-refresh" class="btn btn-ghost" data-i18n="logs.refresh">Refresh</button>
-          <button id="logs-copy" class="btn btn-ghost" data-i18n="logs.copyAll">Copy all</button>
+      <section class="set-group">
+        <div class="logs-head">
+          <label data-i18n="settings.logs">Error log</label>
+          <div class="logs-actions">
+            <button id="logs-refresh" class="btn btn-ghost" data-i18n="logs.refresh">Refresh</button>
+            <button id="logs-copy" class="btn btn-ghost" data-i18n="logs.copyAll">Copy all</button>
+          </div>
         </div>
-      </div>
-      <div id="log-list" class="log-list"></div>
-      <p id="log-empty" class="hint-muted hidden" data-i18n="settings.logsEmpty">No errors recorded yet.</p>
+        <div id="log-list" class="log-list"></div>
+        <p id="log-empty" class="hint-muted hidden" data-i18n="settings.logsEmpty">No errors recorded yet.</p>
+      </section>
 
-      <!-- Repo / issue link: gives users a one-tap path to file a bug. -->
-      <p class="settings-footer" data-i18n-html="settings.issue">
-        Having problems? File a bug here:
-        <a href="https://github.com/Meeks233/Orca/issues" target="_blank" rel="noopener noreferrer">github.com/Meeks233/Orca</a>
-      </p>
-      <p class="settings-footer"><a href="https://github.com/Meeks233/Orca/blob/main/docs/PRIVACY.md" target="_blank" rel="noopener noreferrer">Privacy policy</a> · <a href="https://github.com/Meeks233/Orca" target="_blank" rel="noopener noreferrer">Source code</a> · <a href="/third-party-notices.txt" target="_blank" rel="noopener noreferrer">Licenses</a></p>
+      <!-- Footer. The issue tracker is the GitHub mark itself — a bare URL was
+           three lines of link text for one destination, and the logo is the more
+           recognisable target. The line above it says what the mark is FOR: an
+           unlabelled logo is recognisable but not self-explanatory, and "found a
+           bug?" is the prompt that makes people click it. -->
+      <div class="settings-footer">
+        <p class="gh-prompt" data-i18n="settings.issuePrompt">Any bugs? File an issue here</p>
+        <a class="gh-link" href="https://github.com/Meeks233/Orca/issues" target="_blank" rel="noopener noreferrer" aria-label="Report an issue" title="Report an issue" data-i18n-aria="settings.issue" data-i18n-title="settings.issue"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58 0-.29-.01-1.05-.02-2.06-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.22 0 4.61-2.8 5.62-5.48 5.92.43.37.81 1.1.81 2.22 0 1.6-.01 2.9-.01 3.29 0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/></svg></a>
+        <p class="settings-links"><a href="https://github.com/Meeks233/Orca/blob/main/docs/PRIVACY.md" target="_blank" rel="noopener noreferrer">Privacy policy</a> · <a href="https://github.com/Meeks233/Orca" target="_blank" rel="noopener noreferrer">Source code</a> · <a href="/third-party-notices.txt" target="_blank" rel="noopener noreferrer">Licenses</a></p>
+      </div>
 
       <!-- The one Save. Sticks to the bottom of the sheet and only appears once
            a field is actually dirty (see setupSettingsSaveBar) — the pattern
@@ -388,7 +460,7 @@
            stated reason is worse than no control. Every field is built by JS
            (renderGlobalDefaults) so it shares one code path with the cards. -->
       <div class="sites-global">
-        <label data-i18n="sites.defaults">Defaults for every site</label>
+        <label data-i18n="sites.defaults">Defaults</label>
         <div class="form-row">
           <span class="form-row-label" data-i18n="settings.maxRes">Maximum resolution</span>
           <div class="form-row-ctl" id="max-res"></div>

@@ -1,7 +1,7 @@
 //! In-memory dedup set backed by an append-only yt-dlp `--download-archive` file.
 //! Persistent yt-dlp archive set. See docs/DATABASE.md.
 
-use std::collections::HashSet;
+use indexmap::IndexSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -14,14 +14,22 @@ pub struct Archive {
 }
 
 struct Inner {
-    set: tokio::sync::Mutex<HashSet<String>>,
+    /// Dedup keys in the order they were recorded — oldest line first, matching
+    /// the append-only file on disk. An `IndexSet` rather than a `HashSet`: dedup
+    /// still needs O(1) membership, but the order a key was archived in is real
+    /// information (it's when you downloaded that video), and the editor lists
+    /// keys newest-first off the back of it. A plain set threw that away and could
+    /// only ever offer alphabetical.
+    set: tokio::sync::Mutex<IndexSet<String>>,
     path: PathBuf,
 }
 
 impl Archive {
-    /// Read existing keys from `path` (if present), union with `seed`, and rewrite the file
-    /// (sorted, one key per line) whenever the union differs from what's on disk. The parent
-    /// directory is created if needed.
+    /// Read existing keys from `path` (if present), append any `seed` keys not
+    /// already recorded, and rewrite the file whenever the result differs from
+    /// what's on disk. Record order is preserved: existing lines keep their
+    /// position and seeds land after them. The parent directory is created if
+    /// needed.
     pub async fn load(path: &Path, seed: Vec<String>) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -45,16 +53,17 @@ impl Archive {
 
         let file_existed = fs::metadata(path).await.is_ok();
 
-        let mut set: HashSet<String> = existing.iter().cloned().collect();
+        let mut set: IndexSet<String> = existing.iter().cloned().collect();
         set.extend(seed);
 
-        // Rewrite whenever the file isn't already the canonical sorted-unique form:
-        // this seeds new keys AND collapses any duplicate lines (yt-dlp's own
-        // `--download-archive` write can coincide with an app-side record).
-        let mut canonical: Vec<String> = set.iter().cloned().collect();
-        canonical.sort();
-        if !file_existed || existing != canonical {
-            write_sorted(path, &set).await?;
+        // Rewrite whenever the file isn't already the canonical form — one unique
+        // key per line, in record order. This seeds new keys AND collapses any
+        // duplicate lines (yt-dlp's own `--download-archive` write can coincide
+        // with an app-side record). Comparing against `existing` catches exactly
+        // that: a de-duplicated or seeded set no longer matches the lines read.
+        let canonical: Vec<&String> = set.iter().collect();
+        if !file_existed || existing.iter().collect::<Vec<_>>() != canonical {
+            write_keys(path, &set).await?;
         }
 
         Ok(Self {
@@ -72,11 +81,13 @@ impl Archive {
         self.inner.set.lock().await.contains(key)
     }
 
-    /// All dedup keys, sorted — for the manual archive editor.
+    /// All dedup keys, newest record first — the order the manual archive editor
+    /// shows them in. Newest-first because the key you want to find (and delete,
+    /// to re-download something) is nearly always one you just archived, and a
+    /// growing list buries it at the bottom otherwise. This is the one place the
+    /// order is flipped; on disk the file stays append-ordered.
     pub async fn keys(&self) -> Vec<String> {
-        let mut keys: Vec<String> = self.inner.set.lock().await.iter().cloned().collect();
-        keys.sort();
-        keys
+        self.inner.set.lock().await.iter().rev().cloned().collect()
     }
 
     /// Add `key` to the set and append it to the file. Idempotent: inserting an existing key
@@ -109,8 +120,11 @@ impl Archive {
     /// Remove `key` from the set and rewrite the file from the remaining keys. Used by DELETE.
     pub async fn remove(&self, key: &str) -> anyhow::Result<()> {
         let mut set = self.inner.set.lock().await;
-        if set.remove(key) {
-            write_sorted(&self.inner.path, &set).await?;
+        // `shift_remove`, not `swap_remove`: the latter is O(1) but fills the hole
+        // with the last element, which would shuffle an unrelated key to a new
+        // position and corrupt the record order this set exists to keep.
+        if set.shift_remove(key) {
+            write_keys(&self.inner.path, &set).await?;
         }
         Ok(())
     }
@@ -132,23 +146,26 @@ impl Archive {
     /// The archive decides what Orca will and won't re-download, so a bad hand
     /// edit is destructive and not otherwise recoverable — the copy is what backs
     /// the UI's Restore. Returns the number of keys now recorded.
+    /// `keys` arrives in the editor's display order (newest first), so it is
+    /// reversed back into record order before storing — the file stays
+    /// append-ordered, and a save round-trips to the same list it showed.
     pub async fn replace(&self, keys: Vec<String>) -> anyhow::Result<usize> {
         let mut set = self.inner.set.lock().await;
         self.snapshot().await?;
-        *set = keys.into_iter().collect();
-        write_sorted(&self.inner.path, &set).await?;
+        *set = keys.into_iter().rev().collect();
+        write_keys(&self.inner.path, &set).await?;
         Ok(set.len())
     }
 
     /// Roll back to the previous version. The version being rolled back *from*
-    /// becomes the new backup, so Restore is itself undoable. Returns the
-    /// restored keys, sorted.
+    /// becomes the new backup, so Restore is itself undoable. Returns the restored
+    /// keys in editor order (newest first), matching `keys()`.
     pub async fn restore(&self) -> anyhow::Result<Vec<String>> {
         let backup = self.backup_path();
         let body = fs::read_to_string(&backup)
             .await
             .with_context(|| format!("reading archive backup {}", backup.display()))?;
-        let restored: HashSet<String> = body
+        let restored: IndexSet<String> = body
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
@@ -158,11 +175,9 @@ impl Archive {
         let mut set = self.inner.set.lock().await;
         self.snapshot().await?;
         *set = restored;
-        write_sorted(&self.inner.path, &set).await?;
+        write_keys(&self.inner.path, &set).await?;
 
-        let mut keys: Vec<String> = set.iter().cloned().collect();
-        keys.sort();
-        Ok(keys)
+        Ok(set.iter().rev().cloned().collect())
     }
 
     /// Copy the archive as it stands on disk to the backup slot. A missing
@@ -187,12 +202,12 @@ impl Archive {
     }
 }
 
-/// Write `keys` to `path`, one per line, sorted for deterministic output.
-async fn write_sorted(path: &Path, keys: &HashSet<String>) -> anyhow::Result<()> {
-    let mut sorted: Vec<&String> = keys.iter().collect();
-    sorted.sort();
+/// Write `keys` to `path`, one per line, in record order — the same append-only
+/// shape yt-dlp writes, so its own `--download-archive` appends stay consistent
+/// with ours. Output is deterministic because `IndexSet` iteration is.
+async fn write_keys(path: &Path, keys: &IndexSet<String>) -> anyhow::Result<()> {
     let mut body = String::new();
-    for k in sorted {
+    for k in keys {
         body.push_str(k);
         body.push('\n');
     }
@@ -248,20 +263,50 @@ mod tests {
     async fn load_collapses_duplicate_lines() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("archive.txt");
-        // Simulate the yt-dlp + app double-write: duplicate (and unsorted) lines.
+        // Simulate the yt-dlp + app double-write: the same key written twice.
         fs::write(&path, "twitter b\ntwitter a\ntwitter b\ntwitter a\n")
             .await
             .unwrap();
 
         let archive = Archive::load(&path, vec![]).await.unwrap();
         let contents = fs::read_to_string(&path).await.unwrap();
-        // Canonicalized: sorted, one line each.
+        // Canonicalized: one line each, and each key holds the position it was
+        // FIRST recorded at — collapsing duplicates must not reorder the archive.
         assert_eq!(
             contents.lines().collect::<Vec<_>>(),
-            vec!["twitter a", "twitter b"]
+            vec!["twitter b", "twitter a"]
         );
         assert!(archive.contains("twitter a").await);
         assert!(archive.contains("twitter b").await);
+        // The editor reads it back newest-recorded first.
+        assert_eq!(archive.keys().await, vec!["twitter a", "twitter b"]);
+    }
+
+    /// The editor shows newest-first, saves what it showed, and must get the same
+    /// list back — i.e. `replace` un-reverses exactly what `keys` reversed. A
+    /// half-applied flip here would silently invert the archive on every save.
+    #[tokio::test]
+    async fn editor_order_round_trips_through_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("archive.txt");
+        // Recorded oldest → newest.
+        fs::write(&path, "youtube old\nyoutube mid\nyoutube new\n")
+            .await
+            .unwrap();
+
+        let archive = Archive::load(&path, vec![]).await.unwrap();
+        let shown = archive.keys().await;
+        assert_eq!(shown, vec!["youtube new", "youtube mid", "youtube old"]);
+
+        // Save the list untouched: the file keeps its record order…
+        archive.replace(shown.clone()).await.unwrap();
+        let contents = fs::read_to_string(&path).await.unwrap();
+        assert_eq!(
+            contents.lines().collect::<Vec<_>>(),
+            vec!["youtube old", "youtube mid", "youtube new"]
+        );
+        // …and the editor sees exactly what it sent.
+        assert_eq!(archive.keys().await, shown);
     }
 
     #[tokio::test]

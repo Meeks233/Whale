@@ -199,6 +199,47 @@ impl Queue {
     }
 }
 
+/// Fraction still free at which new downloads stop starting: the record is kept
+/// (and stays streamable), but the fetch is parked as `Paused` until space frees
+/// up. A reserve rather than a hard 100% wall, because the *predicted* size of a
+/// download isn't known until it lands — this leaves room for the one in flight.
+pub const STORAGE_BLOCK_FREE: f64 = 0.05;
+
+/// The effective storage cap in bytes: `ORCA_MAX_STORAGE` if the operator set it
+/// (always wins), else the UI-stored global, else unlimited (`None`). Mirrors the
+/// `resolve_max_heights` precedence ladder.
+pub async fn resolve_max_storage(cfg: &Config, db: &Db) -> Option<i64> {
+    if let Some(bytes) = cfg.max_storage {
+        return Some(bytes);
+    }
+    db.get_setting("max_storage")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| crate::config::parse_size(&v))
+        .filter(|b| *b > 0)
+}
+
+/// `(used_bytes, limit_bytes)` for the storage readout. `limit` is `None` when
+/// nothing caps the install.
+pub async fn storage_usage(cfg: &Config, db: &Db) -> (i64, Option<i64>) {
+    let used = db.download_stats().await.map(|(_, b)| b).unwrap_or(0);
+    (used, resolve_max_storage(cfg, db).await)
+}
+
+/// True once free space has fallen under the `STORAGE_BLOCK_FREE` reserve, i.e.
+/// new downloads must be recorded-but-paused instead of fetched. Always false on
+/// an uncapped install.
+pub async fn storage_full(cfg: &Config, db: &Db) -> bool {
+    let (used, limit) = storage_usage(cfg, db).await;
+    match limit {
+        Some(limit) if limit > 0 => {
+            (limit - used) as f64 <= limit as f64 * STORAGE_BLOCK_FREE
+        }
+        _ => false,
+    }
+}
+
 /// The effective set of download heights for a URL: the env override if the
 /// operator set `ORCA_MAX_HEIGHT` (always wins, and is necessarily a single
 /// height), else the per-site set from the website registry, else the UI-stored
@@ -308,6 +349,28 @@ async fn run_job(
     let id = job.id;
     let variant = job.height; // Some(h) → an extra resolution copy; None → primary.
 
+    let item = match db.get(id).await {
+        Ok(Some(item)) => item,
+        Ok(None) => {
+            tracing::warn!("job {id}: item vanished before download");
+            return;
+        }
+        Err(e) => {
+            tracing::error!("job {id}: db.get failed: {e}");
+            return;
+        }
+    };
+
+    // A pause that landed after this job was queued: the job is already sitting in
+    // the channel and can't be pulled back out, so honour the pause here instead.
+    // Resume re-enqueues, and yt-dlp continues from the `.part` file. This is read
+    // before the Running write below — flipping the status first would clobber the
+    // pause the user just asked for.
+    if item.status == Status::Paused {
+        tracing::info!(job_id = id, variant = ?variant, "job skipped: item is paused");
+        return;
+    }
+
     // Only the primary download owns the item's status. A variant is fetched for
     // an already-completed item, so it must not flip the card back to "running"
     // in the DB (it still shows live progress via the forwarded SSE ticks).
@@ -325,18 +388,6 @@ async fn run_job(
             phase: None,
         });
     }
-
-    let item = match db.get(id).await {
-        Ok(Some(item)) => item,
-        Ok(None) => {
-            tracing::warn!("job {id}: item vanished before download");
-            return;
-        }
-        Err(e) => {
-            tracing::error!("job {id}: db.get failed: {e}");
-            return;
-        }
-    };
 
     // Forward per-tick progress from the downloader into the broadcast.
     let (ptx, mut prx) = mpsc::channel::<ProgressEvent>(64);
@@ -397,8 +448,10 @@ async fn run_job(
         .remove(&(id, variant));
 
     match result {
-        // Cancelled by a delete / deselect: the child was killed and the row is
-        // (being) removed, so there's nothing to mark or report — exit quietly.
+        // Cancelled by a delete / deselect / pause: the child was killed, and the
+        // caller has already put the row in its intended state (removed, or marked
+        // Paused) — so there's nothing to mark or report here. Writing a status
+        // now would race that caller and clobber it; exit quietly instead.
         Err(crate::ytdlp::YtdlpError::Cancelled) => {
             tracing::info!(job_id = id, variant = ?variant, "download cancelled");
         }

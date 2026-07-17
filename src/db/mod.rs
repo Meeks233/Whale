@@ -124,6 +124,21 @@ impl Db {
         queries::download_stats(self).await
     }
 
+    /// How many items are currently paused.
+    pub async fn paused_count(&self) -> anyhow::Result<i64> {
+        queries::paused_count(self).await
+    }
+
+    /// Ids of every paused item, oldest submission first.
+    pub async fn paused_ids(&self) -> anyhow::Result<Vec<i64>> {
+        queries::paused_ids(self).await
+    }
+
+    /// Park every queued/running download as paused; returns the affected ids.
+    pub async fn pause_active(&self) -> anyhow::Result<Vec<i64>> {
+        queries::pause_active(self).await
+    }
+
     /// All websites in the editable registry (display order).
     pub async fn list_websites(&self) -> anyhow::Result<Vec<Website>> {
         queries::list_websites(self).await

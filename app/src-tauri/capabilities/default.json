@@ -9,6 +9,10 @@
     "notification:allow-notify",
     "notification:allow-request-permission",
     "notification:allow-is-permission-granted",
-    "process:allow-exit"
+    "process:allow-exit",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [{ "url": "https://github.com/Meeks233/*" }]
+    }
   ]
 }

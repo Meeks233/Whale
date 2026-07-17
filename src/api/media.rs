@@ -205,7 +205,7 @@ async fn resolve_stream_target(
         .find_by_slug(slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    ensure_media_ready(item.status)?;
+    ensure_streamable(item.status)?;
     // Defense in depth: re-validate the stored page URL before yt-dlp fetches it.
     crate::net_guard::guard(&item.webpage_url, state.cfg.allow_private_dns)
         .await
@@ -413,8 +413,29 @@ async fn serve_item(root: &FsPath, item: Item, req: Request) -> Result<Response,
     Ok(Response::from_parts(parts, Body::new(body)).into_response())
 }
 
+/// Gate for the routes that serve a LOCAL file (`/file`, public shares): there
+/// has to be a finished download on disk to send.
 fn ensure_media_ready(status: Status) -> Result<(), AppError> {
     if status == Status::Completed {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest("item media is not ready".into()))
+    }
+}
+
+/// Gate for online playback (`/stream`), which is a different question: that
+/// route proxies from the SOURCE — yt-dlp resolves the upstream URL and we pass
+/// the bytes through — so it needs no local file at all.
+///
+/// Which is why `paused` streams. A download parked by the storage cap is the
+/// case the cap's whole promise rests on: "recorded, still watchable, just not
+/// downloaded yet". Holding it to the local-file rule made the item unplayable
+/// precisely when there was no copy coming, breaking the one thing pausing was
+/// supposed to preserve. Queued/running are excluded on purpose — a file IS on
+/// its way, and racing the download with a second upstream fetch just doubles the
+/// bandwidth for a video that's about to be local anyway.
+fn ensure_streamable(status: Status) -> Result<(), AppError> {
+    if matches!(status, Status::Completed | Status::Paused) {
         Ok(())
     } else {
         Err(AppError::BadRequest("item media is not ready".into()))
@@ -471,10 +492,29 @@ mod tests {
         for status in [
             Status::Queued,
             Status::Running,
+            // A paused item has no local file to serve, however streamable it is.
+            Status::Paused,
             Status::Failed,
             Status::Duplicate,
         ] {
             assert!(ensure_media_ready(status).is_err());
+        }
+    }
+
+    /// Online playback proxies from the source, so it must NOT be held to the
+    /// local-file rule: a download the storage cap parked is still watchable,
+    /// which is the entire promise the cap makes.
+    #[test]
+    fn paused_items_still_stream_from_source() {
+        assert!(ensure_streamable(Status::Completed).is_ok());
+        assert!(ensure_streamable(Status::Paused).is_ok());
+        for status in [
+            Status::Queued,
+            Status::Running,
+            Status::Failed,
+            Status::Duplicate,
+        ] {
+            assert!(ensure_streamable(status).is_err());
         }
     }
 

@@ -19,7 +19,10 @@ capability. Both have partial unique indexes.
 
 ## State Invariants
 
-- statuses are `queued`, `running`, `completed`, `failed`, or `duplicate`
+- statuses are `queued`, `running`, `paused`, `completed`, `failed`, or `duplicate`
+- `paused` is a held-back download — the user pressed pause, or the storage cap
+  left no room. The record stays usable (online playback included) and its
+  partial file is kept, so a resume continues rather than restarts
 - startup resets `running` rows to `queued`
 - only completed rows with a local file can become public
 - revoking or expiring a share clears `share_slug`, expiry, and hit count

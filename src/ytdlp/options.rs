@@ -145,6 +145,11 @@ pub fn download_args(
     args.push("--paths".into());
     args.push(format!("home:{}/{}", cfg.download_dir.display(), site_dir));
     args.push("--paths".into());
+    // Partial downloads collect in one stable directory, deliberately outside the
+    // per-site folders. That location is also what makes pause/resume work: yt-dlp
+    // resumes from `.part` by default (`--continue`), so killing a paused job's
+    // child and re-running the same command later continues the transfer instead
+    // of restarting it. Nothing here may clear this directory.
     args.push(format!("temp:{}/.part", cfg.download_dir.display()));
 
     // The download archive dedups against already-fetched videos. A resolution
@@ -224,6 +229,7 @@ mod tests {
             format: "bv*+ba/b".into(),
             format_user_set: false,
             max_height: None,
+            max_storage: None,
             subs: true,
             subs_user_set: false,
             auto_subs: false,
@@ -260,6 +266,7 @@ mod tests {
             public_slug: None,
             public_until: None,
             public_hits: 0,
+            filename: None,
             local_available: false,
             total_filesize: 0,
             playlist_index: None,

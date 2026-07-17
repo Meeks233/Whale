@@ -38,6 +38,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/items", get(items::list))
         .route("/api/items/:slug", get(items::get).delete(items::delete))
         .route("/api/items/:slug/retry", post(items::retry))
+        .route("/api/items/:slug/pause", post(items::pause))
+        .route("/api/items/:slug/resume", post(items::resume))
+        // Global pause/resume: one signal, the backend decides what it covers.
+        .route("/api/queue/pause", post(items::pause_all))
+        .route("/api/queue/resume", post(items::resume_all))
         .route(
             "/api/items/:slug/resolutions",
             get(items::resolutions).put(items::set_resolutions),

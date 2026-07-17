@@ -131,6 +131,12 @@
    why the share-window <label>s still flashed a square. A new control now gets
    the right behaviour by default instead of having to be added here. */
 * { -webkit-tap-highlight-color: transparent; }
+/* Every accent-on-:hover rule for a control that lives on a card is wrapped in
+   `@media (hover: hover)`. A touch WebView has no pointer to move away, so it
+   leaves :hover latched on whatever was tapped last — the play badge stayed lit
+   accent-blue long after the tap, reading as "selected". Gating on real hover
+   capability is the standard fix; :focus-visible stays ungated, since it already
+   declines to match a touch. */
 button { overflow: hidden; touch-action: manipulation; }
 /* …and one shared rounded :active feedback in its place, keyed off what a
    control IS rather than a hand-maintained class list. */
@@ -153,12 +159,28 @@ body {
 
 .hidden { display: none !important; }
 
+/* ---- Sticky topbar ----
+   The one row that stays pinned. It carries ambient state (storage readout,
+   connection heartbeat) and the two entry points — Settings and Websites — that
+   should be reachable from anywhere in a long list. Everything else, the submit
+   row included, scrolls away with the content: on a phone a second pinned row is
+   real estate spent on a control you touch once per download, and the URL box is
+   one flick from the top anyway.
+   Opaque, and stretched edge-to-edge past the body's 12px side padding (negative
+   margin + matching padding) — cards sliding through a gap beside the bar is
+   exactly what gives a half-done sticky header away. */
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin: 0 -12px;
+  background: var(--bg);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  /* Clear the Android status bar / notch (edge-to-edge WebView). */
-  padding: calc(10px + env(safe-area-inset-top)) 2px 8px;
+  /* Side padding restores the body's 12px inside the edge-to-edge bar; the top
+     value also clears the Android status bar / notch (edge-to-edge WebView). */
+  padding: calc(10px + env(safe-area-inset-top)) 14px 8px;
 }
 /* ---- Server status heartbeat (right of the brand) ----
    A small dot that mirrors the SSE stream's health: green and breathing while
@@ -211,9 +233,11 @@ body {
   .item.focus-flash { animation: none; }
 }
 
-/* Total-downloaded readout: a compact "N files · X GB" pill to the right of the
-   heartbeat (the familiar storage-usage summary). Muted so it reads as ambient
-   metadata next to the brand, not a control. */
+/* Storage readout: a donut gauge + "58% · 1.2 TB" to the right of the heartbeat.
+   Muted while there's room, so it reads as ambient metadata next to the brand
+   rather than a control — and escalates to amber, then red, as the reserve runs
+   out (see renderDlStats). The colour drives BOTH the text and the ring's fill
+   through currentColor, so there's one thing to change per state. */
 .dl-stats {
   display: inline-flex;
   align-items: center;
@@ -224,8 +248,17 @@ body {
   color: var(--muted);
   white-space: nowrap;
 }
-.dl-stats svg { display: block; opacity: .8; }
+.dl-stats svg { display: block; }
 .dl-stats.hidden { display: none; }
+/* Under 25% free: worth noticing. Under 5%: the backend has stopped starting new
+   downloads and is parking them as paused, so this is a state change, not a
+   nag — red, and the strongest thing in the topbar. */
+.dl-stats.warn { color: var(--warn); }
+.dl-stats.crit { color: var(--err); }
+/* The unfilled remainder of the ring: same ink, dropped back so the filled arc
+   reads against it in either theme without a second colour to maintain. */
+.dl-ring-track { stroke: currentColor; opacity: .22; }
+.dl-ring-fill { stroke: currentColor; transition: stroke-dasharray .3s ease; }
 
 .icon-btn {
   background: none;
@@ -237,6 +270,9 @@ body {
 }
 .icon-btn svg { display: block; }
 .icon-btn.active { color: var(--accent); }
+/* Present but inert — an idle queue has nothing to pause. Kept in place rather
+   than hidden so the control stays where the user learned it was. */
+.icon-btn:disabled { opacity: .38; cursor: default; }
 
 /* ---- Topbar popover menu (language picker) ----
    A small dropdown anchored under its trigger, the standard header-menu pattern:
@@ -340,6 +376,25 @@ input:focus { outline: none; border-color: var(--accent); }
 }
 .btn:disabled { opacity: .5; cursor: default; }
 .btn.wide { display: block; width: 100%; margin: 12px 0; background: var(--surface-2); }
+/* An accent button whose label is a glyph (the submit row's Download). Square,
+   and sized to the field beside it so the row reads as one control group rather
+   than a box and a lozenge. */
+.btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  padding: 0;
+  align-self: stretch;
+}
+.btn-icon svg { display: block; }
+/* Working state: the button swaps its glyph for the shared loader-circle
+   (SPINNER_SVG in app.ts) and turns it with the same `spin` keyframes the
+   thumbnail's pending mask uses — one spinner, one animation, app-wide. The
+   button is disabled while busy, so the usual disabled dimming is dropped here:
+   a spinner that's greyed out reads as broken rather than as busy. */
+.btn-icon.busy { opacity: 1; }
+.btn-icon.busy svg { animation: spin .8s linear infinite; }
 
 /* ---- Settings / cookies dialogs (same popup shell as the share dialog) ---- */
 .modal-overlay {
@@ -373,7 +428,11 @@ input:focus { outline: none; border-color: var(--accent); }
   /* Firefox: thin themed bar instead of the chunky native one. */
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
-  scrollbar-gutter: stable;
+  /* `both-edges`, not plain `stable`: the gutter is reserved on ONE side, so the
+     bare keyword ate 12px off the right of the content box and left every card
+     inside sitting visibly left of centre, with a wide right margin. Reserving
+     the same space on both sides costs 12px of width and buys back symmetry. */
+  scrollbar-gutter: stable both-edges;
 }
 /* WebKit/Blink: a slim inset thumb that matches the card, so the long website
    list no longer shows the heavy OS scrollbar. Track stays transparent; the
@@ -468,6 +527,22 @@ input:focus { outline: none; border-color: var(--accent); }
    lines. Allowed to shrink but never below legibility, so a long URL scrolls
    within the field rather than pushing the label off the row. */
 .form-row-ctl .input { flex: 0 1 240px; min-width: 140px; font-size: 14px; padding: 8px 10px; }
+/* Storage cap: a number and its unit reading as ONE value, occupying exactly the
+   width a lone field does in these rows (123 + 6 + 74 = 203px) so it lines up
+   with API token / Server URL instead of running wider than everything above it.
+   Must come after the two rules above — it overrides both.
+   Sized the same way the sheet sizes everything else: the row's .form-row-ctl
+   keeps `flex: 0 0 auto` and the CHILDREN carry the basis. The unit menu is cut
+   to its content ("GB" — never more than two characters); the generic row-select
+   minimum of 150px is meant for language-name lists and left this one wider than
+   the number it qualifies, which read as two unrelated boxes rather than one
+   value. The rest goes to the number, which is the part you actually type.
+   `min-width: 0` on both is load-bearing: a flex item's automatic minimum is its
+   content, so without it an <input> refuses to shrink below its intrinsic ~203px
+   and the pair adds up to 283 no matter what basis it's given. */
+.storage-ctl { gap: 6px; }
+.storage-ctl .input { flex: 0 1 123px; min-width: 0; }
+.storage-ctl .select { flex: 0 0 74px; min-width: 0; padding-right: 4px; }
 /* A switch's own top nudge is for stacked layouts; a row centres it already. */
 .form-row-ctl .site-subs-toggle { margin-top: 0; }
 /* The Server URL field is only meaningful in the native Tauri shell (which
@@ -475,6 +550,10 @@ input:focus { outline: none; border-color: var(--accent); }
    so hide the whole row — detected via html.app-native (set from
    window.__TAURI__), not user-agent sniffing. */
 html:not(.app-native) #server-row { display: none; }
+/* …which leaves API token as the only row in the Connection box. `+` matches on
+   DOM adjacency, not layout, so its separator would otherwise still draw — a
+   hairline pinned under the box's top edge with nothing above it. */
+html:not(.app-native) #server-row + .form-row { border-top: none; }
 /* Background activity and storage are Android grants with no web equivalent —
    the browser build can only ever ask about notifications, and doesn't insist on
    even that. Same html.app-native signal as the row above, not user-agent
@@ -485,7 +564,33 @@ html:not(.app-native) .permission-item[data-permission="storage"] { display: non
 .hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
 .hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
 .hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: var(--r-xs); font-size: 11px; }
-.sep { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
+/* ---- Grouped settings ------------------------------------------------------
+   A sheet is a stack of .set-group blocks: a heading, ONE bordered .form-box
+   holding that group's rows, then any hint or conditional notice after the box.
+
+     <section class="set-group">
+       <label>Connection</label>
+       <div class="form-box"> …form-rows… </div>
+       <p class="hint-muted">…</p>
+     </section>
+
+   The box's own edge is the separator, and the hairlines inside it come from
+   .form-row + .form-row. That's the whole divider story: a rule can only appear
+   between two rows of the same group, or at a real group boundary. The old
+   free-standing <hr class="sep"> elements are what this replaces — placed by
+   hand, they drifted until the sheet had lines where nothing ended and none
+   where something did. The last one is gone, and so is the `.sep` rule. */
+.set-group { margin: 0 0 18px; }
+.form-box {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  padding: 0 12px;
+}
+/* The heading already spaces the box; a hint belongs to the box above it. */
+.set-group > .form-box + .hint-muted { margin: 8px 0 0; }
+.set-group > .form-box + .hint { margin-top: 8px; }
 .ta {
   width: 100%;
   padding: 8px 10px;
@@ -503,7 +608,8 @@ html:not(.app-native) .permission-item[data-permission="storage"] { display: non
    full-width action per permission with a state-tinted icon and live result. */
 .permission-box {
   overflow: hidden;
-  margin: 0 0 14px;
+  /* The prompt dialog spaces it itself; inside a .set-group the group does. */
+  margin: 0;
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface-2);
@@ -556,7 +662,7 @@ html:not(.app-native) .permission-item[data-permission="storage"] { display: non
   background: color-mix(in oklab, var(--err) 12%, var(--surface));
 }
 .permission-prompt-card { max-width: 430px; }
-.permission-prompt-actions { margin-top: 4px; }
+.permission-prompt-actions { margin-top: 14px; }
 
 .topbar-actions { display: flex; gap: 2px; }
 
@@ -788,7 +894,10 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 /* Whole-list play button: bottom-right. A real <button>, so it needs the button
    reset the item badge (a passive <span>) does not. */
 .play-badge.group-play { cursor: pointer; border: none; padding: 0; }
-.group-play:hover, .group-play:focus-visible { background: var(--accent); transform: scale(1.08); }
+@media (hover: hover) {
+  .group-play:hover { background: var(--accent); transform: scale(1.08); }
+}
+.group-play:focus-visible { background: var(--accent); transform: scale(1.08); }
 .group-info { flex: 1 1 auto; min-width: 0; padding-top: 1px; }
 .group-sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
 /* Live download speed of the currently-running child, shown after the summary
@@ -989,7 +1098,9 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   transition: background .15s ease, transform .15s ease;
 }
 .play-badge svg { width: 14px; height: 14px; margin-left: 1px; /* optical centre */ }
-.thumb-play:hover .play-badge,
+@media (hover: hover) {
+  .thumb-play:hover .play-badge { background: var(--accent); transform: scale(1.08); }
+}
 .thumb-play:focus-visible .play-badge { background: var(--accent); transform: scale(1.08); }
 .thumb-play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: var(--r-sm); }
 
@@ -1053,6 +1164,10 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 .badge-completed.flash { display: inline-block; }
 .badge-failed { background: var(--err); }
 .badge-duplicate { background: var(--surface-2); color: var(--muted); }
+/* Paused: deliberately quiet. Nothing is wrong — the download is waiting, either
+   because the user said so or because the disk is full — so it reads as a
+   resting state, not the alarm that --warn/--err would raise. */
+.badge-paused { background: var(--surface-2); color: var(--muted); }
 
 .progress {
   margin-top: 8px;
@@ -1090,7 +1205,9 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   user-select: none;
 }
 .act::-webkit-details-marker { display: none; }
-.act:hover { color: var(--accent); }
+@media (hover: hover) {
+  .act:hover { color: var(--accent); }
+}
 .act svg { display: block; }
 /* Delete (trash) action: neutral by default, red on hover — its destructive
    intent, and it always routes through the confirm dialog. */
@@ -1098,6 +1215,15 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 /* A live (public) share tints the share icon the Completed green, at-a-glance
    signalling "this is shared". */
 .act-share.act-on { color: var(--ok); }
+/* Resume is the way out of a paused card, so it's the one lit control in the row
+   — every other .act stays muted until touched. Pause needs no such treatment:
+   it's an option, not an answer. */
+.act-resume { color: var(--accent); }
+/* Save, once the file is already in Downloads/Orca on this device. Same green as
+   a live share, for the same reason: it reports a state, not an action. Tapping
+   it says so rather than re-downloading (see the .act-save handler). App-only —
+   a browser has no idea what's in the user's Downloads folder. */
+.act-save.act-local { color: var(--ok); }
 
 /* ---- Chips: one capsule for every fact and choice on a card ----------------
    The size readout, the external-access counter and the resolution picker are
@@ -1128,7 +1254,9 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 /* Tappable chip (the resolution picker): same capsule, plus an accent on hover
    to tell it apart from the passive ones. */
 .chip-btn { cursor: pointer; }
-.chip-btn:hover { color: var(--accent); border-color: var(--accent); }
+@media (hover: hover) {
+  .chip-btn:hover { color: var(--accent); border-color: var(--accent); }
+}
 /* The measured part of a chip stands out from its label/icon. */
 .hits-n { color: var(--text); }
 .res-btn-label { color: var(--text); font-variant-numeric: tabular-nums; }
@@ -1385,26 +1513,78 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .log-entry--error { border-left: 3px solid var(--err); }
 .log-entry--warn .log-badge { color: var(--warn); }
 .log-entry--error .log-badge { color: var(--err); }
+/* A log row is a disclosure with a TWO-LINE summary: a meta line (platform ·
+   stage · time) over the message. The old single-line version put all four in
+   one flex row, where three nowrap chips starved the one part anybody reads —
+   and opening the row only let that starved column wrap downwards, which is the
+   "everything crammed to the right" this replaces. Giving the message its own
+   full-width line means expanding just un-truncates it in place; nothing
+   reflows sideways and the row can't collapse into a ragged stack. Chevron
+   left, copy right — both fixed, so neither steals from the text. */
 .log-entry > summary {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
   cursor: pointer; list-style: none; font-size: 12px; user-select: none;
 }
 .log-entry > summary::-webkit-details-marker { display: none; }
+.log-chevron {
+  flex: none; display: grid; place-items: center; height: 18px;
+  color: var(--muted); transition: transform .15s ease;
+}
+.log-entry[open] .log-chevron { transform: rotate(90deg); }
+.log-chevron svg { display: block; }
+/* The text column. min-width:0 is what actually lets the message ellipsize
+   instead of forcing the row wider than the card. */
+.log-sum { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.log-meta { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .log-time { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .log-badge { color: var(--accent); font-weight: 600; white-space: nowrap; }
 .log-entry--download .log-badge { color: var(--run); }
 .log-stage { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; white-space: nowrap; }
-.log-msg-short { flex: 1; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.log-entry[open] .log-msg-short { white-space: normal; }
+.log-msg-short { min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.45; }
+/* Open: show the whole message, but bound it — one pathological yt-dlp traceback
+   must not push the copy buttons and everything below it off the sheet. */
+.log-entry[open] .log-msg-short { white-space: normal; overflow: visible; }
 .log-copy { flex: none; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: var(--r-xs); }
 .log-copy:hover { color: var(--text); }
+/* The expanded body: labelled fields rather than one text blob, so the URL is
+   findable at a glance. Values are monospace and wrap on any character — these
+   are URLs and stack traces with no spaces to break at, and left to themselves
+   they'd force the whole sheet to scroll sideways. */
 .log-full {
-  margin: 0; padding: 8px 10px; border-top: 1px solid var(--border);
-  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--text); white-space: pre-wrap; word-break: break-word;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px; border-top: 1px solid var(--border);
+  max-height: 240px; overflow-y: auto;
 }
-.settings-footer { margin-top: 14px; text-align: center; color: var(--muted); font-size: 12px; }
-.settings-footer a { color: var(--accent); }
+.log-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.log-key {
+  color: var(--muted); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.log-value {
+  margin: 0;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* Footer: the issue link (the GitHub mark) over the small print. */
+.settings-footer { margin-top: 18px; text-align: center; color: var(--muted); font-size: 12px; }
+/* Scoped to the text links, NOT every <a> in the footer: the GitHub mark is one
+   too, and a blanket rule outranked .gh-link's own colour (0,1,1 beats 0,1,0) —
+   so the logo rendered accent-blue instead of the muted ink it's drawn as, and
+   its hover/tap states had nothing to change to. */
+.settings-links a { color: var(--accent); }
+/* The line that tells you what the GitHub mark under it is for. */
+.gh-prompt { margin: 0 0 2px; }
+.gh-link {
+  display: inline-grid; place-items: center;
+  width: 40px; height: 40px; margin-bottom: 6px;
+  color: var(--muted); border-radius: var(--r-full);
+  transition: color .15s ease, background-color .15s ease;
+}
+@media (hover: hover) {
+  .gh-link:hover { color: var(--text); background: var(--surface-2); }
+}
+.gh-link svg { display: block; }
+.settings-links { margin: 0; }
 
 /* ---- Dirty-tracked save bar ------------------------------------------------
    ONE Save for the whole sheet, docked to its bottom edge and revealed only once
@@ -1460,6 +1640,12 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 /* ---- Website management --------------------------------------------------- */
 .modal-card-wide { max-width: 680px; }
 .sites-global { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 14px; }
+/* No hairlines between the global defaults. They only ever appeared between
+   Share quality and Video format anyway — the other three rows are each followed
+   by a conditional `*-locked` notice, and `+` doesn't reach across it — so the
+   card showed exactly one rule, in one arbitrary gap, and read as a mistake.
+   Four rows in a small card don't need dividing; the card is the grouping. */
+.sites-global .form-row + .form-row { border-top: none; }
 .sites-global .row { display: flex; gap: 8px; align-items: center; }
 .sites-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .sites-toolbar #site-search { flex: 1 1 auto; min-width: 0; }

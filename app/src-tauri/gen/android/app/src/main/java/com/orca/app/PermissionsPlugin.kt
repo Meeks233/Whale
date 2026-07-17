@@ -27,6 +27,22 @@ class SlugArgs {
   var slug: String? = null
 }
 
+/** One item to look up, with the server's fingerprint for its file. */
+@InvokeArg
+class LocalQuery {
+  var slug: String? = null
+  /** Name the server serves the file under; empty when it has no local file. */
+  var name: String? = null
+  /** Exact byte size of that file; 0 when unknown — never adopted. */
+  var size: Long = 0
+  var height: Int = 0
+}
+
+@InvokeArg
+class LocalFilesArgs {
+  var items: List<LocalQuery> = emptyList()
+}
+
 @InvokeArg
 class SaveArgs {
   var url: String? = null
@@ -209,32 +225,44 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   /**
-   * Where an item's local copy lives, or null if we don't have one. Backs the
-   * player's "play the file on this device rather than stream it back from the
-   * server" path.
+   * Which of [LocalFilesArgs.items] have a copy on this device. Backs both the
+   * player's "play the file here rather than stream it back from the server"
+   * path and the green Save icon on a card.
+   *
+   * Batched, and off the main thread: the frontend asks about a whole page at
+   * once, and the answer costs one directory listing for the lot (see
+   * [MediaSaver.FolderIndex]). Answers come back in request order; an item with
+   * no local copy resolves to an empty object rather than dropping out, so the
+   * caller can zip the two lists.
    */
   @Command
-  fun localFile(invoke: Invoke) {
-    val slug = invoke.parseArgs(SlugArgs::class.java).slug
-    if (slug.isNullOrEmpty()) {
-      invoke.reject("missing slug")
-      return
-    }
+  fun localFiles(invoke: Invoke) {
+    val items = invoke.parseArgs(LocalFilesArgs::class.java).items
     // Not gated on the storage permission: a file we saved while permitted stays
     // readable, and refusing to report it would strand playback if the grant is
     // later revoked.
-    val local = MediaSaver.localFile(activity, slug)
-    if (local == null) {
-      invoke.resolve(JSObject())
-      return
-    }
-    invoke.resolve(JSObject().apply {
-      put("path", local.path)
-      put("height", local.height)
-      // The URL is what the player actually uses; `path` is retained for
-      // diagnostics. See LocalMediaServer for why a plain asset:// URL can't work.
-      put("url", LocalMediaServer.urlFor(activity, slug).orEmpty())
-    })
+    Thread {
+      try {
+        val index = MediaSaver.folderIndex(activity)
+        val out = org.json.JSONArray()
+        for (q in items) {
+          val slug = q.slug.orEmpty()
+          val local = MediaSaver.resolve(activity, slug, q.name.orEmpty(), q.size, q.height, index)
+          out.put(
+            if (local == null) JSObject() else JSObject().apply {
+              put("path", local.path)
+              put("height", local.height)
+              // The URL is what the player actually uses; `path` is retained for
+              // diagnostics. See LocalMediaServer for why asset:// can't work.
+              put("url", LocalMediaServer.urlFor(activity, slug).orEmpty())
+            }
+          )
+        }
+        invoke.resolve(JSObject().apply { put("files", out) })
+      } catch (e: Exception) {
+        invoke.reject(e.message ?: "could not read local files")
+      }
+    }.start()
   }
 
   /**

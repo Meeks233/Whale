@@ -86,6 +86,86 @@ object MediaSaver {
     return entry
   }
 
+  /**
+   * A one-shot listing of the active folder, so a whole page of items is matched
+   * against ONE directory read instead of one per item. Sizes come straight from
+   * the listing — no file is opened, and nothing is decoded.
+   */
+  class FolderIndex(dir: File, claimed: Set<String>) {
+    /** Every regular file in the folder, keyed by exact byte length. */
+    private val bySize: Map<Long, List<File>> =
+      (dir.listFiles() ?: emptyArray())
+        .filter { it.isFile && it.name != ".nomedia" && !it.name.endsWith(".part") }
+        .groupBy { it.length() }
+
+    /**
+     * Paths no longer up for adoption — already spoken for by a registry entry,
+     * or adopted earlier in this same batch. Without it, two items that happen to
+     * be the same byte length (the same video downloaded twice) would both adopt
+     * whichever file sorted first, and one card would play the other's video.
+     */
+    private val taken: MutableSet<String> = claimed.toMutableSet()
+
+    /**
+     * The file matching the server's fingerprint for an item, or null.
+     *
+     * Byte size is the primary key and it is doing the real work: a given render
+     * of a given video is one exact length, so a size hit is already the right
+     * file — and, crucially, the right RESOLUTION. The server quotes the size of
+     * the copy it holds *now*, so a stale 720p save left over from before an
+     * upgrade to 1080p simply doesn't match, which is the outcome we want.
+     *
+     * [want] only breaks ties between two same-length files, and matches loosely
+     * because [uniqueFile] may have stored it as `name (2).mp4`. It arrives
+     * already sanitized — the caller writes files through the same [sanitize],
+     * so comparing raw server names here would never match.
+     */
+    fun match(want: String, size: Long): File? {
+      if (size <= 0L) return null
+      val candidates = (bySize[size] ?: return null).filter { it.absolutePath !in taken }
+      if (candidates.isEmpty()) return null
+      val hit = candidates.firstOrNull { sameStem(it.name, want) }
+        ?: candidates.singleOrNull()
+        ?: return null // ambiguous: several same-size files, none named like ours
+      taken.add(hit.absolutePath)
+      return hit
+    }
+
+    /** `a.mp4` vs `a.mp4` / `a (2).mp4` — the forms uniqueFile can produce. */
+    private fun sameStem(have: String, want: String): Boolean {
+      if (have == want) return true
+      val ext = want.substringAfterLast('.', "")
+      val stem = if (ext.isEmpty()) want else want.dropLast(ext.length + 1)
+      return Regex(Regex.escape(stem) + " \\(\\d+\\)" + if (ext.isEmpty()) "" else Regex.escape(".$ext"))
+        .matches(have)
+    }
+  }
+
+  /**
+   * The local copy of [slug], recognising files this build never recorded.
+   *
+   * The registry alone only knows about saves made since it existed, so a folder
+   * full of videos from an older build read as "not downloaded" and streamed.
+   * When the registry misses, fall back to matching the server's fingerprint
+   * (name + exact size) against [index] and adopt the hit — writing it into the
+   * registry, so the walk happens once per file rather than on every render.
+   */
+  fun resolve(ctx: Context, slug: String, name: String, size: Long, height: Int, index: FolderIndex): Local? {
+    localFile(ctx, slug)?.let { return it }
+    if (slug.isEmpty()) return null
+    val found = index.match(sanitize(name), size) ?: return null
+    remember(ctx, slug, found, height)
+    return Local(found.absolutePath, height)
+  }
+
+  /** A folder index for the active save folder, pre-claiming every registered path. */
+  fun folderIndex(ctx: Context): FolderIndex {
+    val claimed = filesPrefs(ctx).all.values.mapNotNull { raw ->
+      try { org.json.JSONObject(raw as String).getString("path") } catch (_: Exception) { null }
+    }.toSet()
+    return FolderIndex(dir(ctx), claimed)
+  }
+
   /** Re-point registry entries after [setHidden] moves files between folders. */
   private fun rewritePaths(ctx: Context, moves: Map<String, String>) {
     if (moves.isEmpty()) return
