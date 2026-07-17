@@ -317,7 +317,10 @@ pub async fn pause(State(state): State<AppState>, Path(slug): Path<String>) -> A
 }
 
 /// POST /api/items/:slug/resume — re-queue a paused download.
-pub async fn resume(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
+pub async fn resume(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> AppResult<Response> {
     let item = item_by_slug(&state, &slug).await?;
     if item.status != Status::Paused {
         return Err(AppError::BadRequest("item is not paused".into()));
@@ -783,8 +786,8 @@ pub async fn put_settings(
                 "max_heights is pinned by the ORCA_MAX_HEIGHT environment variable".into(),
             ));
         }
-        let set = crate::resolution::HeightSet::from_heights(heights)
-            .map_err(AppError::BadRequest)?;
+        let set =
+            crate::resolution::HeightSet::from_heights(heights).map_err(AppError::BadRequest)?;
         // Always store, even for the empty set: "" is the stream-only choice, and
         // clearing the row instead would silently reinstate the "highest" default.
         state
@@ -844,7 +847,12 @@ pub async fn put_settings(
             // arrival with no way back short of deleting things. Let the user set it
             // anyway (shrinking the cap is how you *start* a cleanup) but refuse the
             // nonsensical negative.
-            Some(b) => state.db.set_setting("max_storage", Some(&b.to_string())).await?,
+            Some(b) => {
+                state
+                    .db
+                    .set_setting("max_storage", Some(&b.to_string()))
+                    .await?
+            }
             None => state.db.set_setting("max_storage", None).await?,
         }
     }

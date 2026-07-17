@@ -1178,7 +1178,6 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 }
 .progress-fill { height: 100%; background: var(--run); width: 0; transition: width .3s ease; }
 
-.err { color: var(--err); font-size: 12px; margin-top: 6px; word-break: break-word; }
 
 /* ---- Card actions: save / share, parked at the card's bottom-right ----
    A separate row from the status badge (decoupled), sunk to the bottom of the
@@ -1219,6 +1218,9 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
    — every other .act stays muted until touched. Pause needs no such treatment:
    it's an option, not an answer. */
 .act-resume { color: var(--accent); }
+/* Retry is the same shape of thing for a failed card — the one control that
+   answers the state the badge is reporting — so it's lit for the same reason. */
+.act-retry { color: var(--accent); }
 /* Save, once the file is already in Downloads/Orca on this device. Same green as
    a live share, for the same reason: it reports a state, not an action. Tapping
    it says so rather than re-downloading (see the .act-save handler). App-only —
@@ -1540,20 +1542,26 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .log-badge { color: var(--accent); font-weight: 600; white-space: nowrap; }
 .log-entry--download .log-badge { color: var(--run); }
 .log-stage { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; white-space: nowrap; }
+/* A one-line teaser, in both states. It used to unclamp on open, which printed
+   the whole message here *and* again in .log-full below — the same error twice,
+   and the labelled copy you'd actually read was the clamped one. The summary
+   stays a preview; .log-full is where the message lives. */
 .log-msg-short { min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.45; }
-/* Open: show the whole message, but bound it — one pathological yt-dlp traceback
-   must not push the copy buttons and everything below it off the sheet. */
-.log-entry[open] .log-msg-short { white-space: normal; overflow: visible; }
 .log-copy { flex: none; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 4px; border-radius: var(--r-xs); }
 .log-copy:hover { color: var(--text); }
 /* The expanded body: labelled fields rather than one text blob, so the URL is
    findable at a glance. Values are monospace and wrap on any character — these
    are URLs and stack traces with no spaces to break at, and left to themselves
-   they'd force the whole sheet to scroll sideways. */
+   they'd force the whole sheet to scroll sideways.
+
+   Deliberately unclamped: a 240px scroll box nested inside the settings sheet
+   meant a 15-line yt-dlp tail had to be read through a letterbox, on a phone,
+   with two scroll containers fighting over the drag. Entries are collapsed by
+   default and only one tends to be open, so letting the open one run its full
+   height costs nothing and is the only way to actually read the error. */
 .log-full {
   display: flex; flex-direction: column; gap: 8px;
   padding: 10px; border-top: 1px solid var(--border);
-  max-height: 240px; overflow-y: auto;
 }
 .log-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .log-key {

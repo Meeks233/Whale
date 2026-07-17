@@ -81,7 +81,12 @@ pub async fn public_file(
     if is_fresh_access(&req) {
         let _ = state.db.bump_public_hits(item.id).await;
     }
-    serve_item(&state.cfg.download_dir, cap_for_sharing(&state, item).await, req).await
+    serve_item(
+        &state.cfg.download_dir,
+        cap_for_sharing(&state, item).await,
+        req,
+    )
+    .await
 }
 
 /// Point an item at the copy a *share* link should serve: the tallest downloaded

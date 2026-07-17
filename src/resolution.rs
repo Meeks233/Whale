@@ -265,14 +265,19 @@ mod tests {
     fn parse_drops_junk_and_off_ladder_values() {
         // Lenient on the way out of the DB: 999 isn't on the ladder, "abc" isn't
         // a number, and a stray "p" suffix is tolerated.
-        assert_eq!(HeightSet::parse("1080p,abc,999,,720").heights(), &[1080, 720]);
+        assert_eq!(
+            HeightSet::parse("1080p,abc,999,,720").heights(),
+            &[1080, 720]
+        );
     }
 
     #[test]
     fn from_heights_rejects_off_ladder_input() {
         assert!(HeightSet::from_heights(&[1080, 999]).is_err());
         assert_eq!(
-            HeightSet::from_heights(&[720, 1080, 720]).unwrap().heights(),
+            HeightSet::from_heights(&[720, 1080, 720])
+                .unwrap()
+                .heights(),
             &[1080, 720]
         );
     }
@@ -360,7 +365,10 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), got.len(), "duplicates in {got:?}");
-        assert!(got.iter().all(|h| available.contains(h)), "phantom in {got:?}");
+        assert!(
+            got.iter().all(|h| available.contains(h)),
+            "phantom in {got:?}"
+        );
     }
 
     // --- StreamQuality -------------------------------------------------------

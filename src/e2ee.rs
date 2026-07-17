@@ -281,11 +281,7 @@ mod tests {
 
     /// Build the authenticator a legitimate client would send.
     fn authenticator(key: &[u8; 32], method: &str, target: &str, t: i64, nonce: &str) -> String {
-        let payload = serde_json::to_vec(&Authenticator {
-            t,
-            n: nonce.into(),
-        })
-        .unwrap();
+        let payload = serde_json::to_vec(&Authenticator { t, n: nonce.into() }).unwrap();
         STANDARD.encode(seal(key, &payload, &authenticator_aad(method, target)).unwrap())
     }
 
@@ -340,7 +336,16 @@ mod tests {
         let now = 1_700_000_000;
         assert!(verify_authenticator(&key, "", "GET", "/api/items", now).is_err());
         assert!(verify_authenticator(&key, "not-base64!!", "GET", "/api/items", now).is_err());
-        assert!(verify_authenticator(&key, &STANDARD.encode("{}"), "GET", "/api/items", now).is_err());
-        assert!(verify_authenticator(&key, &"A".repeat(MAX_AUTH_BYTES + 1), "GET", "/api/items", now).is_err());
+        assert!(
+            verify_authenticator(&key, &STANDARD.encode("{}"), "GET", "/api/items", now).is_err()
+        );
+        assert!(verify_authenticator(
+            &key,
+            &"A".repeat(MAX_AUTH_BYTES + 1),
+            "GET",
+            "/api/items",
+            now
+        )
+        .is_err());
     }
 }

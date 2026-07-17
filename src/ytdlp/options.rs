@@ -31,11 +31,38 @@ pub fn probe_args(cfg: &Config, url: &str, cookies: Option<&Path>) -> Vec<String
 
 /// Hard cap for the name yt-dlp writes, in bytes. 255 is the smallest limit
 /// across the filesystems a download can land on (ext4 counts bytes; NTFS, APFS
-/// and exFAT count 255 characters, which is never tighter). We stop short of it
-/// so the suffixes yt-dlp adds *after* the template still fit: ` [2160p]` for a
-/// resolution variant, the container extension, a `.<lang>.vtt` subtitle
-/// sidecar, and the in-progress `.part`.
-const NAME_MAX_BYTES: usize = 231;
+/// and exFAT count 255 characters, which is never tighter).
+///
+/// The cap is 255 minus everything yt-dlp can append *after* the template. The
+/// name that has to fit is not the final `<base>.mkv` but the widest
+/// intermediate one, and a fragmented split-format download stacks four suffixes
+/// onto the base at once:
+///
+/// ```text
+///   <base> [2160p].fhls-audio-128000-Audio.mp4.part-Frag12.part
+///          └ variant ┘└─ .f<format_id> ──┘└ext┘└part┘└frag┘└part┘
+/// ```
+///
+/// That is what `RESERVED_SUFFIX_BYTES` budgets. Under-reserving here does not
+/// merely produce an ugly name — it fails the download outright with `[Errno 36]
+/// File name too long`, which is exactly what a 231-byte cap (24 bytes of
+/// headroom, against 44 bytes of real suffix) did to CJK titles.
+const NAME_MAX_BYTES: usize = 255 - RESERVED_SUFFIX_BYTES;
+
+/// Worst-case bytes yt-dlp appends after the template-rendered base name.
+const RESERVED_SUFFIX_BYTES: usize = VARIANT_TAG + FORMAT_ID + EXT + PART + FRAG + PART;
+/// ` [2160p]` — the resolution tag on a variant download (see `download_args`).
+const VARIANT_TAG: usize = 8;
+/// `.f<format_id>` on each leg of a split `bv*+ba` download. Format ids come from
+/// the site, so this is a budget rather than a bound: the longest seen in the
+/// wild is HLS's `.fhls-audio-128000-Audio` (24 bytes).
+const FORMAT_ID: usize = 40;
+/// `.webm` — the longest container extension we merge to.
+const EXT: usize = 5;
+/// `.part`, appended once per in-progress file and again per in-progress fragment.
+const PART: usize = 5;
+/// `-Frag12` — the fragment counter, budgeted to five digits.
+const FRAG: usize = 10;
 
 /// Per-job filename/sidecar tag: `<id>` for a normal download, `<id>_<height>`
 /// for a specific-resolution variant, so concurrent variant downloads of one
@@ -384,14 +411,32 @@ mod tests {
             "template budget ({base}) and NAME_MAX_BYTES ({NAME_MAX_BYTES}) drifted apart"
         );
 
-        // Worst case yt-dlp appends: a resolution variant tag, the longest
-        // container extension, and the in-progress part suffix. A subtitle
-        // sidecar replaces `.%(ext)s` rather than stacking on it, so it is the
-        // alternative to — not additional to — the extension.
-        let worst = base + " [2160p]".len() + ".webm".len() + ".part".len();
+        // Worst case is not the finished `<base>.mkv` but the widest intermediate
+        // name: a resolution variant of a fragmented split-format download stacks
+        // the variant tag, the per-leg `.f<format_id>`, the extension, `.part`,
+        // the fragment counter and a second `.part` onto the base all at once.
+        let worst = base
+            + " [2160p]".len()
+            + ".fhls-audio-128000-Audio".len()
+            + ".webm".len()
+            + ".part".len()
+            + "-Frag12".len()
+            + ".part".len();
+        // A subtitle sidecar replaces `.%(ext)s` rather than stacking on it, so it
+        // is the alternative to — not additional to — the extension.
         let subtitle = base + ".zh-Hant.vtt".len();
         assert!(worst <= 255, "worst-case name is {worst} bytes");
         assert!(subtitle <= 255, "subtitle sidecar is {subtitle} bytes");
+
+        // The regression this budget exists for: the exact name that failed with
+        // `[Errno 36] File name too long`. Its base was 219 bytes — inside the old
+        // 231-byte cap — and yt-dlp then appended 44 more, for 263 total.
+        let real_suffix = ".fhls-audio-128000-Audio.mp4.part-Frag4.part";
+        assert!(
+            NAME_MAX_BYTES + real_suffix.len() <= 255,
+            "a fully-budgeted base plus the suffix seen in the wild is {} bytes",
+            NAME_MAX_BYTES + real_suffix.len()
+        );
     }
 
     /// Portability flags travel with every download: the strict name ruleset, and

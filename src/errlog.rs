@@ -237,8 +237,18 @@ mod tests {
     #[test]
     fn push_records_the_derived_severity() {
         let log = ErrorLog::new();
-        log.push("probe", "https://x.com/1", "twitter", "ERROR: Private video");
-        log.push("download", "https://x.com/2", "twitter", "yt-dlp not available");
+        log.push(
+            "probe",
+            "https://x.com/1",
+            "twitter",
+            "ERROR: Private video",
+        );
+        log.push(
+            "download",
+            "https://x.com/2",
+            "twitter",
+            "yt-dlp not available",
+        );
         let snap = log.snapshot();
         assert_eq!(snap[0].severity, Severity::Error);
         assert_eq!(snap[1].severity, Severity::Warn);

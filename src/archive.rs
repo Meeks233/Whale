@@ -131,7 +131,12 @@ impl Archive {
 
     /// Path of the single previous version kept beside the archive.
     fn backup_path(&self) -> PathBuf {
-        let mut name = self.inner.path.file_name().unwrap_or_default().to_os_string();
+        let mut name = self
+            .inner
+            .path
+            .file_name()
+            .unwrap_or_default()
+            .to_os_string();
         name.push(".bak");
         self.inner.path.with_file_name(name)
     }
@@ -346,10 +351,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 2);
-        assert!(!archive.contains("youtube aaa").await, "dropped key frees up");
+        assert!(
+            !archive.contains("youtube aaa").await,
+            "dropped key frees up"
+        );
         assert!(archive.contains("twitter ccc").await);
         assert_eq!(
-            fs::read_to_string(&path).await.unwrap().lines().collect::<Vec<_>>(),
+            fs::read_to_string(&path)
+                .await
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
             vec!["twitter ccc", "youtube bbb"]
         );
 
@@ -369,7 +381,9 @@ mod tests {
     async fn restore_rolls_back_and_is_itself_undoable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("archive.txt");
-        let archive = Archive::load(&path, vec!["youtube aaa".into()]).await.unwrap();
+        let archive = Archive::load(&path, vec!["youtube aaa".into()])
+            .await
+            .unwrap();
 
         archive.replace(vec!["twitter ccc".into()]).await.unwrap();
 
@@ -380,7 +394,10 @@ mod tests {
         assert!(!archive.contains("twitter ccc").await);
         // …and the version we rolled back FROM is now the backup, so a second
         // Restore returns to it rather than dead-ending.
-        assert_eq!(archive.restore().await.unwrap(), vec!["twitter ccc".to_string()]);
+        assert_eq!(
+            archive.restore().await.unwrap(),
+            vec!["twitter ccc".to_string()]
+        );
 
         // The set survives a reload from disk, not just in memory.
         let reloaded = Archive::load(&path, vec![]).await.unwrap();
@@ -391,7 +408,9 @@ mod tests {
     async fn snapshot_of_a_missing_archive_keeps_the_existing_backup() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("archive.txt");
-        let archive = Archive::load(&path, vec!["youtube aaa".into()]).await.unwrap();
+        let archive = Archive::load(&path, vec!["youtube aaa".into()])
+            .await
+            .unwrap();
         archive.replace(vec!["youtube bbb".into()]).await.unwrap();
 
         // Archive file goes missing (wiped volume, manual delete). Replacing must
@@ -399,7 +418,10 @@ mod tests {
         fs::remove_file(&path).await.unwrap();
         archive.replace(vec!["youtube ccc".into()]).await.unwrap();
 
-        assert_eq!(archive.restore().await.unwrap(), vec!["youtube aaa".to_string()]);
+        assert_eq!(
+            archive.restore().await.unwrap(),
+            vec!["youtube aaa".to_string()]
+        );
     }
 
     #[tokio::test]

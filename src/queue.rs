@@ -233,9 +233,7 @@ pub async fn storage_usage(cfg: &Config, db: &Db) -> (i64, Option<i64>) {
 pub async fn storage_full(cfg: &Config, db: &Db) -> bool {
     let (used, limit) = storage_usage(cfg, db).await;
     match limit {
-        Some(limit) if limit > 0 => {
-            (limit - used) as f64 <= limit as f64 * STORAGE_BLOCK_FREE
-        }
+        Some(limit) if limit > 0 => (limit - used) as f64 <= limit as f64 * STORAGE_BLOCK_FREE,
         _ => false,
     }
 }
