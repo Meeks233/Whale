@@ -102,6 +102,12 @@ pub struct Config {
     /// the operator "actively passed in" wins). `None` = follow the stored
     /// setting, defaulting to highest.
     pub max_height: Option<i64>,
+    /// Ceiling (bytes) on the total size of everything downloaded, from
+    /// `ORCA_MAX_STORAGE` (e.g. `500GB`, `1.5TB`, or a plain byte count). Same
+    /// lock semantics as `max_height`: when `Some`, it overrides the UI-stored
+    /// value and the Settings field goes read-only. `None` = follow the stored
+    /// setting, which itself defaults to unlimited.
+    pub max_storage: Option<i64>,
     pub subs: bool,
     /// True when `ORCA_SUBS` was set explicitly by the operator — same lock
     /// semantics as `container_user_set`.
@@ -119,6 +125,38 @@ pub struct Config {
     /// share links so they carry the real domain instead of whatever origin
     /// the UI happens to be loaded from. `None` falls back to the UI origin.
     pub public_url: Option<String>,
+}
+
+/// Parse a human storage size — `500GB`, `1.5 TB`, `250mb`, or a plain byte
+/// count — into bytes. Units are binary (1 GB = 1024³), matching the `fmtSize`
+/// readout the UI has always shown, so a cap typed as "500 GB" and a usage
+/// rendered as "499.8 GB" are measured on the same ruler. Returns `None` for
+/// anything unparseable or negative.
+pub fn parse_size(s: &str) -> Option<i64> {
+    let s = s.trim().to_ascii_lowercase();
+    let split = s
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let num: f64 = num.trim().parse().ok()?;
+    if !num.is_finite() || num < 0.0 {
+        return None;
+    }
+    let mult: f64 = match unit.trim().trim_end_matches('b').trim_end_matches('i') {
+        "" => 1.0,
+        "k" => 1024.0,
+        "m" => 1024f64.powi(2),
+        "g" => 1024f64.powi(3),
+        "t" => 1024f64.powi(4),
+        "p" => 1024f64.powi(5),
+        _ => return None,
+    };
+    let bytes = num * mult;
+    // i64 saturates well past any real disk; reject rather than wrap.
+    if bytes > i64::MAX as f64 {
+        return None;
+    }
+    Some(bytes as i64)
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -254,6 +292,19 @@ impl Config {
                 )?),
             },
         };
+        // Unlimited by default (unset). "0"/"none"/"unlimited" say so explicitly.
+        let max_storage = match env_opt("ORCA_MAX_STORAGE") {
+            None => None,
+            Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "0" | "none" | "unlimited" => None,
+                other => Some(parse_size(other).ok_or_else(|| {
+                    anyhow!(
+                        "ORCA_MAX_STORAGE must be a size like 500GB, 1.5TB, a plain byte count, \
+                         or 'unlimited'"
+                    )
+                })?),
+            },
+        };
         let subs_user_set = env_opt("ORCA_SUBS").is_some();
         let subs = env_bool("ORCA_SUBS", true);
         let auto_subs = env_bool("ORCA_AUTO_SUBS", false);
@@ -288,6 +339,7 @@ impl Config {
             format,
             format_user_set,
             max_height,
+            max_storage,
             subs,
             subs_user_set,
             auto_subs,
@@ -477,6 +529,29 @@ fn random_token() -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_size_handles_units_and_bare_bytes() {
+        assert_eq!(parse_size("500GB"), Some(500 * 1024_i64.pow(3)));
+        assert_eq!(parse_size("1.5TB"), Some((1.5 * 1024f64.powi(4)) as i64));
+        // Case, spacing, and the GiB spelling all mean the same thing.
+        assert_eq!(parse_size(" 250 mb "), Some(250 * 1024_i64.pow(2)));
+        assert_eq!(parse_size("2gib"), parse_size("2GB"));
+        assert_eq!(parse_size("2PB"), Some(2 * 1024_i64.pow(5)));
+        // No unit = bytes.
+        assert_eq!(parse_size("1048576"), Some(1048576));
+        assert_eq!(parse_size("0"), Some(0));
+    }
+
+    #[test]
+    fn parse_size_rejects_nonsense() {
+        assert_eq!(parse_size(""), None);
+        assert_eq!(parse_size("lots"), None);
+        assert_eq!(parse_size("10 bananas"), None);
+        assert_eq!(parse_size("-5GB"), None);
+        // Past i64: reject rather than silently wrap to a negative cap.
+        assert_eq!(parse_size("99999999PB"), None);
+    }
 
     #[test]
     fn parse_rate_handles_suffixes() {

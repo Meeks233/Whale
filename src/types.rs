@@ -25,6 +25,12 @@ pub fn is_public_live(item: &Item) -> bool {
 pub enum Status {
     Queued,
     Running,
+    /// Held back rather than fetched: either the user pressed pause, or the
+    /// storage cap left no room (see `queue::storage_state`). The record — and
+    /// with it online playback via `/api/stream/:slug` — stays fully usable; only
+    /// the local copy is deferred. Resuming re-enqueues, and yt-dlp picks the
+    /// `.part` file back up where it stopped.
+    Paused,
     Completed,
     Failed,
     Duplicate,
@@ -35,6 +41,7 @@ impl Status {
         match self {
             Status::Queued => "queued",
             Status::Running => "running",
+            Status::Paused => "paused",
             Status::Completed => "completed",
             Status::Failed => "failed",
             Status::Duplicate => "duplicate",
@@ -45,6 +52,7 @@ impl Status {
         match s {
             "queued" => Some(Status::Queued),
             "running" => Some(Status::Running),
+            "paused" => Some(Status::Paused),
             "completed" => Some(Status::Completed),
             "failed" => Some(Status::Failed),
             "duplicate" => Some(Status::Duplicate),
@@ -95,6 +103,14 @@ pub struct Item {
     pub duration: Option<i64>,
     #[serde(default, skip_serializing)]
     pub filepath: Option<String>,
+    /// Computed (not stored): the basename of `filepath` — i.e. the exact name
+    /// `/file?download=1` puts in `Content-Disposition`, and therefore the name
+    /// the Android app writes into `Downloads/Orca`. Paired with `filesize` it is
+    /// the fingerprint the app matches its folder listing against, so a copy
+    /// saved by an older build (which predates the local-file registry) is still
+    /// recognised as local. `None` when there is no local file.
+    #[serde(default)]
+    pub filename: Option<String>,
     pub filesize: Option<i64>,
     /// Downloaded video pixel height (e.g. 720, 1080, 2160), used to label the
     /// item's resolution in the UI. `None` for audio-only / not-yet-completed /

@@ -25,6 +25,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         .ok_or_else(|| anyhow::anyhow!("unknown source in db: {source_str}"))?;
     let filepath: Option<String> = row.try_get("filepath")?;
     let local_available = filepath_exists(&filepath);
+    let filename = if local_available { basename(&filepath) } else { None };
 
     Ok(Item {
         id: row.try_get("id")?,
@@ -52,8 +53,17 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         playlist_index: row.try_get("playlist_index")?,
         total_filesize: row.try_get("total_filesize")?,
         filepath,
+        filename,
         local_available,
     })
+}
+
+/// The last path segment of `filepath`, i.e. the name the file is served under.
+fn basename(filepath: &Option<String>) -> Option<String> {
+    Path::new(filepath.as_deref()?)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(str::to_owned)
 }
 
 /// True when `filepath` is set and points at a real file on disk.
@@ -490,6 +500,48 @@ pub(super) async fn download_stats(db: &Db) -> anyhow::Result<(i64, i64)> {
     Ok((row.try_get("n")?, row.try_get("bytes")?))
 }
 
+/// How many items are currently paused. Drives the global pause/resume button's
+/// state, which tracks what the *backend* is holding rather than whatever page
+/// of items the client happens to have fetched.
+pub(super) async fn paused_count(db: &Db) -> anyhow::Result<i64> {
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM items WHERE status = 'paused'")
+        .fetch_one(&db.pool)
+        .await?;
+    Ok(row.try_get("n")?)
+}
+
+/// Ids of every paused item, oldest submission first. Resume replays them in
+/// arrival order, so the queue drains in the order the user asked for.
+pub(super) async fn paused_ids(db: &Db) -> anyhow::Result<Vec<i64>> {
+    let rows = sqlx::query("SELECT id FROM items WHERE status = 'paused' ORDER BY id ASC")
+        .fetch_all(&db.pool)
+        .await?;
+    rows.iter().map(|r| Ok(r.try_get("id")?)).collect()
+}
+
+/// Park every in-flight download (queued or running) as paused, returning the
+/// ids that changed so the caller can kill their yt-dlp children. Their `.part`
+/// files survive, so a resume continues rather than restarts.
+pub(super) async fn pause_active(db: &Db) -> anyhow::Result<Vec<i64>> {
+    let rows =
+        sqlx::query("SELECT id FROM items WHERE status IN ('queued', 'running') ORDER BY id ASC")
+            .fetch_all(&db.pool)
+            .await?;
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|r| r.try_get("id"))
+        .collect::<Result<_, _>>()?;
+    if !ids.is_empty() {
+        sqlx::query(
+            "UPDATE items SET status = 'paused', error = NULL \
+             WHERE status IN ('queued', 'running')",
+        )
+        .execute(&db.pool)
+        .await?;
+    }
+    Ok(ids)
+}
+
 /// Flip an item's public flag. Every enable rotates the public capability; revoke
 /// clears it so a previously copied URL can never become live again.
 pub(super) async fn set_public(
@@ -821,7 +873,22 @@ pub(super) async fn reset_running_to_queued(db: &Db) -> anyhow::Result<Vec<i64>>
 }
 
 pub(super) async fn all_archive_keys(db: &Db) -> anyhow::Result<Vec<String>> {
-    let rows = sqlx::query("SELECT archive_key FROM items")
+    // Completed rows ONLY. This seeds the dedup archive at startup so a lost
+    // archive.txt doesn't re-download the world — but the archive means "this has
+    // been fetched", and a queued / running / paused / failed row is precisely one
+    // that has NOT been. Seeding those told yt-dlp to skip the very download the
+    // row was still waiting for, and it surfaced as the misleading "already in the
+    // download archive but the local file is missing".
+    //
+    // A paused item hits this every time: park it (say, on a full disk), restart,
+    // press resume, and the resume could never succeed. Queued and failed rows had
+    // the same latent trap across a restart — a retry that could never run.
+    //
+    // 'completed' is the right line to draw: it covers seal-imports (inserted
+    // completed — already downloaded elsewhere, which is the whole point of the
+    // import) and stream-only records, while leaving anything still owed a
+    // download free to fetch it.
+    let rows = sqlx::query("SELECT archive_key FROM items WHERE status = 'completed'")
         .fetch_all(&db.pool)
         .await?;
     rows.iter()
@@ -1437,6 +1504,79 @@ mod tests {
         assert!(!a.public);
         assert_eq!(db.find_by_slug(&sa).await.unwrap().unwrap().id, a.id);
         assert!(a.public_slug.is_none());
+    }
+
+    /// The startup archive seed must carry only what has actually been fetched.
+    /// Seeding a paused/queued/failed key makes yt-dlp skip the download that row
+    /// is still waiting for, so a resume or retry across a restart can never
+    /// succeed — it fails with "already in the download archive".
+    #[tokio::test]
+    async fn archive_seed_excludes_items_still_awaiting_download() {
+        let (db, _dir) = temp_db().await;
+        let done = db
+            .insert_probe(&probe("youtube", "seed1", "Done"), Source::Download)
+            .await
+            .unwrap();
+        db.set_completed(done.id, "/downloads/done.mkv", 10, Some(1080))
+            .await
+            .unwrap();
+        let held = db
+            .insert_probe(&probe("youtube", "seed2", "Paused"), Source::Download)
+            .await
+            .unwrap();
+        db.set_status(held.id, Status::Paused, None).await.unwrap();
+        let broken = db
+            .insert_probe(&probe("youtube", "seed3", "Failed"), Source::Download)
+            .await
+            .unwrap();
+        db.set_status(broken.id, Status::Failed, Some("boom"))
+            .await
+            .unwrap();
+        // Queued: left as inserted.
+        db.insert_probe(&probe("youtube", "seed4", "Queued"), Source::Download)
+            .await
+            .unwrap();
+
+        let keys = db.all_archive_keys().await.unwrap();
+        assert_eq!(keys, vec!["youtube seed1"]);
+    }
+
+    /// Pausing everything must take exactly the in-flight work (queued + running)
+    /// and leave finished/failed rows alone, and resume must replay them oldest
+    /// first — the order they were submitted in, which is the order the user
+    /// expects them back in.
+    #[tokio::test]
+    async fn pause_active_takes_only_in_flight_work_and_replays_in_order() {
+        let (db, _dir) = temp_db().await;
+        let first = db
+            .insert_probe(&probe("youtube", "p1", "First"), Source::Download)
+            .await
+            .unwrap();
+        let second = db
+            .insert_probe(&probe("youtube", "p2", "Second"), Source::Download)
+            .await
+            .unwrap();
+        let done = db
+            .insert_probe(&probe("youtube", "p3", "Done"), Source::Download)
+            .await
+            .unwrap();
+        db.set_status(second.id, Status::Running, None).await.unwrap();
+        db.set_completed(done.id, "/downloads/done.mkv", 10, Some(1080))
+            .await
+            .unwrap();
+
+        let paused = db.pause_active().await.unwrap();
+        assert_eq!(paused, vec![first.id, second.id], "completed row untouched");
+        assert_eq!(db.paused_count().await.unwrap(), 2);
+        assert_eq!(
+            db.get(done.id).await.unwrap().unwrap().status,
+            Status::Completed
+        );
+        // Submission order, oldest first — not whatever the rows happened to hash to.
+        assert_eq!(db.paused_ids().await.unwrap(), vec![first.id, second.id]);
+
+        // Nothing in flight left to take.
+        assert!(db.pause_active().await.unwrap().is_empty());
     }
 
     #[tokio::test]

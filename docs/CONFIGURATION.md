@@ -23,6 +23,7 @@ in SQLite unless `ORCA_MAX_HEIGHT` pins them.
 | `ORCA_CONTAINER` | `mkv` | Output container: `mkv`, `mp4`, `webm`, `mov`, `avi`, or `flv`. When set, it overrides the global and per-site pickers in the UI |
 | `ORCA_FORMAT` | `bv*+ba/b` | Custom yt-dlp format selector |
 | `ORCA_MAX_HEIGHT` | unset | Positive pixel cap; `0`, `highest`, or `best` means uncapped |
+| `ORCA_MAX_STORAGE` | unset | Ceiling on total downloaded size — `500GB`, `1.5TB`, or a plain byte count (binary units); `0`, `none`, or `unlimited` means uncapped |
 | `ORCA_OUTPUT_TEMPLATE` | uploader/title/id | yt-dlp output template |
 | `ORCA_SUBS` | `true` | Write/embed subtitles. When set, it overrides the global and per-site pickers in the UI |
 | `ORCA_AUTO_SUBS` | `false` | Include automatic subtitles |
@@ -33,4 +34,11 @@ in SQLite unless `ORCA_MAX_HEIGHT` pins them.
 
 `ORCA_FORMAT` is authoritative when explicitly set; Orca does not inject the
 height cap into a custom selector. In polite mode effective concurrency is one.
+
+`ORCA_MAX_STORAGE` caps the summed size of everything downloaded. Once free space
+falls under 5% of it, submitted links are still probed and recorded — and still
+play online — but their downloads are parked as `paused` rather than started;
+freeing space and pressing resume picks them up from their partial files. Like
+`ORCA_MAX_HEIGHT`, setting it pins the value and makes the Settings field
+read-only.
 The total rate limit is divided among effective concurrent jobs.

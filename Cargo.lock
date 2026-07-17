@@ -1275,6 +1275,7 @@ dependencies = [
  "base64",
  "clap",
  "futures",
+ "indexmap",
  "mime_guess",
  "proptest",
  "reqwest",

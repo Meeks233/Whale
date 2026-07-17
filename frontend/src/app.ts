@@ -14,6 +14,10 @@ interface Item {
   status: string;
   title?: string;
   filesize?: number | null;
+  // Name the server serves the file under. With `filesize` it fingerprints the
+  // file precisely enough for the Android app to recognise its own copy in
+  // Downloads/Orca without having saved it through this build (see scanLocal).
+  filename?: string | null;
   total_filesize?: number | null;  // sum across all downloaded resolution variants
   height?: number | null;
   thumbnail_url?: string;
@@ -101,6 +105,29 @@ function mirrorShareCreds(): void {
   if (!T || !T.core || !T.core.invoke) return;
   try { T.core.invoke('save_share_creds', { base: apiBase(), token: getToken() }); } catch (_) { /* desktop / not ready */ }
 }
+
+// Project links (issue tracker, privacy policy, source) open in the system
+// browser on native, and in a new tab on the web — where the plain
+// <a target="_blank"> already does exactly that, so this only engages in the app.
+// A `target="_blank"` inside the Tauri WebView otherwise either does nothing or
+// loads GitHub over the app itself, and that WebView has no tabs, no address bar
+// and no back button — the user just ends up stuck.
+//
+// Deliberately keyed to github.com rather than every external link: the opener's
+// capability scope (capabilities/default.json) only allows this project's own
+// URLs, so casting wider here would hand user-supplied links (a site's login URL,
+// an item's source page) to a call that fails closed and toasts an error. Those
+// keep whatever behaviour they have today.
+const PROJECT_LINK_ORIGIN = 'https://github.com';
+document.addEventListener('click', (e) => {
+  if (!isNativeApp) return;
+  const a = (e.target as HTMLElement).closest('a[target="_blank"]') as HTMLAnchorElement | null;
+  if (!a || !a.href.startsWith(PROJECT_LINK_ORIGIN + '/')) return;
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (!invoke) return; // no bridge (desktop dev) — leave the default behaviour
+  e.preventDefault();
+  invoke('plugin:opener|open_url', { url: a.href });
+});
 
 // ---- Server base URL ------------------------------------------------------
 // Empty in a browser (same-origin, unchanged). The native app (Tauri) sets this
@@ -212,8 +239,12 @@ const els = {
   server: byId<HTMLInputElement>('server'),
   permRow: byId('perm-row'),
   hideDlRow: byId('hide-dl-row'),
+  hideDlHint: byId('hide-dl-hint'),
   hideDlToggle: byId<HTMLButtonElement>('hide-dl-toggle'),
   hideDlNeedsPerm: byId('hide-dl-needs-perm'),
+  maxStorage: byId<HTMLInputElement>('max-storage'),
+  maxStorageUnit: byId<HTMLSelectElement>('max-storage-unit'),
+  maxStorageLocked: byId('max-storage-locked'),
   permissionsPrompt: byId('permissions-prompt'),
   permissionsPromptClose: byId<HTMLButtonElement>('permissions-prompt-close'),
   permissionsPromptLater: byId<HTMLButtonElement>('permissions-prompt-later'),
@@ -253,6 +284,7 @@ const els = {
   empty: byId('empty'),
   loader: byId('infinite-loader'),
   selectToggle: byId<HTMLButtonElement>('select-toggle'),
+  queueToggle: byId<HTMLButtonElement>('queue-toggle'),
   selBar: byId('select-bar'),
   selCount: byId('select-count'),
   selAll: byId<HTMLButtonElement>('sel-all'),
@@ -378,24 +410,78 @@ function setServerStatus(up: boolean): void {
   el.setAttribute('title', label);
 }
 
-// ---- Total-downloaded readout (beside the heartbeat) ----------------------
-// A small pill showing how many files Orca has stored and their combined size
-// — the familiar "N items · X GB" storage summary. Refreshed on boot, on each
-// completion, and after deletes. Hidden until the first successful fetch.
-const STATS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>`;
+// ---- Storage readout (beside the heartbeat) -------------------------------
+// How full the disk is, as a ring + "58% · 1.2 TB". The ring is the donut/radial
+// gauge every storage UI converged on (Google Drive, iOS Storage, disk widgets):
+// one glance says how full without reading a number, because "most of the circle
+// is filled" needs no units, no baseline, and no comparison — which a bare
+// "1.2 TB" never gave you. The file COUNT is gone: it told you nothing about
+// whether you were about to run out, which is the only question this corner of
+// the screen has to answer.
+//
+// It colours itself as the reserve runs down — amber under 25% free, red under
+// the 5% mark where the backend stops starting new downloads (STORAGE_BLOCK_FREE
+// in queue.rs) and parks them as paused instead. So the warning arrives well
+// before the behaviour changes, and the red state explains a pause that would
+// otherwise look like a bug.
+//
+// Uncapped installs get the size alone: a percentage of "unlimited" is
+// meaningless, so no ring is drawn rather than a fake one.
+const STORAGE_WARN_FREE = 0.25;
+const STORAGE_BLOCK_FREE = 0.05;
+// r=9 in a 24-box; the circumference the dash array is measured against.
+const RING_R = 9;
+const RING_C = 2 * Math.PI * RING_R;
+
+/** Donut gauge, `frac` in 0..1 filled. Starts at 12 o'clock and fills clockwise. */
+function ringSvg(frac: number): string {
+  const filled = Math.max(0, Math.min(1, frac)) * RING_C;
+  return `<svg class="dl-ring" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">`
+    + `<circle class="dl-ring-track" cx="12" cy="12" r="${RING_R}" fill="none" stroke-width="5"/>`
+    + `<circle class="dl-ring-fill" cx="12" cy="12" r="${RING_R}" fill="none" stroke-width="5"`
+    + ` stroke-dasharray="${filled.toFixed(2)} ${RING_C.toFixed(2)}" transform="rotate(-90 12 12)"/>`
+    + `</svg>`;
+}
+// Pause / resume. Sized to sit in a card's action row (18px, like the other
+// .act glyphs) and scaled up by CSS where they stand alone in the toolbar.
+const PAUSE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/></svg>`;
+const RESUME_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.029 4.285A2 2 0 0 0 7 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z"/><path d="M3 4v16"/></svg>`;
 // Vertical kebab (⋮) for the website-card overflow menu.
 const MORE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>`;
-let dlStatsCache: { count: number; total_bytes: number } | null = null;
+interface Stats {
+  count: number;
+  total_bytes: number;
+  /** Storage cap in bytes; null on an uncapped install. */
+  limit_bytes: number | null;
+  limit_locked: boolean;
+  /** Server-wide count of paused items — drives the global pause button. */
+  paused: number;
+}
+let dlStatsCache: Stats | null = null;
 
 function renderDlStats(): void {
   const el = els.dlStats;
   if (!el || !dlStatsCache) return;
-  const { count, total_bytes } = dlStatsCache;
-  if (count <= 0) { el.classList.add('hidden'); return; }
-  const size = fmtSize(total_bytes);
-  const label = t('stats.summary', { n: count });
-  el.innerHTML = `${STATS_SVG}<span class="dl-stats-text">${esc(label)}${size ? ' · ' + esc(size) : ''}</span>`;
-  el.setAttribute('title', label + (size ? ' · ' + size : ''));
+  const { count, total_bytes, limit_bytes } = dlStatsCache;
+  if (count <= 0 && !total_bytes) { el.classList.add('hidden'); return; }
+  const size = fmtSize(total_bytes) || '0 B';
+  el.classList.remove('warn', 'crit');
+  if (limit_bytes && limit_bytes > 0) {
+    const used = total_bytes / limit_bytes;
+    const free = 1 - used;
+    // Round toward "fuller": 99.6% must not render as a reassuring 100%-free-ish
+    // number, and anything non-zero must not read as 0%.
+    const pct = Math.min(100, Math.ceil(used * 100));
+    if (free <= STORAGE_BLOCK_FREE) el.classList.add('crit');
+    else if (free <= STORAGE_WARN_FREE) el.classList.add('warn');
+    const text = `${pct}% · ${size}`;
+    el.innerHTML = `${ringSvg(used)}<span class="dl-stats-text">${esc(text)}</span>`;
+    el.setAttribute('title', t('stats.usage', { pct: String(pct), used: size, total: fmtSize(limit_bytes) }));
+  } else {
+    // Uncapped: no percentage to show, so no ring — just what's stored.
+    el.innerHTML = `<span class="dl-stats-text">${esc(size)}</span>`;
+    el.setAttribute('title', t('stats.stored', { used: size }));
+  }
   el.classList.remove('hidden');
 }
 
@@ -404,8 +490,11 @@ async function loadStats(): Promise<void> {
   try {
     const res = await apiFetch('/api/stats');
     if (!res.ok) return;
-    dlStatsCache = await res.json();
+    dlStatsCache = await res.json() as Stats;
     renderDlStats();
+    // Same payload carries the server-wide paused count, so the global
+    // pause/resume button re-renders from the same fetch rather than its own.
+    renderQueueToggle();
   } catch (_) { /* offline / unauthorized — leave the last-known readout */ }
 }
 
@@ -581,6 +670,14 @@ function actionsHtml(item: Item): string {
   // item — queued, running, failed or completed — can be removed. It always
   // routes through the confirm dialog (openDeleteConfirm).
   const del = `<button class="act act-del" data-act="delete" data-id="${item.id}" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>`;
+  // Pause / resume, only while there's a transfer to hold or release. A paused
+  // item keeps its partial file, so resuming continues rather than restarts.
+  let hold = '';
+  if (item.status === 'queued' || item.status === 'running') {
+    hold = `<button class="act" data-act="pause" data-id="${item.id}" aria-label="${esc(t('item.pause'))}" title="${esc(t('item.pause'))}">${PAUSE_SVG}</button>`;
+  } else if (item.status === 'paused') {
+    hold = `<button class="act act-resume" data-act="resume" data-id="${item.id}" aria-label="${esc(t('item.resume'))}" title="${esc(t('item.resume'))}">${RESUME_SVG}</button>`;
+  }
   // Save / share only make sense for a completed item with a file. Local file
   // present: Save (download icon) + Share icon. Local file gone (backed away):
   // plays from upstream, no save/share. Sharing state lives in the share dialog.
@@ -593,8 +690,8 @@ function actionsHtml(item: Item): string {
       <button class="act act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
       : `<span class="chip act-cloud" title="Streams from source — no local copy">${esc(t('cloud.only'))}</span>`;
   }
-  // Order: size chip · resolution button · delete · save/share.
-  return `<div class="actions">${metaChipsHtml(item)}${resButtonHtml(item)}${del}${mediaActions}</div>`;
+  // Order: size chip · resolution button · pause/resume · delete · save/share.
+  return `<div class="actions">${metaChipsHtml(item)}${resButtonHtml(item)}${hold}${del}${mediaActions}</div>`;
 }
 
 // Cloud-file corner badge for the thumbnail: shown when an item is completed but
@@ -604,7 +701,12 @@ const CLOUD_BADGE = `<span class="cloud-badge" title="Cloud only — plays from 
 // thumbnail opens the in-app fullscreen player (see openPlayer).
 const PLAY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>`;
 const PLAY_BADGE = `<span class="play-badge" aria-hidden="true">${PLAY_ICON}</span>`;
-const MEDIA_LOADER = `<span class="media-loader" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg></span>`;
+// The app's one spinner: lucide's loader-circle, turned by the shared `spin`
+// keyframes in style.css. Every "working on it" indicator reuses this — the
+// thumbnail's pending mask and the submit button — so there is a single shape and
+// a single animation to keep consistent rather than a second one that drifts.
+const SPINNER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
+const MEDIA_LOADER = `<span class="media-loader" aria-hidden="true">${SPINNER_SVG}</span>`;
 
 function isMediaPending(item: Item, status = item.status): boolean {
   // Resolution jobs emit running events for an already-completed item. Its old
@@ -616,8 +718,14 @@ function isMediaPending(item: Item, status = item.status): boolean {
 function isPlayable(item: Item): boolean {
   // Any completed item is playable: with a local file it plays that; without one
   // (stream-only "None" mode, or a copy backed away) it streams from source via
-  // /stream-url. Only queued/running/failed items aren't playable.
-  return item.status === 'completed';
+  // /stream-url.
+  //
+  // Paused too, and for the same reason: playback falls back to the source proxy,
+  // which never needed a local copy (see ensure_streamable in api/media.rs). A
+  // download the storage cap parked is exactly the item you still want to watch —
+  // withholding the play button would make "recorded and still playable" a lie.
+  // Queued/running/failed stay unplayable: a file is coming, or nothing is.
+  return item.status === 'completed' || item.status === 'paused';
 }
 
 // Friendly platform name from yt-dlp's extractor id (e.g. "youtube:tab" → YouTube).
@@ -672,7 +780,9 @@ function rowHtml(item: Item): string {
   // noise. Landscape keeps every duration (see .dur in style.css).
   const durShort = item.duration && item.duration < 60 ? ' dur-short' : '';
   const dur = item.duration ? `<span class="dur${durShort}">${esc(fmtDuration(item.duration))}</span>` : '';
-  const cloud = item.status === 'completed' && !item.local_available ? CLOUD_BADGE : '';
+  // Cloud badge = "this plays, but from source". True of a completed item whose
+  // local copy is gone, and equally of a paused one whose copy hasn't arrived.
+  const cloud = isPlayable(item) && !item.local_available ? CLOUD_BADGE : '';
   const logo = sourceLogoHtml(item.extractor);
   const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
   const active = item.status === 'queued' || item.status === 'running';
@@ -754,7 +864,16 @@ function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
     }
   }
   li.classList.toggle('blurred', isItemBlurred(item));
+  // Ask the device whether it already holds this item's file (Android only, and
+  // batched — see queueLocalScan), then paint what we already know so a row
+  // re-rendered from cache keeps its green Save icon.
+  queueLocalScan(item);
+  paintLocalMark(item);
   if (gkey) updateGroupHeader(gkey);
+  // This is the only place item statuses enter state.items, so it's where the
+  // global pause/resume button learns there's now something running to pause.
+  // (Whether anything is PAUSED comes from the server — see renderQueueToggle.)
+  renderQueueToggle();
   els.empty.classList.add('hidden');
   return li;
 }
@@ -1069,11 +1188,15 @@ async function loadItems(reset?: boolean): Promise<void> {
   }
 }
 
-// Pull another page if the spinner is at/near the bottom of the viewport.
+// Backstop for a page too short to scroll: if the spinner is already on screen
+// after a load, no intersection event will ever fire, so keep filling until it
+// falls below the fold. Matches the observer's threshold exactly (visible = load)
+// — when this was the more eager of the two, it kept pulling pages the observer
+// wouldn't have asked for.
 function topUpIfNeeded(): void {
   if (state.loading || state.cursor == null || els.loader.classList.contains('hidden')) return;
   const r = els.loader.getBoundingClientRect();
-  if (r.top < window.innerHeight + 300) loadItems(false);
+  if (r.top < window.innerHeight) loadItems(false);
 }
 
 // ---- Submit ---------------------------------------------------------------
@@ -1161,10 +1284,25 @@ async function submitInput(): Promise<void> {
   for (const link of (links.length ? links : [raw])) await submitUrl(link);
 }
 
+// Submit-button working state: the download glyph swaps to the shared spinner
+// (SPINNER_SVG) while a submit is in flight, so a probe that takes a few seconds
+// reads as "working" rather than as a dead button. Counted rather than a boolean
+// because a pasted blob submits its links one after another — a plain flag would
+// blink the spinner off and back on between each one.
+const SUBMIT_ICON = els.submitBtn.innerHTML;
+let submitsInFlight = 0;
+function setSubmitBusy(busy: boolean): void {
+  submitsInFlight = Math.max(0, submitsInFlight + (busy ? 1 : -1));
+  const on = submitsInFlight > 0;
+  els.submitBtn.disabled = on;
+  els.submitBtn.classList.toggle('busy', on);
+  els.submitBtn.innerHTML = on ? SPINNER_SVG : SUBMIT_ICON;
+}
+
 async function submitUrl(url: string): Promise<void> {
   if (!url) return;
   if (!getToken()) { showTokenField(false); toast(t('toast.setToken'), 'error'); return; }
-  els.submitBtn.disabled = true;
+  setSubmitBusy(true);
   try {
     const res = await apiFetch('/api/items', {
       method: 'POST',
@@ -1198,7 +1336,7 @@ async function submitUrl(url: string): Promise<void> {
   } catch (e) {
     if (!isUnauthorized(e)) toast('Network error', 'error');
   } finally {
-    els.submitBtn.disabled = false;
+    setSubmitBusy(false);
   }
 }
 
@@ -1639,6 +1777,7 @@ async function loadWebsites(): Promise<void> {
     if (!res.ok) { toast(t('toast.loadCookiesFail'), 'error'); return; }
     const data = await res.json();
     websitesLoaded = (data.websites || []) as Website[];
+    rankWebsites();
     applyBlurToRows();
     renderWebsites();
   } catch (e) {
@@ -1646,14 +1785,47 @@ async function loadWebsites(): Promise<void> {
   }
 }
 
+/**
+ * How many of this site's settings differ from the defaults. Each of the four
+ * inherited settings counts when it's pinned (non-null = "don't follow the
+ * global"), plus the two flags that are themselves departures from the norm.
+ * Cookies are excluded: a jar is state the site needed, not a preference the
+ * user expressed.
+ */
+function customCount(w: Website): number {
+  return Number(w.max_heights !== null) + Number(w.stream_quality !== null)
+    + Number(w.container !== null) + Number(w.subs !== null)
+    + Number(w.blur) + Number(!w.enabled);
+}
+
+/**
+ * site key → its position in the list, most-customised first.
+ *
+ * Computed when the registry loads and then held still, NOT derived per render.
+ * The list is long and mostly untouched defaults, so floating the handful of
+ * configured sites to the top is worth doing — but every toggle re-renders the
+ * list, and re-ranking there would tear the card out from under the finger that
+ * just tapped it. Ranking on load puts a site the user just customised at the
+ * top the next time they open the sheet, which is when it helps and doesn't
+ * startle. Ties keep the server's order — `sort` is stable.
+ */
+let siteRank = new Map<string, number>();
+function rankWebsites(): void {
+  siteRank = new Map(
+    [...websitesLoaded]
+      .sort((a, b) => customCount(b) - customCount(a))
+      .map((w, i) => [w.key, i]),
+  );
+}
+
 // Sites matching the current search box: name, any domain, or key (case-insensitive).
 function filteredWebsites(): Website[] {
   const q = siteQuery.trim().toLowerCase();
-  if (!q) return websitesLoaded;
-  return websitesLoaded.filter((w) =>
+  const matching = !q ? websitesLoaded : websitesLoaded.filter((w) =>
     w.name.toLowerCase().includes(q) ||
     w.key.toLowerCase().includes(q) ||
     w.hosts.some((h) => h.toLowerCase().includes(q)));
+  return [...matching].sort((a, b) => (siteRank.get(a.key) ?? 0) - (siteRank.get(b.key) ?? 0));
 }
 
 function renderWebsites(): void {
@@ -2162,6 +2334,10 @@ els.settingsToggle.addEventListener('click', () => {
   refreshAppPermissions();
   refreshWebPermissions();
   loadArchive();
+  // Also this sheet's storage cap: /api/settings carries both it and the
+  // per-site defaults the Websites window shows, so either window opening
+  // refreshes from the same one fetch.
+  loadSettings();
   loadLogs();
 });
 els.settingsClose.addEventListener('click', () => closeModal(els.settings));
@@ -2369,11 +2545,15 @@ function refreshWebPermissions(): void {
 // files), so it follows that grant.
 function renderHideDownloads(): void {
   const allowed = !!appPermissions?.storage;
-  // Android-only: the folder it switches between exists only there.
-  els.hideDlRow.classList.toggle('hidden', !isAndroidApp());
+  // Android-only: the folder it switches between exists only there. The row now
+  // shares the Downloads group with the storage cap, so its explanatory line has
+  // to hide alongside it — the group itself stays, since the cap is everywhere.
+  const android = isAndroidApp();
+  els.hideDlRow.classList.toggle('hidden', !android);
+  els.hideDlHint.classList.toggle('hidden', !android);
   setSwitch(els.hideDlToggle, hideDownloads);
   els.hideDlToggle.disabled = !allowed;
-  els.hideDlNeedsPerm.classList.toggle('hidden', allowed);
+  els.hideDlNeedsPerm.classList.toggle('hidden', allowed || !android);
 }
 
 async function refreshAppPermissions(): Promise<AppPermissionStatus | null> {
@@ -2493,7 +2673,10 @@ async function loadArchive(): Promise<void> {
     const res = await apiFetch('/api/archive');
     if (!res.ok) return;
     const data = await res.json();
-    const keys = (data.keys || []).slice().sort();
+    // Server order, kept as-is: it hands these back newest-recorded first (see
+    // Archive::keys), which is the order the box shows. Sorting here would throw
+    // that away and replace it with something alphabetical and meaningless.
+    const keys: string[] = data.keys || [];
     sealLoaded = new Set(keys);
     archiveHasBackup = !!data.has_backup;
     els.sealArchive.value = keys.join('\n');
@@ -2573,6 +2756,12 @@ async function loadSettings(): Promise<void> {
       subs_locked: !!data.subs_locked,
     };
     renderGlobalDefaults(globalSettings);
+    // The storage cap rides the same payload but lives in the Settings sheet, not
+    // the per-site defaults, so it's tracked separately (and by the save bar).
+    storageLoaded = typeof data.max_storage === 'number' ? data.max_storage : null;
+    storageLocked = !!data.max_storage_locked;
+    renderMaxStorage();
+    renderSaveBar();
   } catch (_) { /* offline / unauthorized — leave the controls as-is */ }
 }
 
@@ -2647,12 +2836,23 @@ function renderLogs(entries: LogEntry[]): void {
     d.className = 'log-entry log-entry--' + (e.stage === 'download' ? 'download' : 'probe')
       + ' log-entry--' + (e.severity === 'warn' ? 'warn' : 'error');
 
+    // Two lines, not one: metadata (when / where / which stage) above the
+    // message, each owning its own row. Cramming all four into one flex line
+    // meant three nowrap chips squeezed the message into a sliver — and expanding
+    // the row let that sliver wrap into a tall ragged column beside them. This is
+    // the shape CI logs and Sentry use, and it's why the message can now use the
+    // full width in both states.
     const summary = document.createElement('summary');
     summary.innerHTML =
-      `<span class="log-time">${esc(fmtLogTime(e.at))}</span>` +
-      `<span class="log-badge">${esc(e.platform || 'unknown')}</span>` +
-      `<span class="log-stage">${esc(e.stage)}</span>` +
-      `<span class="log-msg-short">${esc(e.message)}</span>`;
+      `<span class="log-chevron" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>` +
+      `<span class="log-sum">` +
+        `<span class="log-meta">` +
+          `<span class="log-badge">${esc(e.platform || 'unknown')}</span>` +
+          `<span class="log-stage">${esc(e.stage)}</span>` +
+          `<span class="log-time">${esc(fmtLogTime(e.at))}</span>` +
+        `</span>` +
+        `<span class="log-msg-short">${esc(e.message)}</span>` +
+      `</span>`;
 
     const copyBtn = document.createElement('button');
     copyBtn.type = 'button';
@@ -2669,10 +2869,25 @@ function renderLogs(entries: LogEntry[]): void {
     summary.appendChild(copyBtn);
     d.appendChild(summary);
 
-    const pre = document.createElement('pre');
-    pre.className = 'log-full';
-    pre.textContent = `${e.url}\n\n${e.message}`;
-    d.appendChild(pre);
+    // The expanded body labels its two facts instead of running them together as
+    // one blob of text with a blank line in the middle — the URL is what you
+    // check first, and it was indistinguishable from the message's first line.
+    const full = document.createElement('div');
+    full.className = 'log-full';
+    for (const [label, value] of [[t('logs.url'), e.url], [t('logs.message'), e.message]] as const) {
+      if (!value) continue;
+      const field = document.createElement('div');
+      field.className = 'log-field';
+      const key = document.createElement('span');
+      key.className = 'log-key';
+      key.textContent = label;
+      const pre = document.createElement('pre');
+      pre.className = 'log-value';
+      pre.textContent = value;
+      field.append(key, pre);
+      full.appendChild(field);
+    }
+    d.appendChild(full);
 
     list.appendChild(d);
   }
@@ -2813,7 +3028,7 @@ async function saveResolutions(): Promise<void> {
     // implicitly asking for the device's copy to get taller too — otherwise the
     // upgrade is invisible where the user actually watches it. Flag it now; the
     // pull happens once the download lands (see runPendingLocalUpgrade).
-    void flagLocalUpgrade(target, heights);
+    flagLocalUpgrade(target, heights);
     // Refetch so the card's resolution label/size reflect the new highest kept
     // version immediately (removals repoint the primary server-side; Req 3).
     apiFetch(itemPath(target))
@@ -2841,9 +3056,9 @@ const pendingLocalUpgrade = new Set<number>();
  * without the second, *removing* a resolution would trigger a pointless re-save
  * of a file the device already has.
  */
-async function flagLocalUpgrade(id: number, heights: number[]): Promise<void> {
+function flagLocalUpgrade(id: number, heights: number[]): void {
   if (!isAndroidApp() || !heights.length) return;
-  const local = await localFileFor(state.items.get(id)?.slug);
+  const local = localFileFor(state.items.get(id)?.slug);
   if (!local) return;
   // 0 ("highest available") always counts as an upgrade: we can't know what it
   // resolves to until the download lands, and the server only ever repoints the
@@ -2908,6 +3123,45 @@ if (els.sitesGlobal) {
 // the sheet and shown only while something is genuinely different from what is
 // stored (dirtyFields below), instead of a Save button beside each field.
 
+// ---- Storage cap ----------------------------------------------------------
+// Stored and sent as bytes — a number plus a unit is how you *type* a size, not
+// something the server should have to parse and re-guess. Binary units, matching
+// fmtSize and the backend's parse_size, so a cap of "500 GB" and a usage readout
+// of "499.8 GB" are measured against the same ruler.
+const UNIT_BYTES = {
+  MB: 1024 ** 2, GB: 1024 ** 3, TB: 1024 ** 4, PB: 1024 ** 5,
+} as const;
+type StorageUnit = keyof typeof UNIT_BYTES;
+// Largest first: renderMaxStorage picks the first that leaves a value ≥ 1.
+const STORAGE_UNITS: StorageUnit[] = ['PB', 'TB', 'GB', 'MB'];
+/** Narrow the <select>'s value to a known unit; anything else falls back to GB. */
+function storageUnit(v: string): StorageUnit {
+  return (STORAGE_UNITS as string[]).includes(v) ? (v as StorageUnit) : 'GB';
+}
+let storageLoaded: number | null = null; // committed cap in bytes; null = unlimited
+let storageLocked = false;               // pinned by ORCA_MAX_STORAGE
+
+/** The cap the fields currently describe, in bytes. Blank / 0 = unlimited. */
+function draftMaxStorage(): number | null {
+  const n = parseFloat(els.maxStorage.value);
+  if (!isFinite(n) || n <= 0) return null;
+  return Math.round(n * UNIT_BYTES[storageUnit(els.maxStorageUnit.value)]);
+}
+
+/** Paint `bytes` back into the number + unit pair, picking the unit that reads
+ *  most naturally (the largest one that leaves a value ≥ 1, i.e. "1.5 TB" over
+ *  "1536 GB"). Trailing zeros are trimmed so a round 500 shows as "500". */
+function renderMaxStorage(): void {
+  const bytes = storageLoaded;
+  els.maxStorageLocked.classList.toggle('hidden', !storageLocked);
+  els.maxStorage.disabled = storageLocked;
+  els.maxStorageUnit.disabled = storageLocked;
+  if (!bytes || bytes <= 0) { els.maxStorage.value = ''; els.maxStorageUnit.value = 'GB'; return; }
+  const unit = STORAGE_UNITS.find((u) => bytes >= UNIT_BYTES[u]) ?? 'MB';
+  els.maxStorage.value = String(parseFloat((bytes / UNIT_BYTES[unit]).toFixed(2)));
+  els.maxStorageUnit.value = unit;
+}
+
 // What each tracked field currently holds vs. what is committed. Compared as
 // strings so "same value retyped" doesn't count as dirty.
 function committedSettings(): Record<string, string> {
@@ -2915,6 +3169,7 @@ function committedSettings(): Record<string, string> {
     server: apiBase(),
     token: getToken(),
     archive: [...sealLoaded].sort().join('\n'),
+    maxStorage: String(storageLoaded ?? ''),
   };
 }
 function draftSettings(): Record<string, string> {
@@ -2922,12 +3177,18 @@ function draftSettings(): Record<string, string> {
     server: (els.server.value || '').trim().replace(/\/+$/, ''),
     token: (els.token.value || '').trim(),
     archive: [...parseArchiveKeys()].sort().join('\n'),
+    maxStorage: String(draftMaxStorage() ?? ''),
   };
 }
 function dirtyFields(): string[] {
   const now = draftSettings();
   const saved = committedSettings();
-  return Object.keys(now).filter((k) => now[k] !== saved[k]);
+  return Object.keys(now).filter((k) => now[k] !== saved[k])
+    // An env-pinned cap can't be saved, so it must never count as dirty: the
+    // field is disabled, but a value that doesn't round-trip byte-for-byte (an
+    // operator's odd `ORCA_MAX_STORAGE=12345678`) would otherwise strand the save
+    // bar open over a field nobody can edit.
+    .filter((k) => !(k === 'maxStorage' && storageLocked));
 }
 
 function renderSaveBar(): void {
@@ -2985,10 +3246,40 @@ async function saveSettings(): Promise<void> {
     if (dirty.includes('archive')) {
       if (!(await applyArchive())) return;
     }
+    if (dirty.includes('maxStorage')) {
+      if (!(await applyMaxStorage())) return;
+    }
     toast(t('toast.settingsSaved'), 'ok');
   } finally {
     els.settingsSave.disabled = false;
     renderSaveBar();
+  }
+}
+
+// Commit the storage cap. `null` clears it (unlimited) — PUT /api/settings tells
+// that apart from "field not sent", so this can't be expressed by omitting it.
+async function applyMaxStorage(): Promise<boolean> {
+  const bytes = draftMaxStorage();
+  try {
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ max_storage: bytes }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
+      return false;
+    }
+    storageLoaded = bytes;
+    renderMaxStorage();
+    // A new cap changes what the gauge is a percentage OF, and can push the
+    // install straight into the amber/red band — repaint it now, not in 30s.
+    loadStats();
+    return true;
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    return false;
   }
 }
 
@@ -3008,7 +3299,10 @@ async function applyArchive(): Promise<boolean> {
       return false;
     }
     sealLoaded = parseArchiveKeys();
-    els.sealArchive.value = [...sealLoaded].sort().join('\n');
+    // Leave the box exactly as the user left it — it already holds what was just
+    // saved, in the order it was saved. (parseArchiveKeys drops blank/malformed
+    // lines, so re-joining from the Set also tidies those away.)
+    els.sealArchive.value = [...sealLoaded].join('\n');
     archiveHasBackup = true;
     return true;
   } catch (e) {
@@ -3026,7 +3320,8 @@ async function restoreArchive(): Promise<void> {
       toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
       return;
     }
-    const keys = ((data.keys || []) as string[]).slice().sort();
+    // Newest-first from the server, like /api/archive — don't re-sort.
+    const keys = (data.keys || []) as string[];
     sealLoaded = new Set(keys);
     els.sealArchive.value = keys.join('\n');
     archiveHasBackup = true; // the version we rolled back FROM is the new backup
@@ -3056,14 +3351,18 @@ if (els.settingsSave) {
   els.settingsRevert.addEventListener('click', () => {
     els.server.value = apiBase();
     els.token.value = getToken();
-    els.sealArchive.value = [...sealLoaded].sort().join('\n');
+    // Server order (newest first), as loaded — see loadArchive.
+    els.sealArchive.value = [...sealLoaded].join('\n');
+    renderMaxStorage();
     renderSaveBar();
   });
   // Track every tracked field. `input` fires on typing AND on paste/undo, which
-  // a `change` listener would miss until blur.
-  for (const el of [els.server, els.token, els.sealArchive]) {
+  // a `change` listener would miss until blur. The unit <select> is the exception:
+  // it only ever emits `change`.
+  for (const el of [els.server, els.token, els.sealArchive, els.maxStorage]) {
     el.addEventListener('input', renderSaveBar);
   }
+  els.maxStorageUnit.addEventListener('change', renderSaveBar);
 }
 
 els.submitForm.addEventListener('submit', (e) => {
@@ -3121,14 +3420,25 @@ els.search.addEventListener('input', debounce(() => {
   loadItems(true);
 }, 300));
 
-// Infinite scroll: pull the next page whenever the spinner scrolls into view.
-// rootMargin pre-fetches a little before it's actually visible.
+// Infinite scroll: pull the next page once the spinner actually reaches the
+// viewport — no prefetch margin. This used to pre-fetch 300px early, which fired
+// while the spinner was still off-screen and grew the list under a user who
+// hadn't reached the bottom yet; on a short page the two thresholds could even
+// chain and run pages on without a deliberate scroll. Reaching the end is the
+// gesture that asks for more, so wait for it.
 const loaderObserver = new IntersectionObserver((entries) => {
   if (entries.some((e) => e.isIntersecting) && !state.loading && state.cursor != null) {
     loadItems(false);
   }
-}, { rootMargin: '300px' });
+});
 loaderObserver.observe(els.loader);
+
+// Every interactive control a card can carry: the thumbnail's play target, the
+// bottom-right action row (delete / save / share, plus the size + resolution
+// chips), and anything else that declares an action. Save is an <a download>
+// with no data-act, and the play target's class is .thumb-play, so neither is
+// covered by [data-act] alone — hence all three.
+const CARD_CONTROLS = '[data-act], .thumb-play, .act';
 
 // Native "tap-to-peek" for privacy-blurred cards. Industry spoiler pattern:
 // a tap reveals briefly, but re-blurs the instant the user's attention moves on
@@ -3177,20 +3487,23 @@ els.history.addEventListener('click', (e) => {
     const bl = target.closest('.item.blurred:not(.revealed)') as HTMLElement | null;
     if (bl) {
       // Only the blurred visual area (thumbnail / title / uploader) reveals-then-
-      // waits. The action buttons are never blurred (see .item.blurred CSS), so a
-      // tap on one reveals the card AND activates the button in a single tap —
-      // no second press. The play badge is one of those controls, not blurred
-      // content — blur only touches .thumb/.title/.uploader, so the badge is
-      // already sharp on top of it. Tapping it plays on the first tap instead of
-      // spending that tap on an unblur. Tapping the blurred image itself still
-      // peeks, so the privacy gesture is intact.
-      const onAction = target.closest('[data-act], .play-badge');
-      if (!onAction) {
+      // waits. Every control on the card is sharp already (blur only touches
+      // .thumb/.title/.uploader — see .item.blurred CSS), so a tap on one runs
+      // its action on the FIRST press rather than being spent on an unblur — and
+      // leaves the blur alone entirely. Revealing here too would mean playing a
+      // video from a private site also stripped that card bare behind the player,
+      // which is the opposite of what the blur is for. Tapping the blurred image
+      // itself still peeks, so the privacy gesture is intact.
+      //
+      // This must name every control by the class it actually carries: the play
+      // button is .thumb-play (the badge inside it is a decorative child, and
+      // .play-badge alone missed the rest of the hit target), and the action row
+      // is .act — of which Save is an <a download> with no data-act at all.
+      if (!target.closest(CARD_CONTROLS)) {
         e.preventDefault();
         revealBlurred(bl);
         return;
       }
-      revealBlurred(bl); // reveal, then fall through to run the button's action
     }
   }
   if (head) {
@@ -3225,7 +3538,12 @@ els.history.addEventListener('click', (e) => {
   if (save && isAndroidApp()) {
     e.preventDefault();
     const item = state.items.get(Number(save.dataset.id));
-    if (item) saveItemsNative([item]);
+    if (!item) return;
+    // A green icon means the file is already in Downloads/Orca. Say so rather
+    // than silently re-downloading a copy the device already has; the resolution
+    // picker is where a *different* version is asked for.
+    if (localFileFor(item.slug)) { toast(t('toast.alreadySaved'), 'info'); return; }
+    saveItemsNative([item]);
     return;
   }
 
@@ -3235,7 +3553,29 @@ els.history.addEventListener('click', (e) => {
   if (btn.dataset.act === 'share') openShare(id);
   else if (btn.dataset.act === 'delete') openDeleteConfirm([id]);
   else if (btn.dataset.act === 'resolutions') openResolutions(id);
+  else if (btn.dataset.act === 'pause') holdItem(id, true);
+  else if (btn.dataset.act === 'resume') holdItem(id, false);
 });
+
+// Pause or resume one item. The server echoes the updated row, so the card (and
+// with it the button that was just pressed) repaints from what actually happened
+// rather than from what we assumed would.
+async function holdItem(id: number, pause: boolean): Promise<void> {
+  const item = state.items.get(id);
+  if (!item) return;
+  try {
+    const res = await apiFetch(itemPath(item, pause ? '/pause' : '/resume'), { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
+      return;
+    }
+    upsertRow(data, false);
+    loadStats(); // the paused count moved — re-render the global toggle with it
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+  }
+}
 
 // ---- Multi-select -------------------------------------------------------
 // Toggle via the toolbar button or by long-pressing a card (touch). Selected
@@ -3331,6 +3671,63 @@ els.selectToggle.addEventListener('click', () => {
   if (state.selectMode) exitSelectMode();
   else enterSelectMode();
 });
+
+// ---- Global pause / resume ------------------------------------------------
+// Deliberately server-driven. The button asks "is the BACKEND holding anything
+// paused?" (stats.paused, a count across every item) rather than "does the page
+// I'm looking at contain a paused row?" — the client only ever holds ~10 items,
+// so a selection-scoped answer would render Pause while a hundred paused
+// downloads sat two pages down, and the one press that could release them would
+// pause instead. That mismatch is the failure mode this shape exists to avoid.
+//
+// Anything paused → offer Resume; that outranks showing Pause, because a stalled
+// queue is the state the user needs a way out of.
+//
+// Always visible, like the select toggle it sits beside. It used to hide itself
+// when there was nothing queued or paused, which meant that at rest — the state
+// the app is in most of the time — the control simply wasn't there to be found,
+// and you'd have to already know it existed to catch it during a download. A
+// permanent, predictable button is worth more than one that only appears when
+// it's already too late to look for it; with an idle queue it's disabled instead,
+// which SAYS "nothing to pause" rather than hiding the answer.
+function renderQueueToggle(): void {
+  const btn = els.queueToggle;
+  if (!btn) return;
+  const paused = dlStatsCache?.paused ?? 0;
+  const active = [...state.items.values()].some(
+    (it) => it.status === 'queued' || it.status === 'running');
+  const resume = paused > 0;
+  const label = t(resume ? 'queue.resumeAll' : 'queue.pauseAll');
+  btn.classList.remove('hidden');
+  btn.innerHTML = resume ? RESUME_SVG : PAUSE_SVG;
+  btn.dataset.act = resume ? 'resume' : 'pause';
+  btn.disabled = !resume && !active; // nothing paused, nothing running
+  btn.classList.toggle('active', resume); // paused queue is a state worth flagging
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('title', label);
+}
+
+els.queueToggle?.addEventListener('click', async () => {
+  const resume = els.queueToggle.dataset.act === 'resume';
+  els.queueToggle.disabled = true;
+  try {
+    const res = await apiFetch('/api/queue/' + (resume ? 'resume' : 'pause'), { method: 'POST' });
+    if (!res.ok) { toast(t('toast.saveFail'), 'error'); return; }
+    const data = await res.json().catch(() => ({}));
+    const n = resume ? data.resumed : data.paused;
+    toast(t(resume ? 'toast.resumedN' : 'toast.pausedN', { n: n ?? 0 }), 'ok');
+    // Re-read rather than guess: the server decided what the signal covered, and
+    // its paused count is what the button's next state has to agree with.
+    await Promise.all([loadStats(), softRefresh()]);
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+  } finally {
+    // Re-derive rather than blindly re-enable: whether this button should now be
+    // live depends on what the queue looks like after the signal, and that's the
+    // one place that decides it.
+    renderQueueToggle();
+  }
+});
 els.selCancel.addEventListener('click', exitSelectMode);
 els.selAll.addEventListener('click', selectAllLoaded);
 els.selInvert.addEventListener('click', invertSelection);
@@ -3418,9 +3815,29 @@ async function saveItemsNative(items: Item[]): Promise<void> {
       });
     }
     toast(t('toast.savingN', { n: items.length }), 'ok');
+    watchForSaves(items.map((it) => it.slug));
   } catch (_) {
     toast(t('toast.saveToDeviceFail'), 'error');
   }
+}
+
+/**
+ * Turn the Save icons green once the transfers actually finish. The native saver
+ * is fire-and-forget — it hands off to a foreground service and returns long
+ * before any bytes land — and it reports completion through a notification, not
+ * back to the WebView. So poll, but only while a save this tap started is still
+ * outstanding, and give up after a few minutes so a failed save can't leave a
+ * timer running for the life of the session.
+ */
+function watchForSaves(slugs: string[]): void {
+  const waiting = new Set(slugs);
+  const deadline = Date.now() + 5 * 60_000;
+  const tick = window.setInterval(() => {
+    for (const slug of waiting) if (localIndex.get(slug)) waiting.delete(slug);
+    if (!waiting.size || Date.now() > deadline) { clearInterval(tick); return; }
+    for (const slug of waiting) localFp.delete(slug);
+    state.items.forEach((it) => { if (waiting.has(it.slug)) queueLocalScan(it); });
+  }, 2000);
 }
 
 // Save every item that still has a local file (the current selection, or an
@@ -3746,10 +4163,9 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
   const play = () => v.play().catch(() => { /* autoplay may need a tap */ });
 
   // Prefer a copy already on this device: it starts instantly, costs no data,
-  // and works with the server unreachable. Async, so the poster covers the
-  // lookup; everything below is the fallback when there is no local file.
-  playLocal(id, v, play).then((played) => {
-    if (played) return;
+  // and works with the server unreachable. Everything below is the fallback for
+  // when there is no local file.
+  if (!playLocal(id, v, play)) {
     if (cloud) {
       // Online mode: play through the backend proxy, keyed by the item's slug (not
       // its id). It resolves the upstream URL with cookies and streams the bytes
@@ -3767,7 +4183,107 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
       play();
       loadSubtitles(id);
     }
+  }
+}
+
+// ---- Local copies on this device (Android app) ----------------------------
+// Which items already exist as files in Downloads/Orca. Two things hang off it:
+// the Save icon goes green (and stops re-downloading) once a copy is here, and
+// the player prefers that copy over streaming from the server.
+//
+// The device can't answer this from a slug alone: it only recorded the saves
+// made through this build, so a folder full of videos from an earlier build read
+// as "not downloaded" and streamed anyway. So the server now fingerprints every
+// item it returns (filename + exact byte size) and the app matches that against
+// the folder — one directory listing per batch, no file ever opened. See
+// MediaSaver.FolderIndex, which also explains why size alone settles the
+// resolution question.
+//
+// `url` is a loopback address served by the app itself, NOT `convertFileSrc()`:
+// Android's WebView routes <video> through a media stack that never consults the
+// asset-protocol interceptor, so an asset:// URL fetches fine and plays never.
+// See LocalMediaServer.kt.
+interface LocalCopy { url: string; height: number }
+
+// slug → the local copy, or null for "asked, there isn't one". Absent means
+// not asked yet, which is what makes this a cache rather than a guess.
+const localIndex = new Map<string, LocalCopy | null>();
+// slug → the fingerprint the answer in localIndex was computed from. A
+// resolution change rewrites an item's file, so its old verdict must not stand.
+const localFp = new Map<string, string>();
+
+function fingerprint(it: Item): string {
+  return `${it.filename || ''}|${it.filesize || 0}`;
+}
+
+// Items waiting to be asked about, coalesced so that rendering a page of ten
+// costs one round trip (and one directory listing) rather than ten.
+let localQueue: Item[] = [];
+let localTimer = 0;
+
+function queueLocalScan(item: Item): void {
+  if (!isAndroidApp() || item.status !== 'completed') return;
+  // Cloud-only items are asked about too, and deliberately: the server having
+  // pruned its copy says nothing about this device, which may still hold a save
+  // from before the prune. It just can't be *adopted* — with no server file
+  // there's no fingerprint to match — so only the registry can answer, which is
+  // exactly what an empty name/size makes happen.
+  if (localFp.get(item.slug) === fingerprint(item)) return; // already answered
+  localQueue.push(item);
+  if (localTimer) return;
+  localTimer = window.setTimeout(() => {
+    localTimer = 0;
+    const batch = localQueue;
+    localQueue = [];
+    void scanLocal(batch);
+  }, 0);
+}
+
+async function scanLocal(batch: Item[]): Promise<void> {
+  const T = window.__TAURI__;
+  if (!T?.core?.invoke || !batch.length) return;
+  // Last write wins if the same item was queued twice in one tick (an upsert
+  // racing a progress tick), so the index can't end up holding a stale verdict.
+  const items = [...new Map(batch.map((it) => [it.slug, it])).values()];
+  let res: Array<{ url?: string; height?: number }>;
+  try {
+    res = await T.core.invoke('local_files', {
+      items: items.map((it) => ({
+        slug: it.slug,
+        name: it.filename || '',
+        size: it.filesize || 0,
+        height: it.height || 0,
+      })),
+    }) as Array<{ url?: string; height?: number }>;
+  } catch (_) {
+    return; // leave them unanswered; the next render asks again
+  }
+  items.forEach((it, i) => {
+    const r = res?.[i];
+    localIndex.set(it.slug, r?.url ? { url: r.url, height: r.height || 0 } : null);
+    localFp.set(it.slug, fingerprint(it));
+    paintLocalMark(it);
   });
+}
+
+// Green Save icon on the card for an item whose file is already on this device.
+// Painted here rather than in rowHtml because the answer arrives after the row
+// does — and repainting the row wholesale would re-request its thumbnail.
+function paintLocalMark(item: Item): void {
+  const save = state.rows.get(item.id)?.querySelector('.act-save');
+  save?.classList.toggle('act-local', !!localIndex.get(item.slug));
+}
+
+/**
+ * Re-ask about everything on screen. Saves land asynchronously (DownloadService
+ * writes the file long after the tap returns) and the user can delete files from
+ * a file manager behind our back, so the index is refreshed whenever the app
+ * comes back to the foreground rather than trusted forever.
+ */
+function refreshLocalIndex(): void {
+  if (!isAndroidApp()) return;
+  localFp.clear();
+  state.items.forEach((it) => queueLocalScan(it));
 }
 
 /**
@@ -3775,31 +4291,20 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
  * everywhere else there is no local-save path, so this is always null and the
  * caller falls through to the server.
  *
- * `url` is a loopback address served by the app itself, NOT `convertFileSrc()`:
- * Android's WebView routes <video> through a media stack that never consults the
- * asset-protocol interceptor, so an asset:// URL fetches fine and plays never.
- * See LocalMediaServer.kt.
+ * Answered from the index rather than by asking the device again: by the time a
+ * card can be tapped its row has already been scanned.
  */
-async function localFileFor(slug: string | undefined): Promise<{ url: string; height: number } | null> {
-  const T = window.__TAURI__;
-  if (!slug || !isAndroidApp() || !T?.core?.invoke) return null;
-  try {
-    const r = await T.core.invoke('local_file', { slug }) as { url?: string; height?: number };
-    return r?.url ? { url: r.url, height: r.height || 0 } : null;
-  } catch (_) {
-    return null;
-  }
+function localFileFor(slug: string | undefined): LocalCopy | null {
+  return (slug && localIndex.get(slug)) || null;
 }
 
 /**
  * Point the player at the on-device copy, if there is one. Returns whether it
  * took over, so the caller can fall back to the server when it didn't.
  */
-async function playLocal(id: number, v: HTMLVideoElement, play: () => void): Promise<boolean> {
-  const local = await localFileFor(state.items.get(id)?.slug);
+function playLocal(id: number, v: HTMLVideoElement, play: () => void): boolean {
+  const local = localFileFor(state.items.get(id)?.slug);
   if (!local) return false;
-  // The player may have been closed (or moved to another clip) while we waited.
-  if (els.player.classList.contains('hidden')) return false;
   v.src = local.url;
   v.load();
   play();
@@ -4044,7 +4549,10 @@ function setupNativeShare(): void {
 // stall and never reach "complete".
 function setupAppPermissionRefresh(): void {
   if (!isNativeApp) return;
-  const refresh = () => { setTimeout(refreshAppPermissions, 100); };
+  // Coming back to the app is also when the local-copy index is most likely to
+  // be wrong: a save may have finished in the background, or the user may have
+  // been in a file manager deleting things. Both are answered by re-asking.
+  const refresh = () => { setTimeout(refreshAppPermissions, 100); refreshLocalIndex(); };
   refreshAppPermissions().then((status) => {
     if (!status || (status.notifications && status.background)) return;
     if (localStorage.getItem(PERMISSION_PROMPT_NEVER) !== '1') openModal(els.permissionsPrompt);
@@ -4245,19 +4753,33 @@ document.addEventListener('i18n:changed', () => {
 });
 
 // ---- Auto-refresh ---------------------------------------------------------
-// A safety net behind the SSE stream: re-fetch the first page every 5 minutes so
-// a dropped or idle stream never leaves history stale. Default-on, but gentle —
-// the standard background-refresh pattern: only while the tab is visible and the
-// user is parked at the top, so we never yank a scrolled list or hammer the
-// server. Honours the ≤10-item page size (loadItems(true) re-fetches only page 1).
-const AUTO_REFRESH_MS = 5 * 60 * 1000;
+// ONE polling cycle for the whole client, on both web and the app: every 30s,
+// everything that has to reconcile with the server does it on this tick and
+// nothing keeps a timer of its own. SSE still delivers live updates the moment
+// they happen — this is the safety net behind it, so a dropped or idle stream
+// never leaves the UI stale.
+//
+// The tick drives two fetches, and they are deliberately NOT merged into one
+// request. They answer to different conditions: the header readout (storage
+// gauge + the paused count behind the global pause button) must stay truthful no
+// matter where the user is, while the list refresh is the gentle
+// background-refresh pattern — it holds off while the tab is hidden, while a
+// search is active, or while the user is scrolled into older pages, because
+// rebuilding the list under them is worse than a slightly stale one. Folding the
+// readout into the list response would mean the gauge froze for exactly the
+// users who scrolled away, which is when a filling disk matters most.
+const AUTO_REFRESH_MS = 30 * 1000;
 let lastAutoRefresh = Date.now();
 
 function autoRefresh(): void {
-  if (document.hidden || !getToken() || state.loading) return;
+  // Nothing to poll for while backgrounded or signed out; the visibilitychange
+  // handler below catches the client up the moment it comes back.
+  if (document.hidden || !getToken()) return;
+  lastAutoRefresh = Date.now();
+  loadStats(); // cheap aggregate; runs every tick so the gauge never goes stale
+  if (state.loading) return;
   if (state.q) return;              // don't clobber an active search
   if (window.scrollY > 200) return; // user is browsing older pages — leave them be
-  lastAutoRefresh = Date.now();
   softRefresh();
 }
 

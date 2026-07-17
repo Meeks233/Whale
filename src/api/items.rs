@@ -121,6 +121,10 @@ pub async fn submit(
     // variants enqueued once the row exists.
     let heights = crate::queue::resolve_max_heights(&state.cfg, &state.db, &sites, &url).await;
     let no_download = heights.is_empty();
+    // Out of room: still probe and record the item (so it stays searchable and
+    // streamable via /api/stream/:slug), but park the fetch as Paused rather than
+    // filling the last of the disk. Freeing space and hitting Resume picks it up.
+    let no_space = !no_download && crate::queue::storage_full(&state.cfg, &state.db).await;
 
     let mut items: Vec<Item> = Vec::new();
     let mut duplicates = 0u32;
@@ -134,9 +138,14 @@ pub async fn submit(
 
         if let Some(item) = existing {
             if force {
-                // Reuse the row: reset to queued and re-enqueue.
-                state.db.set_status(item.id, Status::Queued, None).await?;
-                state.queue.enqueue(item.id).await;
+                // Reuse the row: reset to queued and re-enqueue — unless there's no
+                // room, in which case park it exactly like a fresh submit would.
+                if no_space {
+                    state.db.set_status(item.id, Status::Paused, None).await?;
+                } else {
+                    state.db.set_status(item.id, Status::Queued, None).await?;
+                    state.queue.enqueue(item.id).await;
+                }
                 let refreshed = state.db.get(item.id).await?.unwrap_or(item);
                 items.push(refreshed);
             } else {
@@ -156,6 +165,13 @@ pub async fn submit(
         if no_download {
             // Keep the entry as a stream-only record; don't fetch anything.
             state.db.mark_stream_only(item.id).await?;
+            let refreshed = state.db.get(item.id).await?.unwrap_or(item);
+            items.push(refreshed);
+        } else if no_space {
+            // Recorded, streamable, and waiting for room — see `no_space` above.
+            // Paused (not stream-only) because the user still wants this file: it
+            // downloads as soon as space frees and Resume is pressed.
+            state.db.set_status(item.id, Status::Paused, None).await?;
             let refreshed = state.db.get(item.id).await?.unwrap_or(item);
             items.push(refreshed);
         } else {
@@ -280,6 +296,58 @@ pub async fn retry(State(state): State<AppState>, Path(slug): Path<String>) -> A
     Ok(Json(refreshed).into_response())
 }
 
+/// POST /api/items/:slug/pause — hold a download back without discarding it.
+/// Kills any in-flight yt-dlp child; its `.part` file survives, so a later resume
+/// continues from where it stopped rather than starting over. Online playback via
+/// `/api/stream/:slug` keeps working throughout — pausing defers the local copy,
+/// it doesn't retract the record.
+pub async fn pause(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
+    let item = item_by_slug(&state, &slug).await?;
+    if !matches!(item.status, Status::Queued | Status::Running) {
+        return Err(AppError::BadRequest(
+            "only a queued or running download can be paused".into(),
+        ));
+    }
+    // Status first, then kill: run_job's Cancelled branch deliberately writes no
+    // status, so the Paused mark set here is what survives.
+    state.db.set_status(item.id, Status::Paused, None).await?;
+    state.queue.cancel(item.id);
+    let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(refreshed).into_response())
+}
+
+/// POST /api/items/:slug/resume — re-queue a paused download.
+pub async fn resume(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
+    let item = item_by_slug(&state, &slug).await?;
+    if item.status != Status::Paused {
+        return Err(AppError::BadRequest("item is not paused".into()));
+    }
+    state.db.set_status(item.id, Status::Queued, None).await?;
+    state.queue.enqueue(item.id).await;
+    let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(refreshed).into_response())
+}
+
+/// POST /api/queue/pause — park every queued/running download at once.
+pub async fn pause_all(State(state): State<AppState>) -> AppResult<Response> {
+    let ids = state.db.pause_active().await?;
+    for id in &ids {
+        state.queue.cancel(*id);
+    }
+    Ok(Json(json!({ "paused": ids.len() })).into_response())
+}
+
+/// POST /api/queue/resume — release every paused download, oldest submission
+/// first, so the backlog drains in the order the user queued it.
+pub async fn resume_all(State(state): State<AppState>) -> AppResult<Response> {
+    let ids = state.db.paused_ids().await?;
+    for id in &ids {
+        state.db.set_status(*id, Status::Queued, None).await?;
+        state.queue.enqueue(*id).await;
+    }
+    Ok(Json(json!({ "resumed": ids.len() })).into_response())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PublicRequest {
     pub public: bool,
@@ -370,11 +438,26 @@ pub async fn delete(
     Ok(Json(json!({ "deleted": true })).into_response())
 }
 
-/// GET /api/stats — aggregate download count + total size (for the header
-/// "total downloaded" readout beside the heartbeat).
+/// GET /api/stats — what the header readout beside the heartbeat needs: how much
+/// storage is used against the cap, plus whether anything is paused.
+///
+/// `limit_bytes` is null on an uncapped install (the gauge then just reports a
+/// size). `paused` is a server-wide count on purpose: the global pause/resume
+/// button keys off what the *backend* is holding, not off whichever page of items
+/// this client happens to have fetched, so it stays correct when the paused work
+/// is further down the list than the client has scrolled.
 pub async fn stats(State(state): State<AppState>) -> AppResult<Response> {
     let (count, total_bytes) = state.db.download_stats().await?;
-    Ok(Json(json!({ "count": count, "total_bytes": total_bytes })).into_response())
+    let limit_bytes = crate::queue::resolve_max_storage(&state.cfg, &state.db).await;
+    let paused = state.db.paused_count().await?;
+    Ok(Json(json!({
+        "count": count,
+        "total_bytes": total_bytes,
+        "limit_bytes": limit_bytes,
+        "limit_locked": state.cfg.max_storage.is_some(),
+        "paused": paused,
+    }))
+    .into_response())
 }
 
 /// GET /api/logs — recent probe/download errors (bounded ring buffer, newest
@@ -632,6 +715,11 @@ pub async fn get_settings(State(state): State<AppState>) -> AppResult<Response> 
         "containers": crate::config::CONTAINERS.iter().map(|c| c.ext()).collect::<Vec<_>>(),
         "subs": subs,
         "subs_locked": state.cfg.subs_user_set,
+        // Bytes, or null for uncapped. The UI renders this back into a number +
+        // unit; bytes is the one representation that survives that round trip
+        // without the unit choice mattering.
+        "max_storage": crate::queue::resolve_max_storage(&state.cfg, &state.db).await,
+        "max_storage_locked": state.cfg.max_storage.is_some(),
     }))
     .into_response())
 }
@@ -665,6 +753,20 @@ pub struct SettingsRequest {
     /// New global subtitle toggle. Absent = leave as-is.
     #[serde(default)]
     pub subs: Option<bool>,
+    /// New storage cap in bytes; `Some(0)`/`Some(null)` clears it (unlimited),
+    /// absent leaves it as-is. Double-`Option` for the same reason `max_heights`
+    /// is an `Option<Vec>`: "set to unlimited" and "field not sent" are different
+    /// requests and must not collapse into each other.
+    #[serde(default, deserialize_with = "double_option")]
+    pub max_storage: Option<Option<i64>>,
+}
+
+/// Distinguish an omitted field (`None`) from an explicit `null` (`Some(None)`).
+fn double_option<'de, D>(de: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(de).map(Some)
 }
 
 /// PUT /api/settings — update runtime settings. This is a *partial patch*: a
@@ -729,6 +831,22 @@ pub async fn put_settings(
             .db
             .set_setting("subs", Some(if subs { "1" } else { "0" }))
             .await?;
+    }
+
+    if let Some(bytes) = req.max_storage {
+        if state.cfg.max_storage.is_some() {
+            return Err(AppError::BadRequest(
+                "max_storage is pinned by the ORCA_MAX_STORAGE environment variable".into(),
+            ));
+        }
+        match bytes.filter(|b| *b > 0) {
+            // A cap below what's already stored would park every future download on
+            // arrival with no way back short of deleting things. Let the user set it
+            // anyway (shrinking the cap is how you *start* a cleanup) but refuse the
+            // nonsensical negative.
+            Some(b) => state.db.set_setting("max_storage", Some(&b.to_string())).await?,
+            None => state.db.set_setting("max_storage", None).await?,
+        }
     }
 
     get_settings(State(state)).await

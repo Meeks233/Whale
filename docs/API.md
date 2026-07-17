@@ -58,6 +58,10 @@ buffered.
 | `GET` | `/api/items/:slug` | Owner | One item |
 | `DELETE` | `/api/items/:slug?delete_file=true` | Owner | Delete row and optional files |
 | `POST` | `/api/items/:slug/retry` | Owner | Retry failed item |
+| `POST` | `/api/items/:slug/pause` | Owner | Park a queued/running download |
+| `POST` | `/api/items/:slug/resume` | Owner | Re-queue a paused download |
+| `POST` | `/api/queue/pause` | Owner | Park every queued/running download |
+| `POST` | `/api/queue/resume` | Owner | Release every paused download, oldest first |
 | `GET`, `PUT` | `/api/items/:slug/resolutions` | Owner | Inspect/reconcile variants |
 | `POST` | `/api/items/:slug/public` | Owner | Create, update, or revoke share |
 | `GET` | `/api/items/:slug/file` | Owner query/header | Range stream or download |
@@ -65,9 +69,9 @@ buffered.
 | `GET` | `/api/stream/:slug/prepare` | Owner query/header | Warm stream URL cache |
 | `GET` | `/api/p/:share_slug` | Capability | Live public file |
 | `GET` | `/api/events?key_id=...&auth=...` | Owner query | Encrypted SSE progress |
-| `GET` | `/api/stats` | Owner | Download count and bytes |
+| `GET` | `/api/stats` | Owner | Download count, bytes, storage cap, paused count |
 | `GET` | `/api/logs` | Owner | Bounded recent errors |
-| `GET`, `PUT` | `/api/settings` | Owner | Runtime resolution default |
+| `GET`, `PUT` | `/api/settings` | Owner | Runtime resolution/storage defaults |
 | `GET` | `/api/cookies` | Owner | Legacy cookie status list |
 | `PUT`, `PATCH`, `DELETE` | `/api/cookies/:platform` | Owner | Legacy cookie management |
 | `GET` | `/api/websites` | Owner | Website registry |
