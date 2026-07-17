@@ -200,9 +200,7 @@ fn srt_to_vtt(srt: &str) -> String {
     let mut lines = body.lines().peekable();
     while let Some(line) = lines.next() {
         // A bare integer directly followed by a timing line is SRT's cue counter.
-        if line.trim().parse::<u64>().is_ok()
-            && lines.peek().is_some_and(|n| n.contains("-->"))
-        {
+        if line.trim().parse::<u64>().is_ok() && lines.peek().is_some_and(|n| n.contains("-->")) {
             continue;
         }
         if line.contains("-->") {
@@ -229,7 +227,8 @@ mod tests {
 
     #[test]
     fn srt_converts_to_vtt() {
-        let srt = "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
+        let srt =
+            "1\n00:00:01,000 --> 00:00:02,500\nHello\n\n2\n00:00:03,000 --> 00:00:04,000\nWorld\n";
         let vtt = srt_to_vtt(srt);
         assert!(vtt.starts_with("WEBVTT\n\n"));
         assert!(vtt.contains("00:00:01.000 --> 00:00:02.500"));

@@ -446,6 +446,10 @@ function ringSvg(frac: number): string {
 // .act glyphs) and scaled up by CSS where they stand alone in the toolbar.
 const PAUSE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/></svg>`;
 const RESUME_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.029 4.285A2 2 0 0 0 7 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z"/><path d="M3 4v16"/></svg>`;
+// Retry, on a failed card. Re-queues the same row (POST /api/items/:slug/retry)
+// rather than re-submitting the URL, so the item keeps its id, its place in the
+// list, and its archive key.
+const RETRY_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>`;
 // Vertical kebab (⋮) for the website-card overflow menu.
 const MORE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>`;
 interface Stats {
@@ -677,6 +681,11 @@ function actionsHtml(item: Item): string {
     hold = `<button class="act" data-act="pause" data-id="${item.id}" aria-label="${esc(t('item.pause'))}" title="${esc(t('item.pause'))}">${PAUSE_SVG}</button>`;
   } else if (item.status === 'paused') {
     hold = `<button class="act act-resume" data-act="resume" data-id="${item.id}" aria-label="${esc(t('item.resume'))}" title="${esc(t('item.resume'))}">${RESUME_SVG}</button>`;
+  } else if (item.status === 'failed') {
+    // A failure is usually transient (a dropped connection, a site hiccup) or has
+    // just been fixed by the user (cookies added), so the fix is one tap from the
+    // card that reported it rather than a re-paste of the URL.
+    hold = `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.retry'))}" title="${esc(t('item.retry'))}">${RETRY_SVG}</button>`;
   }
   // Save / share only make sense for a completed item with a file. Local file
   // present: Save (download icon) + Share icon. Local file gone (backed away):
@@ -787,7 +796,10 @@ function rowHtml(item: Item): string {
   const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
   const active = item.status === 'queued' || item.status === 'running';
   const bar = `<div class="progress ${active ? '' : 'hidden'}"><div class="progress-fill" style="width:0%"></div></div>`;
-  const meta = item.error ? `<div class="err">${esc(item.error)}</div>` : '';
+  // A failure is reported by the badge and the retry button, NOT by its text: a
+  // yt-dlp error is a multi-line stderr tail, and pasting it into the card blew
+  // the row open to a screenful of monospace while still being too clipped to
+  // read. The whole message lives in Settings → Logs, which is built to show it.
   // Multi-select needs no in-card checkbox: the card itself highlights when
   // selected (see .item.selected in style.css), so nothing is injected here that
   // would compete with the thumbnail for horizontal space.
@@ -804,7 +816,6 @@ function rowHtml(item: Item): string {
         <span class="eta"></span>
       </div>
       ${bar}
-      ${meta}
       ${actionsHtml(item)}
     </div>`;
 }
@@ -3555,7 +3566,28 @@ els.history.addEventListener('click', (e) => {
   else if (btn.dataset.act === 'resolutions') openResolutions(id);
   else if (btn.dataset.act === 'pause') holdItem(id, true);
   else if (btn.dataset.act === 'resume') holdItem(id, false);
+  else if (btn.dataset.act === 'retry') retryItem(id);
 });
+
+// Re-queue a failed item. Like holdItem, the server echoes the updated row, so
+// the card repaints from the new status (Queued) and the retry button gives way
+// to the pause button on its own.
+async function retryItem(id: number): Promise<void> {
+  const item = state.items.get(id);
+  if (!item) return;
+  try {
+    const res = await apiFetch(itemPath(item, '/retry'), { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.retryFail'), 'error');
+      return;
+    }
+    upsertRow(data, false);
+    loadStats();
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+  }
+}
 
 // Pause or resume one item. The server echoes the updated row, so the card (and
 // with it the button that was just pressed) repaints from what actually happened

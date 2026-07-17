@@ -7,6 +7,10 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const javascriptExtensions = new Set(['.js', '.mjs', '.cjs', '.jsx']);
 const allowedGenerated = new Set(['web/app.js', 'web/theme.js', 'web/sw.js']);
+// Snippets injected verbatim into a page that the app does not build or ship:
+// chrome-devtools evaluates an `initScript` as raw source in the browser, so
+// there is no compile step this could hang a TypeScript build off of.
+const allowedInjected = new Set(['packaging/screenshots/demo-data.js']);
 const ignoredDirectories = new Set([
   '.git',
   '.claude',
@@ -31,7 +35,9 @@ async function scan(directory: string): Promise<void> {
     }
     if (!entry.isFile() || !javascriptExtensions.has(extname(entry.name).toLowerCase())) continue;
     const projectPath = relative(root, absolute).split(sep).join('/');
-    if (!allowedGenerated.has(projectPath)) violations.push(projectPath);
+    if (!allowedGenerated.has(projectPath) && !allowedInjected.has(projectPath)) {
+      violations.push(projectPath);
+    }
   }
 }
 

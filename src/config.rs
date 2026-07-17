@@ -187,14 +187,14 @@ impl Config {
     /// name at 255 *bytes*, the tightest limit across the filesystems a download
     /// can land on (NTFS, APFS and exFAT count 255 characters instead), so a CJK
     /// title at 3 bytes/char runs out of room on ext4 first. The fields below sum
-    /// to 231 bytes, which is what `ytdlp::options::NAME_MAX_BYTES` enforces —
+    /// to 182 bytes, which is what `ytdlp::options::NAME_MAX_BYTES` enforces —
     /// the slack covers what yt-dlp appends *after* the template (see there).
     ///
     /// The date falls back from upload_date to release_date to "0000-00-00" so
     /// the field never collapses and shift the rest of the name around.
     pub const DEFAULT_OUTPUT_TEMPLATE: &'static str = "%(uploader,channel,creator|Unknown).32B - \
          %(upload_date>%Y-%m-%d,release_date>%Y-%m-%d|0000-00-00)s - \
-         %(title,description|Untitled).150B [%(id).30B].%(ext)s";
+         %(title,description|Untitled).101B [%(id).30B].%(ext)s";
 
     pub fn from_env() -> anyhow::Result<Self> {
         let (token, token_generated) = match env_opt("ORCA_TOKEN") {

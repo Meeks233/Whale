@@ -152,6 +152,7 @@ declare global {
       'queue.resumeAll': 'Resume all downloads',
       'item.pause': 'Pause',
       'item.resume': 'Resume',
+      'item.retry': 'Retry',
       'toast.pausedN': 'Paused {n} download(s)',
       'toast.resumedN': 'Resumed {n} download(s)',
       'deleteConfirm.frees': 'Frees {size} of space.',
@@ -293,6 +294,7 @@ declare global {
 
       'toast.loadHistoryFail': 'Failed to load history',
       'toast.network': 'Network error',
+      'toast.retryFail': 'Could not retry the download',
       'toast.setToken': 'Set your token first',
       'toast.insecureServer': 'Refused: plain http:// to a public IP would expose your token & cookies. Use https, or a private/LAN address.',
       'toast.setTokenSubmit': 'Set your token to submit',
@@ -451,6 +453,7 @@ declare global {
       'queue.resumeAll': '恢复全部下载',
       'item.pause': '暂停',
       'item.resume': '继续',
+      'item.retry': '重试',
       'toast.pausedN': '已暂停 {n} 个下载',
       'toast.resumedN': '已恢复 {n} 个下载',
       'deleteConfirm.frees': '可释放 {size} 空间。',
@@ -592,6 +595,7 @@ declare global {
 
       'toast.loadHistoryFail': '加载历史失败',
       'toast.network': '网络错误',
+      'toast.retryFail': '无法重试下载',
       'toast.setToken': '请先设置令牌',
       'toast.insecureServer': '已阻止：通过明文 http:// 连接公网 IP 会泄露你的令牌和 Cookie。请使用 https 或内网/局域网地址。',
       'toast.setTokenSubmit': '设置令牌后才能提交',
@@ -750,6 +754,7 @@ declare global {
       'queue.resumeAll': '恢復全部下載',
       'item.pause': '暫停',
       'item.resume': '繼續',
+      'item.retry': '重試',
       'toast.pausedN': '已暫停 {n} 個下載',
       'toast.resumedN': '已恢復 {n} 個下載',
       'deleteConfirm.frees': '可釋放 {size} 空間。',
@@ -891,6 +896,7 @@ declare global {
 
       'toast.loadHistoryFail': '載入歷史失敗',
       'toast.network': '網路錯誤',
+      'toast.retryFail': '無法重試下載',
       'toast.setToken': '請先設定權杖',
       'toast.insecureServer': '已封鎖：透過明文 http:// 連線公網 IP 會洩漏你的權杖與 Cookie。請使用 https 或內網/區域網路位址。',
       'toast.setTokenSubmit': '設定權杖後才能提交',

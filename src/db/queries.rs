@@ -25,7 +25,11 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         .ok_or_else(|| anyhow::anyhow!("unknown source in db: {source_str}"))?;
     let filepath: Option<String> = row.try_get("filepath")?;
     let local_available = filepath_exists(&filepath);
-    let filename = if local_available { basename(&filepath) } else { None };
+    let filename = if local_available {
+        basename(&filepath)
+    } else {
+        None
+    };
 
     Ok(Item {
         id: row.try_get("id")?,
@@ -1135,7 +1139,10 @@ mod tests {
         set.stream_quality = Some("lower".to_string());
         db.upsert_website(&set).await.unwrap();
 
-        assert_eq!(db.get_website("follow").await.unwrap().unwrap().max_heights, None);
+        assert_eq!(
+            db.get_website("follow").await.unwrap().unwrap().max_heights,
+            None
+        );
         assert_eq!(
             db.get_website("pinned").await.unwrap().unwrap().max_heights,
             Some(String::new())
@@ -1560,7 +1567,9 @@ mod tests {
             .insert_probe(&probe("youtube", "p3", "Done"), Source::Download)
             .await
             .unwrap();
-        db.set_status(second.id, Status::Running, None).await.unwrap();
+        db.set_status(second.id, Status::Running, None)
+            .await
+            .unwrap();
         db.set_completed(done.id, "/downloads/done.mkv", 10, Some(1080))
             .await
             .unwrap();
