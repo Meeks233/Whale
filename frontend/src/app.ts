@@ -303,6 +303,7 @@ const els = {
   selAll: byId<HTMLButtonElement>('sel-all'),
   selInvert: byId<HTMLButtonElement>('sel-invert'),
   selDownload: byId<HTMLButtonElement>('sel-download'),
+  selUpgrade: byId<HTMLButtonElement>('sel-upgrade'),
   selShare: byId<HTMLButtonElement>('sel-share'),
   selUnshare: byId<HTMLButtonElement>('sel-unshare'),
   selCopy: byId<HTMLButtonElement>('sel-copy'),
@@ -586,6 +587,17 @@ function fileUrl(item: Item | number, download?: boolean): string {
   return apiUrl(itemPath(item, '/file') + '?token=' + tok + (download ? '&download=1' : ''));
 }
 
+// Thumbnail through the backend proxy/cache instead of the source CDN. The
+// server fetches the recorded thumbnail_url once, stashes it, and serves it —
+// so a browser (or a blocker) that refuses e.g. pbs.twimg.com still shows the
+// picture, and the CDN never sees the request. Token rides in the query, since
+// an <img> can't set headers. Returns '' when the item has no thumbnail slug.
+function thumbUrl(item: Item): string {
+  if (!item.thumbnail_url || !item.slug) return '';
+  const tok = encodeURIComponent(getToken());
+  return apiUrl(itemPath(item, '/thumb') + '?token=' + tok);
+}
+
 // Online-playback proxy: the backend resolves the upstream URL (with cookies)
 // and streams the bytes back, so the browser plays through us instead of hitting
 // a stale, IP-bound CDN URL directly. Keyed by the item's unguessable slug (like
@@ -625,6 +637,12 @@ function publicUrl(slug: string): string {
 // Save icon (Lucide "download"): borderless glyph, sized to sit inline on the
 // completed status row. No outer chrome — just the currentColor stroke.
 const DOWNLOAD_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>`;
+
+// Upgrade glyph (Lucide "circle-fading-arrow-up"): the Save icon's stand-in on a
+// card whose on-device copy is shorter than the taller version the server now
+// holds. Tapping it re-saves over the local file, swapping the low-res copy for
+// the high-res one (see the save-click intercept and localUpgradeAvailable).
+const UPGRADE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a10 10 0 0 1 7.38 16.75"/><path d="m16 12-4-4-4 4"/><path d="M12 16V8"/><path d="M2.5 8.875a10 10 0 0 0-.5 3"/><path d="M2.83 16a10 10 0 0 0 2.43 3.4"/><path d="M4.636 5.235a10 10 0 0 1 .891-.857"/><path d="M8.644 21.42a10 10 0 0 0 7.631-.38"/></svg>`;
 
 // Share glyph (Lucide "share-2"): matches the Save icon's borderless, inline
 // currentColor style. A single icon replaces the old Public/Private + Copy pair;
@@ -836,8 +854,9 @@ function thumbHtml(item: Item, thumb: string, dur: string): string {
 }
 
 function rowHtml(item: Item): string {
-  const thumb = item.thumbnail_url
-    ? `<img class="thumb" src="${esc(item.thumbnail_url)}" alt="" loading="lazy">`
+  const thumbSrc = thumbUrl(item);
+  const thumb = thumbSrc
+    ? `<img class="thumb" src="${esc(thumbSrc)}" alt="" loading="lazy">`
     : `<div class="thumb thumb-empty"></div>`;
   // Clips under a minute are tagged so CSS can drop the pill on portrait thumbs,
   // where it would crowd the play button and where "0:20" on a Reel is just
@@ -994,8 +1013,9 @@ function updateGroupHeader(gkey: string): void {
   const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[];
   if (!items.length) return;
   const first = items[0]!;
-  const thumb = first.thumbnail_url
-    ? `<img class="thumb" src="${esc(first.thumbnail_url)}" alt="" loading="lazy">`
+  const firstThumb = thumbUrl(first);
+  const thumb = firstThumb
+    ? `<img class="thumb" src="${esc(firstThumb)}" alt="" loading="lazy">`
     : `<div class="thumb thumb-empty"></div>`;
   const base = (first.title || '').replace(/\s*#\d+\s*$/, '');
   // Raw (not HTML-escaped): it's applied via textContent in updateGroupProgress,
@@ -1136,7 +1156,7 @@ function toggleGroupExpand(gkey: string): void {
 function playGroup(gkey: string): void {
   const items = groupChildIds(gkey).map((id) => state.items.get(id)).filter((it) => it && isPlayable(it as Item)) as Item[];
   if (!items.length) { toast(t('toast.noDownloadable'), 'info'); return; }
-  playQueue = items.map((it) => ({ id: it.id, cloud: !it.local_available, poster: it.thumbnail_url }));
+  playQueue = items.map((it) => ({ id: it.id, cloud: !it.local_available, poster: thumbUrl(it) }));
   playIndex = 0;
   playCurrentInQueue();
 }
@@ -3789,9 +3809,14 @@ els.history.addEventListener('click', (e) => {
     const item = state.items.get(Number(save.dataset.id));
     if (!item) return;
     // A green icon means the file is already in Downloads/Orca. Say so rather
-    // than silently re-downloading a copy the device already has; the resolution
-    // picker is where a *different* version is asked for.
-    if (localFileFor(item.slug)) { toast(t('toast.alreadySaved'), 'info'); return; }
+    // than silently re-downloading a copy the device already has — UNLESS the
+    // server now holds a taller version, in which case this is the Upgrade icon
+    // and the tap should replace the local copy with the better one.
+    if (localFileFor(item.slug)) {
+      if (localUpgradeAvailable(item)) { saveItemsNative([item]); return; }
+      toast(t('toast.alreadySaved'), 'info');
+      return;
+    }
     saveItemsNative([item]);
     return;
   }
@@ -3928,6 +3953,9 @@ function updateSelBar(): void {
   };
   // Primaries: each needs something it can act ON.
   show(els.selDownload, local.length > 0);   // needs a file to hand over
+  // Upgrade rides alongside Download but only when at least one on-device copy is
+  // shorter than the server's current best — replacing it is the whole point.
+  show(els.selUpgrade, local.some(localUpgradeAvailable));
   show(els.selShare, done.length > 0);       // needs a finished item to publish
   show(els.selDelete, n > 0);                // any record can be deleted
 
@@ -4220,6 +4248,16 @@ function batchDownload(source?: Item[]): void {
   toast(t('toast.downloadingN', { n: items.length }), 'ok');
 }
 
+// Replace the on-device copy of every selected item that the server now holds a
+// taller version of. Same native save path as batchDownload — MediaSaver deletes
+// the shorter file it recognises by slug — just filtered to the ones a re-save
+// actually improves. Android-only (localUpgradeAvailable is never true elsewhere).
+function batchUpgrade(): void {
+  const items = selectedItems().filter(localUpgradeAvailable);
+  if (!items.length) { toast(t('toast.noUpgradable'), 'info'); return; }
+  void saveItemsNative(items);
+}
+
 // Open the batch-share dialog: the same 7 / 30 / permanent duration picker as
 // the single-item share, applied to every completed item in the selection — or
 // an explicit list (a whole fold), stashed so the deferred confirm targets it.
@@ -4437,6 +4475,7 @@ async function batchClean(): Promise<void> {
 }
 
 els.selDownload.addEventListener('click', () => batchDownload());
+els.selUpgrade.addEventListener('click', () => batchUpgrade());
 els.selShare.addEventListener('click', () => openBatchShare());
 els.selUnshare.addEventListener('click', batchUnshare);
 els.selCopy.addEventListener('click', batchCopyLinks);
@@ -4537,6 +4576,9 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
       v.src = streamUrl(slug);
       v.load();
       play();
+      // Streamed items have no on-disk sidecars, but the backend resolves subtitle
+      // tracks from the source for them too, so ask the same way local playback does.
+      loadSubtitles(id);
     } else {
       v.src = fileUrl(id);
       v.load();
@@ -4626,12 +4668,33 @@ async function scanLocal(batch: Item[]): Promise<void> {
   });
 }
 
+// True when this device holds a copy shorter than the tallest version the server
+// now has, so re-saving would replace it with a better one. Android-only: the
+// local index is empty everywhere else, so this is always false and the Save icon
+// keeps its plain download form. Both heights must be known and non-zero — an
+// unknown local height (0) can't be proven shorter, and we won't cry "upgrade"
+// on a guess.
+function localUpgradeAvailable(item: Item): boolean {
+  const local = localFileFor(item.slug);
+  return !!local && local.height > 0 && !!item.height && item.height > local.height;
+}
+
 // Green Save icon on the card for an item whose file is already on this device.
 // Painted here rather than in rowHtml because the answer arrives after the row
-// does — and repainting the row wholesale would re-request its thumbnail.
+// does — and repainting the row wholesale would re-request its thumbnail. When the
+// server has since fetched a taller copy than the one on this device, the same
+// slot becomes the Upgrade affordance (different glyph + label); a tap re-saves
+// over the local file (see the save-click intercept).
 function paintLocalMark(item: Item): void {
-  const save = state.rows.get(item.id)?.querySelector('.act-save');
-  save?.classList.toggle('act-local', !!localIndex.get(item.slug));
+  const save = state.rows.get(item.id)?.querySelector('.act-save') as HTMLElement | null;
+  if (!save) return;
+  save.classList.toggle('act-local', !!localIndex.get(item.slug));
+  const upgrade = localUpgradeAvailable(item);
+  save.classList.toggle('act-upgrade', upgrade);
+  save.innerHTML = upgrade ? UPGRADE_SVG : DOWNLOAD_SVG;
+  const label = upgrade ? t('item.upgrade') : t('aria.save');
+  save.setAttribute('aria-label', label);
+  save.setAttribute('title', label);
 }
 
 /**
@@ -4672,11 +4735,12 @@ function playLocal(id: number, v: HTMLVideoElement, play: () => void): boolean {
   return true;
 }
 
-// Attach the item's subtitle sidecars as <track> elements. Local playback only:
-// a cloud/stream item has no sidecars on disk. Subtitles are also muxed into the
-// file itself (yt-dlp `--embed-subs`), but the browser won't surface embedded
-// tracks from a progressive <video>, so the preview needs them served alongside.
-// Best-effort — a failure here must never break playback.
+// Attach the item's subtitle tracks as <track> elements. For a local file these
+// are the on-disk sidecars; for a streamed (cloud-only) item the backend resolves
+// them from the source instead, so this works in both modes. Subtitles are also
+// muxed into the file itself (yt-dlp `--embed-subs`), but the browser won't
+// surface embedded tracks from a progressive <video>, so the preview needs them
+// served alongside. Best-effort — a failure here must never break playback.
 async function loadSubtitles(id: number): Promise<void> {
   const slug = state.items.get(id)?.slug;
   if (!slug || !getToken()) return;

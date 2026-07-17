@@ -146,6 +146,7 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         ytdlp_version,
         errlog,
         stream_urls: Default::default(),
+        subtitle_urls: Default::default(),
     };
 
     let bind = cfg.bind;

@@ -2,6 +2,12 @@
 //! next to a downloaded video (`--write-subs`), so the in-app player can show
 //! them as `<track>` elements.
 //!
+//! When an item has **no local file** (a cloud-only / streamed record), there are
+//! no sidecars to read, so both handlers fall back to the *source*: a cached
+//! `--dump-json` probe lists the tracks the site offers, and the chosen one is
+//! fetched through the same SSRF-guarded, cookie-carrying proxy the media stream
+//! uses. Streamed playback then gets subtitles just like a local file does.
+//!
 //! Design notes:
 //! - **Nothing is written.** yt-dlp already both embeds subtitles into the media
 //!   (`--embed-subs`, for offline playback) and keeps the standalone sidecar
@@ -16,13 +22,14 @@
 
 use super::AppState;
 use crate::error::AppError;
-use crate::types::Item;
+use crate::types::{Item, Status};
 use axum::extract::{Path, Request, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 use std::path::{Path as FsPath, PathBuf};
+use std::sync::Arc;
 
 /// Sidecar extensions the browser can display once converted to WebVTT. Formats
 /// we can't convert (`.ass`, `.ssa`) stay on disk and embedded, but aren't
@@ -98,6 +105,39 @@ fn video_path(root: &FsPath, item: &Item) -> Option<PathBuf> {
     crate::safepath::confined_file(root, stored)
 }
 
+/// Resolve the subtitle tracks available at the *source* for an item with no local
+/// file (cloud-only / stream). Mirrors `media::resolve_stream_target`: only an
+/// online-streamable item (completed or paused) is eligible, the stored page URL is
+/// re-guarded before yt-dlp touches it, and the resolved tracks are cached per slug
+/// so listing and the follow-up track fetch share one probe.
+async fn resolve_remote(
+    state: &AppState,
+    item: &Item,
+) -> Result<Arc<Vec<crate::ytdlp::RemoteSub>>, AppError> {
+    if !matches!(item.status, Status::Completed | Status::Paused) {
+        return Ok(Arc::new(Vec::new()));
+    }
+    crate::net_guard::guard(&item.webpage_url, state.cfg.allow_private_dns)
+        .await
+        .map_err(|r| AppError::BadRequest(r.reason().into()))?;
+    let cookie = crate::cookies::resolve(
+        &state.cookies,
+        state.cfg.cookies.as_deref(),
+        &item.webpage_url,
+    );
+    state
+        .subtitle_urls
+        .resolve(
+            &item.slug,
+            &state.cfg,
+            &item.webpage_url,
+            cookie.as_deref(),
+            item.playlist_index,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("subtitle resolve failed: {e}")))
+}
+
 /// GET /api/items/:slug/subs — the item's previewable subtitle tracks. Owner-only
 /// via the `require_owner` middleware (see `api::router`), so no token check here.
 pub async fn list(
@@ -114,7 +154,17 @@ pub async fn list(
             .into_iter()
             .map(|s| json!({ "lang": s.lang, "label": label_for(&s.lang) }))
             .collect::<Vec<_>>(),
-        None => Vec::new(),
+        // No local file: offer what the source has, so a streamed item still shows
+        // subtitles. Best-effort — a failed probe just means no tracks, never an
+        // error the player has to handle.
+        None => resolve_remote(&state, &item)
+            .await
+            .map(|subs| {
+                subs.iter()
+                    .map(|s| json!({ "lang": s.lang, "label": label_for(&s.lang) }))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
     };
     Ok(Json(json!({ "subs": tracks })).into_response())
 }
@@ -132,31 +182,12 @@ pub async fn get(
         .find_by_slug(&slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    let video = video_path(&state.cfg.download_dir, &item).ok_or(AppError::NotFound)?;
-    // The client's `lang` only ever selects among discovered tracks — it is never
-    // joined into a path.
-    let sub = discover(&video)
-        .into_iter()
-        .find(|s| s.lang == lang)
-        .ok_or(AppError::NotFound)?;
-    // Belt-and-braces: re-confine the path we're about to read.
-    let path = crate::safepath::confined_file(
-        &state.cfg.download_dir,
-        sub.path.to_str().ok_or(AppError::NotFound)?,
-    )
-    .ok_or(AppError::NotFound)?;
-
-    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_SUB_BYTES {
-        return Err(AppError::BadRequest("subtitle file is too large".into()));
-    }
-    let raw = tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|_| AppError::NotFound)?;
-    let is_vtt = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("vtt"));
-    let body = if is_vtt { raw } else { srt_to_vtt(&raw) };
+    let body = match video_path(&state.cfg.download_dir, &item) {
+        Some(video) => local_track(&state, &video, &lang)?,
+        // No local file: fetch the track from the source, exactly as the stream
+        // proxy fetches the media — SSRF-guarded, with the platform cookies.
+        None => remote_track(&state, &item, &lang).await?,
+    };
 
     Ok((
         [
@@ -167,6 +198,59 @@ pub async fn get(
         body,
     )
         .into_response())
+}
+
+/// Read a discovered on-disk sidecar and return it as WebVTT (SRT converted). The
+/// client's `lang` only ever selects among discovered tracks — it is never joined
+/// into a path — and the resolved path is re-confined before the read.
+fn local_track(state: &AppState, video: &FsPath, lang: &str) -> Result<String, AppError> {
+    let sub = discover(video)
+        .into_iter()
+        .find(|s| s.lang == lang)
+        .ok_or(AppError::NotFound)?;
+    let path = crate::safepath::confined_file(
+        &state.cfg.download_dir,
+        sub.path.to_str().ok_or(AppError::NotFound)?,
+    )
+    .ok_or(AppError::NotFound)?;
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > MAX_SUB_BYTES {
+        return Err(AppError::BadRequest("subtitle file is too large".into()));
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|_| AppError::NotFound)?;
+    let is_vtt = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("vtt"));
+    Ok(if is_vtt { raw } else { srt_to_vtt(&raw) })
+}
+
+/// Fetch one source subtitle track for a cloud-only item and return it as WebVTT.
+/// The `lang` selects among the tracks the probe found (never a path), and the
+/// fetch goes through the same SSRF-guarded, cookie-carrying proxy the media
+/// stream uses.
+async fn remote_track(state: &AppState, item: &Item, lang: &str) -> Result<String, AppError> {
+    let subs = resolve_remote(state, item).await?;
+    let sub = subs.iter().find(|s| s.lang == lang).ok_or(AppError::NotFound)?;
+    let cookie_file = crate::cookies::resolve(
+        &state.cookies,
+        state.cfg.cookies.as_deref(),
+        &item.webpage_url,
+    );
+    let cookie_header = super::media::cookie_header_for(cookie_file.as_deref(), &sub.url);
+    let bytes = super::media::fetch_upstream_bytes(
+        &sub.url,
+        &item.webpage_url,
+        cookie_header,
+        state.cfg.allow_private_dns,
+        MAX_SUB_BYTES as usize,
+    )
+    .await?;
+    let raw = String::from_utf8_lossy(&bytes);
+    Ok(if sub.ext == "vtt" {
+        raw.into_owned()
+    } else {
+        srt_to_vtt(&raw)
+    })
 }
 
 /// Token-gate a request, mirroring `media::file`'s auth (the token may ride in

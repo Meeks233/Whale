@@ -787,6 +787,24 @@ html:not(.app-native) .permission-item[data-permission="storage"] { display: non
 .sel-toggle svg { display: block; }
 .sel-toggle.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
+/* Filter + multi-select toggle framed as one segmented control. The frame owns
+   the outer border/radius; the two buttons inside drop their own borders and
+   are split by a single hairline. No overflow:hidden here — the filter dropdown
+   is absolutely positioned inside .site-menu-wrap and must not be clipped. */
+.filter-group {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.filter-group .sel-toggle { border: none; border-radius: 0; }
+.filter-group .site-menu-wrap + .sel-toggle { border-left: 1px solid var(--border); }
+/* Round the outer corners so the frame's radius isn't squared off by the button
+   fill when a control is active. */
+.filter-group .site-menu-wrap .sel-toggle { border-radius: var(--r-md) 0 0 var(--r-md); }
+.filter-group > .sel-toggle:last-child { border-radius: 0 var(--r-md) var(--r-md) 0; }
+
 .history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 
 .item {
@@ -1024,6 +1042,9 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
    is the first control in the row. So it opens left-aligned, downward, since
    unlike the select bar there is a whole page below it. */
 .site-menu-pop.filter-menu { left: 0; right: auto; }
+/* Title-case the labels regardless of how the underlying status/filter strings
+   are cased (the status keys are lowercase for the card badges). */
+.filter-menu .site-menu-item { text-transform: capitalize; }
 /* The chosen row, in the same accent the funnel itself takes while filtering. */
 .filter-menu .filter-on { color: var(--accent); font-weight: 600; }
 /* Pad the bar for icon buttons, which bring their own hit area. */
@@ -1256,6 +1277,11 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
    it says so rather than re-downloading (see the .act-save handler). App-only —
    a browser has no idea what's in the user's Downloads folder. */
 .act-save.act-local { color: var(--ok); }
+/* Upgrade: the on-device copy is shorter than the server's current best, so this
+   slot is an action, not a state — tint it the same lit accent Retry/Resume use.
+   Wins over .act-local (both can apply) because a tap here re-saves the taller
+   copy rather than reporting "already have it". */
+.act-save.act-upgrade { color: var(--accent); }
 
 /* ---- Chips: one capsule for every fact and choice on a card ----------------
    The size readout, the external-access counter and the resolution picker are

@@ -245,19 +245,7 @@ async fn proxy_upstream(
     range: Option<String>,
     allow_private_dns: bool,
 ) -> Result<Response, AppError> {
-    static CLIENT: tokio::sync::OnceCell<reqwest::Client> = tokio::sync::OnceCell::const_new();
-    let client = CLIENT
-        .get_or_try_init(|| async {
-            // Redirects are followed by hand below, so every hop can be run
-            // through the async DNS-resolving guard. reqwest's redirect hook is
-            // synchronous and so can only inspect the literal URL — it cannot
-            // resolve a hostname, which is exactly what the guard needs to do.
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-        })
-        .await
-        .map_err(|e| AppError::Internal(format!("http client build failed: {e}")))?;
+    let client = proxy_client().await?;
 
     let mut url = upstream.to_string();
     let mut redirects = 0;
@@ -333,9 +321,223 @@ async fn proxy_upstream(
         .map_err(|e| AppError::Internal(format!("proxy response build failed: {e}")))
 }
 
+/// Shared redirect-following HTTP client for proxied upstream fetches. Redirects
+/// are handled by hand at each call site so every hop can pass the async
+/// DNS-resolving SSRF guard — reqwest's own redirect hook is synchronous and
+/// can only see the literal URL, not what a hostname resolves to.
+async fn proxy_client() -> Result<&'static reqwest::Client, AppError> {
+    static CLIENT: tokio::sync::OnceCell<reqwest::Client> = tokio::sync::OnceCell::const_new();
+    CLIENT
+        .get_or_try_init(|| async {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("http client build failed: {e}")))
+}
+
+/// GET /api/items/:slug/thumb — **thumbnail proxy + cache** (token-required via
+/// `?token=`, because an `<img>` can't send an Authorization header).
+///
+/// The frontend used to point `<img src>` straight at the upstream thumbnail URL
+/// (e.g. `pbs.twimg.com`), which broke the moment a browser or an ad/tracker
+/// blocker refused that host — and leaked the fact that you'd saved something to
+/// that CDN. This route makes the backend the sole fetcher: on first request it
+/// pulls the bytes from the item's recorded `thumbnail_url` (through the SSRF
+/// guard, exactly like `/stream`), stashes them under `data_dir/thumbs/<slug>`,
+/// and serves them. Every later request is a local file read.
+pub async fn thumb(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+    req: Request,
+) -> Result<Response, AppError> {
+    let query = req.uri().query().unwrap_or("").to_string();
+    let token = super::auth::extract_token(req.headers(), &query);
+    if !token
+        .as_deref()
+        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
+    {
+        return Err(AppError::Unauthorized);
+    }
+    let item = state
+        .db
+        .find_by_slug(&slug)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let upstream = match item.thumbnail_url.as_deref() {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => return Err(AppError::NotFound),
+    };
+
+    let dir = state.cfg.data_dir.join("thumbs");
+    // `sanitize_slug` reduces the slug to a single alnum/-/_ path component, so
+    // the cache file can never escape `dir` even if the slug scheme changes.
+    let cache_path = dir.join(sanitize_slug(&slug));
+
+    let bytes = match tokio::fs::read(&cache_path).await {
+        Ok(b) if !b.is_empty() => b,
+        _ => {
+            let fetched = fetch_thumbnail(&upstream, &item.webpage_url, state.cfg.allow_private_dns)
+                .await?;
+            let _ = tokio::fs::create_dir_all(&dir).await;
+            let _ = tokio::fs::write(&cache_path, &fetched).await;
+            fetched
+        }
+    };
+
+    let content_type = sniff_image_type(&bytes);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        // The bytes never change for a given slug, so let the browser keep them.
+        .header(header::CACHE_CONTROL, "private, max-age=604800, immutable")
+        .body(Body::from(bytes))
+        .map(IntoResponse::into_response)
+        .map_err(|e| AppError::Internal(format!("thumb response build failed: {e}")))
+}
+
+/// Fetch an upstream thumbnail into memory, guarding every redirect hop for SSRF
+/// the same way `proxy_upstream` does. Thumbnails are small, so the whole body is
+/// buffered (no streaming) — the caller writes it to the cache and serves it.
+async fn fetch_thumbnail(
+    upstream: &str,
+    referer: &str,
+    allow_private_dns: bool,
+) -> Result<Vec<u8>, AppError> {
+    let client = proxy_client().await?;
+    let mut url = upstream.to_string();
+    let mut redirects = 0;
+    let resp = loop {
+        crate::net_guard::guard(&url, allow_private_dns)
+            .await
+            .map_err(|r| AppError::BadRequest(r.reason().into()))?;
+        let resp = client
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, PROXY_UA)
+            .header(reqwest::header::REFERER, referer)
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("thumbnail fetch failed: {e}")))?;
+        if !resp.status().is_redirection() {
+            break resp;
+        }
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AppError::Internal("thumbnail redirect without location".into()))?;
+        let next = reqwest::Url::parse(&url)
+            .and_then(|base| base.join(location))
+            .map_err(|_| AppError::BadRequest("thumbnail redirect is not a valid url".into()))?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err(AppError::BadRequest("thumbnail redirect scheme".into()));
+        }
+        url = next.into();
+        redirects += 1;
+        if redirects > MAX_REDIRECTS {
+            return Err(AppError::BadRequest("too many thumbnail redirects".into()));
+        }
+    };
+    if !resp.status().is_success() {
+        return Err(AppError::BadRequest("thumbnail upstream error".into()));
+    }
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| AppError::Internal(format!("thumbnail read failed: {e}")))
+}
+
+/// Fetch a small upstream text resource (a subtitle track) fully into memory,
+/// SSRF-guarding every redirect hop the way `proxy_upstream` does and carrying the
+/// session `cookie_header` for cookie-gated CDNs. `max_bytes` caps the buffer so a
+/// hostile row can't stream an unbounded body into memory. Returns the raw bytes;
+/// the caller decodes and converts them.
+pub(super) async fn fetch_upstream_bytes(
+    upstream: &str,
+    referer: &str,
+    cookie_header: Option<String>,
+    allow_private_dns: bool,
+    max_bytes: usize,
+) -> Result<Vec<u8>, AppError> {
+    let client = proxy_client().await?;
+    let mut url = upstream.to_string();
+    let mut redirects = 0;
+    let resp = loop {
+        crate::net_guard::guard(&url, allow_private_dns)
+            .await
+            .map_err(|r| AppError::BadRequest(r.reason().into()))?;
+        let mut rb = client
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, PROXY_UA)
+            .header(reqwest::header::REFERER, referer);
+        if let Some(c) = &cookie_header {
+            rb = rb.header(reqwest::header::COOKIE, c.clone());
+        }
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("subtitle fetch failed: {e}")))?;
+        if !resp.status().is_redirection() {
+            break resp;
+        }
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AppError::Internal("subtitle redirect without location".into()))?;
+        let next = reqwest::Url::parse(&url)
+            .and_then(|base| base.join(location))
+            .map_err(|_| AppError::BadRequest("subtitle redirect is not a valid url".into()))?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err(AppError::BadRequest("subtitle redirect scheme".into()));
+        }
+        url = next.into();
+        redirects += 1;
+        if redirects > MAX_REDIRECTS {
+            return Err(AppError::BadRequest("too many subtitle redirects".into()));
+        }
+    };
+    if !resp.status().is_success() {
+        return Err(AppError::BadRequest("subtitle upstream error".into()));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("subtitle read failed: {e}")))?;
+    if bytes.len() > max_bytes {
+        return Err(AppError::BadRequest("subtitle file is too large".into()));
+    }
+    Ok(bytes.to_vec())
+}
+
+/// Best-effort image content-type from the leading magic bytes. Falls back to a
+/// generic octet-stream, which browsers still render for an `<img>`.
+fn sniff_image_type(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "image/png"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// Reduce a slug to a safe single path component for the cache filename. Slugs
+/// are already random tokens, but this keeps a stray separator from escaping.
+fn sanitize_slug(slug: &str) -> String {
+    slug.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
 /// Build a scope-correct `Cookie:` header for an upstream URL from a Netscape
 /// cookies.txt. Domain, host-only, path, Secure, and expiry rules are enforced.
-fn cookie_header_for(cookie_file: Option<&FsPath>, upstream: &str) -> Option<String> {
+pub(super) fn cookie_header_for(cookie_file: Option<&FsPath>, upstream: &str) -> Option<String> {
     let text = std::fs::read_to_string(cookie_file?).ok()?;
     let url = reqwest::Url::parse(upstream).ok()?;
     let host = url.host_str()?.to_ascii_lowercase();

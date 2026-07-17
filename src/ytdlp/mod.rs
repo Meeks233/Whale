@@ -93,6 +93,156 @@ impl StreamUrlCache {
     }
 }
 
+/// One subtitle track available at the source for an online (cloud-only) item.
+/// `url` is a direct, time-limited CDN URL; `ext` is the on-CDN format we know how
+/// to turn into WebVTT (`vtt` needs none, `srt` a light rewrite).
+#[derive(Debug, Clone)]
+pub struct RemoteSub {
+    pub lang: String,
+    pub url: String,
+    pub ext: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedSubs {
+    value: Arc<Vec<RemoteSub>>,
+    expires_at: Instant,
+}
+
+type SubSlot = Arc<Mutex<Option<CachedSubs>>>;
+
+/// Short-lived cache of the subtitle tracks a `--dump-json` probe found at the
+/// source. Mirrors `StreamUrlCache`: a per-item mutex collapses the list request
+/// and the follow-up track fetch into one yt-dlp process, and the URLs expire
+/// quickly because CDN subtitle links are signed and IP-bound just like the media.
+#[derive(Clone, Default)]
+pub struct SubtitleCache {
+    slots: Arc<Mutex<HashMap<String, SubSlot>>>,
+}
+
+impl SubtitleCache {
+    pub async fn resolve(
+        &self,
+        key: &str,
+        cfg: &Config,
+        url: &str,
+        cookies: Option<&Path>,
+        playlist_index: Option<i64>,
+    ) -> Result<Arc<Vec<RemoteSub>>, YtdlpError> {
+        let slot = {
+            let mut slots = self.slots.lock().await;
+            if slots.len() >= 128 && !slots.contains_key(key) {
+                slots.clear();
+            }
+            slots
+                .entry(key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(None)))
+                .clone()
+        };
+        let mut cached = slot.lock().await;
+        if let Some(hit) = cached.as_ref().filter(|v| v.expires_at > Instant::now()) {
+            return Ok(hit.value.clone());
+        }
+        let value = Arc::new(resolve_subtitles(cfg, url, cookies, playlist_index).await?);
+        *cached = Some(CachedSubs {
+            value: value.clone(),
+            expires_at: Instant::now() + Duration::from_secs(120),
+        });
+        Ok(value)
+    }
+}
+
+/// Probe the source for its subtitle tracks without downloading (`yt-dlp
+/// --dump-single-json --skip-download`). Manual subtitles win over automatic
+/// captions for the same language; within a language we take the first track
+/// whose format we can serve (`vtt`, else `srt`). Languages with only formats we
+/// can't convert (`ttml`, `srv3`, …) are dropped rather than offered and then
+/// failing to load.
+pub async fn resolve_subtitles(
+    cfg: &Config,
+    url: &str,
+    cookies: Option<&Path>,
+    playlist_index: Option<i64>,
+) -> Result<Vec<RemoteSub>, YtdlpError> {
+    let mut cmd = tokio::process::Command::new(&cfg.ytdlp_path);
+    cmd.arg("--ignore-config")
+        .arg("--no-warnings")
+        .arg("--skip-download")
+        .arg("--dump-single-json");
+    if playlist_index.is_none() {
+        cmd.arg("--no-playlist");
+    }
+    if let Some(idx) = playlist_index {
+        cmd.arg("--playlist-items").arg(idx.to_string());
+    }
+    if let Some(imp) = &cfg.impersonate {
+        cmd.arg("--impersonate").arg(imp);
+    }
+    if let Some(c) = cookies {
+        cmd.arg("--cookies").arg(c);
+    }
+    cmd.arg("--").arg(url);
+    cmd.kill_on_drop(true);
+    let out = tokio::time::timeout(Duration::from_secs(25), cmd.output())
+        .await
+        .map_err(|_| YtdlpError::Timeout)?
+        .map_err(|e| YtdlpError::Spawn(format!("failed to run {}: {e}", cfg.ytdlp_path)))?;
+    if !out.status.success() {
+        let tail = String::from_utf8_lossy(&out.stderr);
+        return Err(YtdlpError::Download(tail.trim().to_string()));
+    }
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| YtdlpError::Download(format!("dump-json parse failed: {e}")))?;
+    Ok(parse_subtitles(&json))
+}
+
+/// Pick one servable track per language from a dump-json result, preferring manual
+/// `subtitles` over `automatic_captions`. Split out for unit testing against fixed
+/// JSON without spawning yt-dlp.
+fn parse_subtitles(json: &serde_json::Value) -> Vec<RemoteSub> {
+    // Servable formats, in order of preference (vtt needs no conversion).
+    const SERVABLE: &[&str] = &["vtt", "srt"];
+    let pick_from = |map: &serde_json::Value, out: &mut Vec<RemoteSub>, seen: &mut Vec<String>| {
+        let Some(obj) = map.as_object() else { return };
+        for (lang, tracks) in obj {
+            if seen.iter().any(|l| l == lang) {
+                continue;
+            }
+            let Some(arr) = tracks.as_array() else { continue };
+            // Take the most-preferred servable format present for this language.
+            let mut chosen: Option<RemoteSub> = None;
+            let mut chosen_rank = usize::MAX;
+            for tr in arr {
+                let ext = tr.get("ext").and_then(|e| e.as_str()).unwrap_or("");
+                let url = tr.get("url").and_then(|u| u.as_str()).unwrap_or("");
+                if url.is_empty() {
+                    continue;
+                }
+                if let Some(rank) = SERVABLE.iter().position(|s| s.eq_ignore_ascii_case(ext)) {
+                    if rank < chosen_rank {
+                        chosen_rank = rank;
+                        chosen = Some(RemoteSub {
+                            lang: lang.clone(),
+                            url: url.to_string(),
+                            ext: ext.to_ascii_lowercase(),
+                        });
+                    }
+                }
+            }
+            if let Some(sub) = chosen {
+                seen.push(lang.clone());
+                out.push(sub);
+            }
+        }
+    };
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    pick_from(&json["subtitles"], &mut out, &mut seen);
+    pick_from(&json["automatic_captions"], &mut out, &mut seen);
+    out.sort_by(|a, b| a.lang.cmp(&b.lang));
+    out
+}
+
 /// Turn a raw yt-dlp error into a message the user can act on.
 ///
 /// Sites like X/Twitter serve video only to logged-in requests: a guest probe
@@ -237,5 +387,57 @@ mod explain_tests {
         let raw = "ERROR: Sign in to confirm you're not a bot";
         let msg = explain_error("https://example.com/v/1", raw);
         assert!(msg.contains("this site"));
+    }
+}
+
+#[cfg(test)]
+mod subtitle_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn prefers_vtt_and_manual_over_auto_and_skips_unservable() {
+        let j = json!({
+            "subtitles": {
+                "en": [
+                    { "ext": "ttml", "url": "https://cdn/en.ttml" },
+                    { "ext": "vtt",  "url": "https://cdn/en.vtt" },
+                    { "ext": "srt",  "url": "https://cdn/en.srt" }
+                ],
+                "fr": [ { "ext": "srt", "url": "https://cdn/fr.srt" } ],
+                "de": [ { "ext": "srv3", "url": "https://cdn/de.srv3" } ]
+            },
+            "automatic_captions": {
+                "en": [ { "ext": "vtt", "url": "https://cdn/en.auto.vtt" } ],
+                "es": [ { "ext": "vtt", "url": "https://cdn/es.auto.vtt" } ]
+            }
+        });
+        let subs = parse_subtitles(&j);
+        let by: std::collections::HashMap<_, _> =
+            subs.iter().map(|s| (s.lang.as_str(), s)).collect();
+        // en: manual vtt wins over its srt and over the auto-caption.
+        assert_eq!(by["en"].ext, "vtt");
+        assert_eq!(by["en"].url, "https://cdn/en.vtt");
+        // fr: only srt available, still offered.
+        assert_eq!(by["fr"].ext, "srt");
+        // de: only an unservable format → dropped.
+        assert!(!by.contains_key("de"));
+        // es: present only as an automatic caption → included.
+        assert_eq!(by["es"].url, "https://cdn/es.auto.vtt");
+        // Sorted by lang.
+        let langs: Vec<_> = subs.iter().map(|s| s.lang.as_str()).collect();
+        assert_eq!(langs, vec!["en", "es", "fr"]);
+    }
+
+    #[test]
+    fn missing_maps_yield_no_tracks() {
+        assert!(parse_subtitles(&json!({})).is_empty());
+        assert!(parse_subtitles(&json!({ "subtitles": {} })).is_empty());
+    }
+
+    #[test]
+    fn tracks_without_a_url_are_ignored() {
+        let j = json!({ "subtitles": { "en": [ { "ext": "vtt" } ] } });
+        assert!(parse_subtitles(&j).is_empty());
     }
 }

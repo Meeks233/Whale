@@ -29,6 +29,7 @@ pub struct AppState {
     pub ytdlp_version: String,
     pub errlog: crate::errlog::ErrorLog,
     pub stream_urls: crate::ytdlp::StreamUrlCache,
+    pub subtitle_urls: crate::ytdlp::SubtitleCache,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -123,6 +124,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/items/:slug/subs/:lang", get(subs::get))
         // Online-playback proxy keyed by the item's unguessable slug (not its
         // enumerable id). Self-authorizes via the token, like /file.
+        // Thumbnail proxy + on-disk cache, keyed by the item's unguessable slug.
+        // Self-authorizes via `?token=` like /file, because an <img> sends no
+        // headers. Keeps the browser from ever hitting the source CDN directly.
+        .route("/api/items/:slug/thumb", get(media::thumb))
         .route("/api/stream/:slug", get(media::stream))
         .route("/api/stream/:slug/prepare", get(media::prepare_stream))
         .route("/api/p/:slug", get(media::public_file))
