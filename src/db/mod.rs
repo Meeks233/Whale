@@ -13,6 +13,9 @@ pub struct ListQuery {
     pub q: Option<String>,
     pub limit: i64,
     pub before_id: Option<i64>,
+    /// Restrict to items that do (`Some(true)`) or don't (`Some(false)`) hold a
+    /// downloaded file. See the `filepath` clause in `queries::list`.
+    pub local: Option<bool>,
 }
 
 /// One page of items plus the next keyset cursor.
@@ -67,6 +70,11 @@ impl Db {
     /// Cache the source's available heights discovered by a (re-)probe.
     pub async fn set_available_heights(&self, id: i64, heights: &[i64]) -> anyhow::Result<()> {
         queries::set_available_heights(self, id, heights).await
+    }
+
+    /// Record the height a starting download is aiming for.
+    pub async fn set_target_height(&self, id: i64, height: Option<i64>) -> anyhow::Result<()> {
+        queries::set_target_height(self, id, height).await
     }
 
     /// Repoint the item's primary file at its highest downloaded resolution.
@@ -137,6 +145,12 @@ impl Db {
     /// Park every queued/running download as paused; returns the affected ids.
     pub async fn pause_active(&self) -> anyhow::Result<Vec<i64>> {
         queries::pause_active(self).await
+    }
+
+    /// Abandon every outstanding download (queued/running/paused) as canceled;
+    /// returns the affected ids.
+    pub async fn cancel_active(&self) -> anyhow::Result<Vec<i64>> {
+        queries::cancel_active(self).await
     }
 
     /// All websites in the editable registry (display order).

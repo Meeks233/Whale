@@ -229,6 +229,10 @@ pub struct ListParams {
     pub q: Option<String>,
     pub limit: Option<i64>,
     pub before_id: Option<i64>,
+    /// `local=true` → only items holding a downloaded file; `local=false` → only
+    /// stream-only ones. Answered in SQL so "show me what's downloaded" costs one
+    /// filtered page rather than paging the whole history to sieve it client-side.
+    pub local: Option<bool>,
 }
 
 /// GET /api/items — keyset-paginated history.
@@ -250,6 +254,7 @@ pub async fn list(
             q: params.q,
             limit,
             before_id: params.before_id,
+            local: params.local,
         })
         .await?;
     let sites = state.db.list_websites().await.unwrap_or_default();
@@ -282,13 +287,44 @@ pub async fn get(State(state): State<AppState>, Path(slug): Path<String>) -> App
     Ok(Json(value).into_response())
 }
 
-/// POST /api/items/:slug/retry — re-queue a failed item.
+/// POST /api/items/:slug/retry — re-queue a failed, canceled, or stream-only item.
 pub async fn retry(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
     let item = item_by_slug(&state, &slug).await?;
-    if item.status != Status::Failed {
+    // Canceled is retryable alongside failed, and has to be: cancel discards the
+    // partial file, so retry is the ONLY route back to a download the user changed
+    // their mind about. (Paused is not here — it has resume, which continues from
+    // the partial rather than starting over.)
+    //
+    // A *completed* item is retryable only in the one case where "completed" does
+    // not mean "there is a file": stream-only mode, where deselecting every
+    // resolution purged the local copy and left the record playing from source.
+    // That state is a cancel by another name — the user has no partial to resume
+    // and no file to keep — so it gets the same one-tap route back to a download.
+    // A completed item that still has its file is NOT retryable: re-fetching bytes
+    // already on disk is the resolution picker's job, not retry's.
+    let stream_only = item.status == Status::Completed && !item.local_available;
+    if !matches!(item.status, Status::Failed | Status::Canceled) && !stream_only {
         return Err(AppError::BadRequest(
-            "item is not in a retryable (failed) state".into(),
+            "item is not in a retryable (failed, canceled, or stream-only) state".into(),
         ));
+    }
+    // Retry means "fetch this again", and a primary download consults yt-dlp's
+    // download archive (see download_args). So for any item with no local file
+    // whose key is still recorded, the fetch cannot succeed — yt-dlp finds the key,
+    // writes nothing, and reports "already recorded" forever. Dropping the key is
+    // the precondition for retry to do anything at all; it is exactly what the
+    // resulting error tells the user to go and do by hand in the Archive editor.
+    //
+    // Keyed off the missing file rather than off the status, because that is the
+    // thing that makes it correct: the archive exists to stop us re-fetching what
+    // we already have, and we do not have this. A stream-only item reaches here with
+    // its key recorded (it downloaded once, then the file was purged); a failed one
+    // can too, when it completed earlier in its life. Where no key is recorded — the
+    // common failed/canceled case — this is a no-op. Success re-records it.
+    if !item.local_available {
+        if let Err(e) = state.archive.remove(&item.archive_key).await {
+            tracing::warn!(item = item.id, error = %e, "failed to drop archive key for retry");
+        }
     }
     state.db.set_status(item.id, Status::Queued, None).await?;
     state.queue.enqueue(item.id).await;
@@ -314,6 +350,47 @@ pub async fn pause(State(state): State<AppState>, Path(slug): Path<String>) -> A
     state.queue.cancel(item.id);
     let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
     Ok(Json(refreshed).into_response())
+}
+
+/// POST /api/items/:slug/cancel — give up on a download without giving up the
+/// record. Kills the yt-dlp child and discards its partials, so unlike pause
+/// there is nothing to continue from: the way back is Retry, which starts over.
+/// The item stays in the history (streamable, searchable) — removing it entirely
+/// is what DELETE is for.
+pub async fn cancel(
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> AppResult<Response> {
+    let item = item_by_slug(&state, &slug).await?;
+    if !matches!(
+        item.status,
+        Status::Queued | Status::Running | Status::Paused
+    ) {
+        return Err(AppError::BadRequest(
+            "only an outstanding (queued, running or paused) download can be canceled".into(),
+        ));
+    }
+    // Status first, then kill: run_job's Cancelled branch deliberately writes no
+    // status, so the Canceled mark set here is what survives.
+    state.db.set_status(item.id, Status::Canceled, None).await?;
+    state.queue.cancel(item.id);
+    crate::queue::discard_partials(&state.cfg.download_dir, &item.video_id);
+    let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
+    Ok(Json(refreshed).into_response())
+}
+
+/// POST /api/queue/cancel — give up on every outstanding download at once.
+pub async fn cancel_all(State(state): State<AppState>) -> AppResult<Response> {
+    let ids = state.db.cancel_active().await?;
+    for id in &ids {
+        state.queue.cancel(*id);
+        // The row is already marked; its partials still have to go. A vanished
+        // item is not an error worth failing the sweep over.
+        if let Ok(Some(item)) = state.db.get(*id).await {
+            crate::queue::discard_partials(&state.cfg.download_dir, &item.video_id);
+        }
+    }
+    Ok(Json(json!({ "canceled": ids.len() })).into_response())
 }
 
 /// POST /api/items/:slug/resume — re-queue a paused download.
