@@ -31,6 +31,13 @@ pub enum Status {
     /// the local copy is deferred. Resuming re-enqueues, and yt-dlp picks the
     /// `.part` file back up where it stopped.
     Paused,
+    /// Stopped and given up on, by the user's own hand — the opposite end of the
+    /// pause/cancel pair. Pause defers a download it still intends to finish and
+    /// keeps the `.part` file so resuming continues it; cancel abandons the
+    /// transfer and discards the partial, so the only way forward is Retry (a
+    /// fresh start). The record itself survives — cancelling a download is not
+    /// deleting its history, which is what Delete is for.
+    Canceled,
     Completed,
     Failed,
     Duplicate,
@@ -42,6 +49,7 @@ impl Status {
             Status::Queued => "queued",
             Status::Running => "running",
             Status::Paused => "paused",
+            Status::Canceled => "canceled",
             Status::Completed => "completed",
             Status::Failed => "failed",
             Status::Duplicate => "duplicate",
@@ -53,6 +61,7 @@ impl Status {
             "queued" => Some(Status::Queued),
             "running" => Some(Status::Running),
             "paused" => Some(Status::Paused),
+            "canceled" => Some(Status::Canceled),
             "completed" => Some(Status::Completed),
             "failed" => Some(Status::Failed),
             "duplicate" => Some(Status::Duplicate),
@@ -116,6 +125,14 @@ pub struct Item {
     /// item's resolution in the UI. `None` for audio-only / not-yet-completed /
     /// imported records.
     pub height: Option<i64>,
+    /// Height this item's download is aiming for, written when the job starts and
+    /// left in place afterwards as a record of what was asked for. It answers the
+    /// question `height` cannot while a transfer is in flight — there is no file
+    /// yet, so `height` is still `None` — which is what the card's live
+    /// "downloading 1080p" chip reads. `None` for audio-only sources, imports, and
+    /// anything submitted before this column existed.
+    #[serde(default)]
+    pub target_height: Option<i64>,
     /// Highest pixel height the source offers, probed once (lazily, when the
     /// resolution picker is first opened) and cached so the picker needn't
     /// re-probe yt-dlp on every open. `None` until first probed.

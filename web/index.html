@@ -68,6 +68,18 @@
   </section>
 
   <section class="controls">
+    <!-- Status filter. The funnel narrows the list to one lifecycle state, and it
+         does so at the source: the choice becomes a `status`/`local` query param,
+         so the server returns one filtered page rather than the client paging the
+         whole history to sieve it. The dot on the funnel is the only cue that a
+         filter is on, which matters because the filtered list otherwise looks
+         exactly like a short history. -->
+    <div class="site-menu-wrap">
+      <button id="filter-btn" class="icon-btn" type="button" aria-label="Filter" title="Filter"
+              aria-haspopup="true" aria-expanded="false"
+              data-i18n-aria="aria.filter" data-i18n-title="aria.filter"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></svg></button>
+      <div id="filter-menu" class="site-menu-pop filter-menu hidden" role="menu"></div>
+    </div>
     <button id="select-toggle" class="icon-btn sel-toggle" aria-label="Select multiple" title="Select multiple" data-i18n-aria="aria.selectMultiple" data-i18n-title="aria.selectMultiple"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
     <!-- Global pause / resume, in the same icon-btn style as the select toggle
          beside it. One signal to the backend, which decides what it covers: pause
@@ -80,6 +92,14 @@
          (see renderQueueToggle). Starts hidden only until that first render, so
          it can't flash the wrong icon. -->
     <button id="queue-toggle" class="icon-btn hidden" type="button"></button>
+    <!-- Global cancel: the stop that keeps nothing. Pause beside it defers the
+         queue; this abandons it — every outstanding download (running, waiting,
+         or paused) gives up and throws its partial away, leaving the records
+         behind. Same server-driven rule as the pause toggle: it's permanent and
+         disables itself when there's nothing outstanding, rather than vanishing
+         (see renderQueueToggle). Always behind the confirm dialog — there is no
+         undo but re-downloading. -->
+    <button id="queue-cancel" class="icon-btn hidden" type="button" aria-label="Cancel all downloads" title="Cancel all downloads" data-i18n-aria="queue.cancelAll" data-i18n-title="queue.cancelAll"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     <div class="field">
       <input id="search" type="search"
              placeholder="Search…  failed  twitter  user:rick  title:&quot;never gonna&quot;  -title:live"
@@ -109,21 +129,38 @@
   </button>
 
   <!-- Batch action bar: shown in multi-select mode (toolbar toggle or long-press
-       a card). Every button here is hidden unless the current selection can
-       actually take that action — see updateSelBar — so nothing arrives
-       greyed-out and the bar stays short enough to read on a phone. -->
+       a card). Shaped like every contextual action bar you've used (Gmail, Google
+       Photos, Files): a close X and a live count on the left, the few actions you
+       actually came for as icons on the right, and everything rarer folded behind
+       one overflow menu.
+       Nine word-buttons in a row was the alternative, and it wrapped to three
+       cramped lines on a phone while making "Clean downloads" look exactly as
+       important as "Delete" — a wall of text you had to read end-to-end to find
+       the one verb you wanted. Which of the three primaries appear still depends
+       on what the selection can actually do (see updateSelBar), so nothing here
+       arrives greyed-out; the same rule prunes the overflow menu, and the ⋮ itself
+       disappears when the menu would be empty. -->
   <div id="select-bar" class="select-bar hidden" role="toolbar" aria-label="Batch actions">
+    <!-- Leaving select mode is the X in the leading corner, where every contextual
+         bar puts it — the word "Done" was competing with the actual verbs. -->
+    <button id="sel-cancel" class="sel-act" aria-label="Done" title="Done" data-i18n-aria="sel.done" data-i18n-title="sel.done"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     <span id="select-count" class="select-count" data-i18n="sel.count0">Select items</span>
     <div class="select-actions">
-      <button id="sel-all" class="btn btn-ghost hidden" data-i18n="sel.all">Select all</button>
-      <button id="sel-invert" class="btn btn-ghost hidden" data-i18n="sel.invert">Invert</button>
-      <button id="sel-download" class="btn btn-ghost hidden" data-i18n="sel.download">Download</button>
-      <button id="sel-share" class="btn btn-ghost hidden" data-i18n="sel.share">Share</button>
-      <button id="sel-unshare" class="btn btn-ghost hidden" data-i18n="sel.unshare">Unshare</button>
-      <button id="sel-copy" class="btn btn-ghost hidden" data-i18n="sel.copy">Copy links</button>
-      <button id="sel-clean" class="btn btn-ghost hidden" data-i18n="sel.clean">Clean downloads</button>
-      <button id="sel-delete" class="btn btn-danger hidden" data-i18n="sel.delete">Delete</button>
-      <button id="sel-cancel" class="btn" data-i18n="sel.done">Done</button>
+      <button id="sel-download" class="sel-act hidden" aria-label="Download" title="Download" data-i18n-aria="sel.download" data-i18n-title="sel.download"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></button>
+      <button id="sel-share" class="sel-act hidden" aria-label="Share" title="Share" data-i18n-aria="sel.share" data-i18n-title="sel.share"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></button>
+      <button id="sel-delete" class="sel-act sel-danger hidden" aria-label="Delete" title="Delete" data-i18n-aria="sel.delete" data-i18n-title="sel.delete"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+      <!-- Overflow: the same ⋮ + popover the website cards already use, so there is
+           one menu pattern in the app rather than a second one to keep in step. -->
+      <div class="site-menu-wrap">
+        <button id="sel-more" class="sel-act hidden" aria-label="More" title="More" aria-haspopup="true" aria-expanded="false" data-i18n-aria="sel.more" data-i18n-title="sel.more"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg></button>
+        <div id="sel-menu" class="site-menu-pop sel-menu hidden" role="menu">
+          <button id="sel-all" class="site-menu-item hidden" role="menuitem" data-i18n="sel.all">Select all</button>
+          <button id="sel-invert" class="site-menu-item hidden" role="menuitem" data-i18n="sel.invert">Invert</button>
+          <button id="sel-copy" class="site-menu-item hidden" role="menuitem" data-i18n="sel.copy">Copy links</button>
+          <button id="sel-unshare" class="site-menu-item hidden" role="menuitem" data-i18n="sel.unshare">Unshare</button>
+          <button id="sel-clean" class="site-menu-item hidden" role="menuitem" data-i18n="sel.clean">Clean downloads</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -162,6 +199,62 @@
   </div>
 
   <div id="toasts" class="toasts" aria-live="polite"></div>
+
+  <!-- First run. Before this existed a fresh install dropped the user straight
+       into the whole Settings sheet with the token box focused — every advanced
+       control at once, no explanation, and a red server dot. This asks for the
+       two things the app cannot start without (where the server is, and the
+       token to reach it), verifies them against that server before letting the
+       user through, then asks for permissions. It shows once: the flag is set on
+       success, and an install that already has a token never sees it at all.
+       There is deliberately no close button — with no server the app behind it
+       has nothing to show. The permission block is Android-only and rendered by
+       the same code as the Settings one (renderAppPermission walks every
+       .permission-item in the document). -->
+  <div id="welcome" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="welcome-title">
+    <div class="modal-card welcome-card">
+      <h2 id="welcome-title" class="modal-heading" data-i18n="welcome.title">Welcome to Orca</h2>
+      <p class="hint-muted" data-i18n="welcome.sub">Point Orca at your server to get started.</p>
+      <div class="form-box">
+        <div id="welcome-server-row" class="form-row">
+          <label class="form-row-label" for="welcome-server" data-i18n="settings.serverUrl">Server URL</label>
+          <div class="form-row-ctl">
+            <input id="welcome-server" class="input" type="url" inputmode="url" autocomplete="off" placeholder="https://orca.example.com (blank = this site)" data-i18n-ph="ph.server">
+          </div>
+        </div>
+        <div class="form-row">
+          <label class="form-row-label" for="welcome-token" data-i18n="settings.token">API token</label>
+          <div class="form-row-ctl">
+            <input id="welcome-token" class="input" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
+          </div>
+        </div>
+      </div>
+      <p id="welcome-error" class="hint hidden"></p>
+      <section id="welcome-perms" class="set-group hidden">
+        <label data-i18n="settings.permissions">App permissions</label>
+        <div class="permission-box">
+          <button class="permission-item" type="button" data-permission="notifications" data-state="checking">
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
+            <span class="permission-copy"><strong data-i18n="settings.permNotifications">Notifications</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+            <span class="permission-result" aria-hidden="true"></span>
+          </button>
+          <button class="permission-item" type="button" data-permission="background" data-state="checking">
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 9v6"/><path d="M12.543 6H16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-3.605"/><path d="M22 14v-4"/><path d="M7 12h6"/><path d="M7.606 18H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h3.606"/></svg></span>
+            <span class="permission-copy"><strong data-i18n="settings.permBackground">Background activity</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+            <span class="permission-result" aria-hidden="true"></span>
+          </button>
+          <button class="permission-item" type="button" data-permission="storage" data-state="checking">
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg></span>
+            <span class="permission-copy"><strong data-i18n="settings.permStorage">Storage access</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+            <span class="permission-result" aria-hidden="true"></span>
+          </button>
+        </div>
+      </section>
+      <div class="share-actions welcome-actions">
+        <button id="welcome-start" class="btn" data-i18n="welcome.start">Get started</button>
+      </div>
+    </div>
+  </div>
 
   <!-- First-launch permission reminder. It is driven by the same live Android
        state as Settings and stops opening once both permissions are granted or

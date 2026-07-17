@@ -20,6 +20,10 @@ interface Item {
   filename?: string | null;
   total_filesize?: number | null;  // sum across all downloaded resolution variants
   height?: number | null;
+  // Height the download is aiming for, set by the backend when the job starts.
+  // It is what the live chip reports while a transfer is in flight — `height`
+  // stays null until a file actually lands.
+  target_height?: number | null;
   thumbnail_url?: string;
   duration?: number | null;
   extractor?: string;
@@ -283,8 +287,17 @@ const els = {
   history: byId('history'),
   empty: byId('empty'),
   loader: byId('infinite-loader'),
+  welcome: byId('welcome'),
+  welcomeServer: byId<HTMLInputElement>('welcome-server'),
+  welcomeToken: byId<HTMLInputElement>('welcome-token'),
+  welcomeError: byId('welcome-error'),
+  welcomeStart: byId<HTMLButtonElement>('welcome-start'),
+  welcomePerms: byId('welcome-perms'),
   selectToggle: byId<HTMLButtonElement>('select-toggle'),
+  filterBtn: byId<HTMLButtonElement>('filter-btn'),
+  filterMenu: byId('filter-menu'),
   queueToggle: byId<HTMLButtonElement>('queue-toggle'),
+  queueCancel: byId<HTMLButtonElement>('queue-cancel'),
   selBar: byId('select-bar'),
   selCount: byId('select-count'),
   selAll: byId<HTMLButtonElement>('sel-all'),
@@ -296,6 +309,8 @@ const els = {
   selClean: byId<HTMLButtonElement>('sel-clean'),
   selDelete: byId<HTMLButtonElement>('sel-delete'),
   selCancel: byId<HTMLButtonElement>('sel-cancel'),
+  selMore: byId<HTMLButtonElement>('sel-more'),
+  selMenu: byId('sel-menu'),
   confirmBox: byId('confirm'),
   confirmTitle: byId('confirm-title'),
   confirmSub: byId('confirm-sub'),
@@ -334,6 +349,7 @@ const els = {
 const PAGE_SIZE = 10; // lazy-load 10 at a time so a huge history never over-fetches
 const state = {
   q: '' as string,        // search query (status now folds into the query syntax)
+  filter: '' as string,   // active status-filter key ('' = everything); see FILTERS
   cursor: null as number | null, // next before_id
   loading: false,
   rows: new Map<number, HTMLLIElement>(),  // id -> <li> element
@@ -345,7 +361,10 @@ const state = {
   groups: new Map<string, { li: HTMLLIElement; body: HTMLUListElement }>(),
   // Latest SSE progress per item id (percent/speed/status), so a playlist fold
   // header can show its aggregate download progress + the live download speed.
-  progress: new Map<number, { percent: number | null; speed: string; status: string; shown: number }>(),
+  // The last tick per row. `phase`/`eta` ride along not for the fold aggregate but
+  // because rowHtml can't reproduce them: they exist only in the statusline spans
+  // SSE paints, so a row rebuilt mid-download needs them to repaint itself.
+  progress: new Map<number, { percent: number | null; speed: string; eta: string; phase: string; status: string; shown: number }>(),
   // Folds the user has expanded, by key. Survives list resets (manual / 5-min
   // auto refresh) so a re-render restores the open/closed state.
   expandedGroups: new Set<string>(),
@@ -450,6 +469,10 @@ const RESUME_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="1
 // rather than re-submitting the URL, so the item keeps its id, its place in the
 // list, and its archive key.
 const RETRY_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>`;
+// Lucide "x": cancel — stop this download and throw its partial away. Deliberately
+// NOT a second pause-like glyph; an X is what every browser's download shelf uses
+// for the irreversible half of the stop pair.
+const CANCEL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
 // Vertical kebab (⋮) for the website-card overflow menu.
 const MORE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>`;
 interface Stats {
@@ -657,7 +680,11 @@ const LAYERS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="1
 // item's current resolution and, on tap, opens the multi-select to add/remove
 // resolution versions. Only for completed video items (a known height).
 function resButtonHtml(item: Item): string {
-  if (item.status !== 'completed') return '';
+  // Canceled is here alongside completed because cancelling is not the end of an
+  // item's life — it's the point you most want to change your mind about which
+  // quality to fetch, and the picker is the only place that choice exists. Its
+  // partial is gone, so there is no downloaded set to contradict a new pick.
+  if (item.status !== 'completed' && item.status !== 'canceled') return '';
   // Label logic: a known height → its label (e.g. "1080p"); a stream-only item
   // (no local file) → "None"; a downloaded file of unknown height (older/audio
   // records) → icon only, so we never mislabel a present file as "None".
@@ -668,28 +695,59 @@ function resButtonHtml(item: Item): string {
   return `<button class="chip chip-btn" data-act="resolutions" data-id="${item.id}" aria-label="${esc(t('res.pick'))}" title="${esc(t('res.pick'))}">${LAYERS_SVG}${labelSpan}</button>`;
 }
 
+// The live counterpart of the size + resolution capsules: while a download is in
+// flight neither of those can answer anything. There is no file yet, so its size
+// is unknown (the total only settles when the last byte lands) and `height` is
+// still null — so the row would otherwise sit empty for exactly the stretch the
+// user is watching it. Instead the same capsule slot reports the transfer itself:
+// the app's one spinner, plus the quality being fetched (target_height, written by
+// the backend when the job starts) in the running blue the badge and phase already
+// use. Falls back to the spinner alone when the target isn't known yet (audio-only
+// sources, a row queued before the job picked its height).
+function dlChipHtml(item: Item): string {
+  const label = item.target_height && item.target_height > 0
+    ? `<span class="dl-res">${esc(resLabel(item.target_height))}</span>`
+    : '';
+  return `<span class="chip chip-dl" title="${esc(t('item.downloading'))}"><span class="chip-spin" aria-hidden="true">${SPINNER_SVG}</span>${label}</span>`;
+}
+
 function actionsHtml(item: Item): string {
   // Delete is global: every card gets a trash icon (leftmost button, i.e. left
   // of the Save button — but right of the size chip + resolution button) so any
   // item — queued, running, failed or completed — can be removed. It always
   // routes through the confirm dialog (openDeleteConfirm).
   const del = `<button class="act act-del" data-act="delete" data-id="${item.id}" aria-label="${esc(t('aria.delete'))}" title="${esc(t('aria.delete'))}">${TRASH_SVG}</button>`;
+  // A download in flight gets the whole row to itself: the live chip, then the
+  // three ways to stop it, in escalating order of how much they throw away —
+  // delete (record and all), cancel (the transfer and its partial), pause (only
+  // the waiting). They occupy the same three slots a finished card gives to
+  // delete / save / share, so the button under your thumb doesn't move as an item
+  // completes. Save and share are absent for the reason they'd be useless: there
+  // is no file to hand over yet.
+  if (item.status === 'queued' || item.status === 'running') {
+    const cancel = `<button class="act act-cancel" data-act="cancel" data-id="${item.id}" aria-label="${esc(t('item.cancel'))}" title="${esc(t('item.cancel'))}">${CANCEL_SVG}</button>`;
+    const pause = `<button class="act" data-act="pause" data-id="${item.id}" aria-label="${esc(t('item.pause'))}" title="${esc(t('item.pause'))}">${PAUSE_SVG}</button>`;
+    return `<div class="actions">${dlChipHtml(item)}${del}${cancel}${pause}</div>`;
+  }
   // Pause / resume, only while there's a transfer to hold or release. A paused
   // item keeps its partial file, so resuming continues rather than restarts.
   let hold = '';
-  if (item.status === 'queued' || item.status === 'running') {
-    hold = `<button class="act" data-act="pause" data-id="${item.id}" aria-label="${esc(t('item.pause'))}" title="${esc(t('item.pause'))}">${PAUSE_SVG}</button>`;
-  } else if (item.status === 'paused') {
+  if (item.status === 'paused') {
     hold = `<button class="act act-resume" data-act="resume" data-id="${item.id}" aria-label="${esc(t('item.resume'))}" title="${esc(t('item.resume'))}">${RESUME_SVG}</button>`;
-  } else if (item.status === 'failed') {
+  } else if (item.status === 'failed' || item.status === 'canceled') {
     // A failure is usually transient (a dropped connection, a site hiccup) or has
     // just been fixed by the user (cookies added), so the fix is one tap from the
-    // card that reported it rather than a re-paste of the URL.
+    // card that reported it rather than a re-paste of the URL. A canceled item
+    // offers the same button for a different reason: cancelling threw the partial
+    // away, so starting over is the only route back — there is nothing to resume.
     hold = `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.retry'))}" title="${esc(t('item.retry'))}">${RETRY_SVG}</button>`;
   }
   // Save / share only make sense for a completed item with a file. Local file
-  // present: Save (download icon) + Share icon. Local file gone (backed away):
-  // plays from upstream, no save/share. Sharing state lives in the share dialog.
+  // present: Save (download icon) + Share icon. Local file gone (backed away or
+  // never fetched): there is nothing to hand over, so the slot offers the way
+  // back to a download instead — the same retry a canceled item gets, for the
+  // same reason (no partial to resume, no file to keep). It replaces the old
+  // "Cloud only" pill, which stated the situation but gave no way out of it.
   let mediaActions = '';
   if (item.status === 'completed') {
     const local = !!item.local_available;
@@ -697,15 +755,12 @@ function actionsHtml(item: Item): string {
     mediaActions = local
       ? `<a class="act act-save" href="${fileUrl(item, true)}" download data-id="${item.id}" aria-label="${esc(t('aria.save'))}" title="${esc(t('aria.save'))}">${DOWNLOAD_SVG}</a>
       <button class="act act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
-      : `<span class="chip act-cloud" title="Streams from source — no local copy">${esc(t('cloud.only'))}</span>`;
+      : `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.download'))}" title="${esc(t('item.download'))}">${RETRY_SVG}</button>`;
   }
   // Order: size chip · resolution button · pause/resume · delete · save/share.
   return `<div class="actions">${metaChipsHtml(item)}${resButtonHtml(item)}${hold}${del}${mediaActions}</div>`;
 }
 
-// Cloud-file corner badge for the thumbnail: shown when an item is completed but
-// its local copy is gone, signalling playback will stream from source.
-const CLOUD_BADGE = `<span class="cloud-badge" title="Cloud only — plays from source"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M19 18H6a4 4 0 0 1-.7-7.94A5.5 5.5 0 0 1 16.5 9H17a3.5 3.5 0 0 1 2 6.37V18Z"/></svg></span>`;
 // Play affordance shown on a finished thumbnail (bottom-right). Tapping the
 // thumbnail opens the in-app fullscreen player (see openPlayer).
 const PLAY_ICON = `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>`;
@@ -766,12 +821,12 @@ function sourceLogoHtml(extractor: string | undefined): string {
 }
 
 // Thumbnail block. Playable items become a play button (tap → fullscreen player);
-// everything else keeps the link out to the source page. Overlays: cloud
-// (top-right), duration (bottom-left), play (bottom-right). The source is now
-// shown as a logo before the title (see rowHtml), not on the thumbnail.
-function thumbHtml(item: Item, thumb: string, dur: string, cloud: string): string {
+// everything else keeps the link out to the source page. Overlays: duration
+// (bottom-left), play (bottom-right). The source is now shown as a logo before
+// the title (see rowHtml), not on the thumbnail.
+function thumbHtml(item: Item, thumb: string, dur: string): string {
   const pending = isMediaPending(item) ? ' media-pending' : '';
-  const overlays = `${thumb}${dur}${cloud}${MEDIA_LOADER}`;
+  const overlays = `${thumb}${dur}${MEDIA_LOADER}`;
   if (isPlayable(item)) {
     const cloudOnly = !item.local_available ? '1' : '';
     return `<div class="thumb-wrap thumb-play${pending}" role="button" tabindex="0" aria-label="Play"
@@ -789,9 +844,6 @@ function rowHtml(item: Item): string {
   // noise. Landscape keeps every duration (see .dur in style.css).
   const durShort = item.duration && item.duration < 60 ? ' dur-short' : '';
   const dur = item.duration ? `<span class="dur${durShort}">${esc(fmtDuration(item.duration))}</span>` : '';
-  // Cloud badge = "this plays, but from source". True of a completed item whose
-  // local copy is gone, and equally of a paused one whose copy hasn't arrived.
-  const cloud = isPlayable(item) && !item.local_available ? CLOUD_BADGE : '';
   const logo = sourceLogoHtml(item.extractor);
   const uploader = item.uploader ? `<div class="uploader">${esc(item.uploader)}</div>` : '';
   const active = item.status === 'queued' || item.status === 'running';
@@ -804,7 +856,7 @@ function rowHtml(item: Item): string {
   // selected (see .item.selected in style.css), so nothing is injected here that
   // would compete with the thumbnail for horizontal space.
   return `
-    ${thumbHtml(item, thumb, dur, cloud)}
+    ${thumbHtml(item, thumb, dur)}
     <div class="body">
       <div class="title">${logo}<span>${esc(item.title)}</span></div>
       ${uploader}
@@ -866,6 +918,9 @@ function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
   if (rowSig.get(li) !== html) {
     li.innerHTML = html;
     rowSig.set(li, html);
+    // The fresh markup ships the statusline's live spans empty, so anything the
+    // SSE tick had painted there is gone. Put it back from the last tick.
+    restoreLiveFields(li, item.id);
   }
   if (item.status === 'completed' && !item.local_available && item.public_slug) {
     const play = li.querySelector<HTMLElement>('.thumb-play');
@@ -1086,6 +1141,48 @@ function playGroup(gkey: string): void {
   playCurrentInQueue();
 }
 
+// Rows whose target_height has already been asked for after a job start, so the
+// ask happens once per job rather than once per start tick. Cleared when the job
+// reaches a terminal state: a retry is a new job that may pick a new height.
+const chipRefetched = new Set<number>();
+
+// Paint the statusline's live spans: which pass is running (Video / Audio), the
+// speed and the ETA. Nothing here can be derived from the Item — these values
+// exist only in the SSE tick — so rowHtml ships the spans empty and this is the
+// only thing that ever fills them. Called from the tick, and again whenever a row
+// is rebuilt, which would otherwise drop the labels on the floor.
+function paintLiveFields(li: HTMLElement, phase: string, speed: string, eta: string): void {
+  const phaseEl = li.querySelector('.phase');
+  if (phaseEl) {
+    // Label the video/audio pass so the per-pass 0→100% reset reads as a new
+    // stage rather than the bar "jumping" backwards.
+    phaseEl.textContent = phase ? phase.charAt(0).toUpperCase() + phase.slice(1) : '';
+    phaseEl.className = 'phase' + (phase ? ' phase-' + phase : '');
+  }
+  const speedEl = li.querySelector('.speed');
+  if (speedEl) speedEl.textContent = speed;
+  const etaEl = li.querySelector('.eta');
+  if (etaEl) etaEl.textContent = eta ? 'ETA ' + eta : '';
+}
+
+// Restore the live spans (and the bar) onto a row that was just rebuilt from an
+// Item, using the last tick we saw. Without this a rebuild mid-download blanks
+// the Video/Audio label until the next tick repaints it — and an audio-only job
+// rebuilds on *every* tick (its target_height is never set, so the chip refetch
+// below never settles), which is why the Audio label went missing entirely while
+// Video, refetching once, only flickered.
+function restoreLiveFields(li: HTMLLIElement, id: number): void {
+  const p = state.progress.get(id);
+  if (!p || TERMINAL[p.status]) return;
+  paintLiveFields(li, p.phase, p.speed, p.eta);
+  const bar = li.querySelector('.progress');
+  const fill = li.querySelector('.progress-fill') as HTMLElement | null;
+  if (bar && fill) {
+    bar.classList.remove('hidden');
+    fill.style.width = p.shown + '%';
+  }
+}
+
 // Patch a row in place from a ProgressEvent (does not rebuild full row).
 function patchRow(ev: ProgressEv): void {
   // Compute a MONOTONIC display percent. A `bv*+ba` download runs two 0→100%
@@ -1099,8 +1196,12 @@ function patchRow(ev: ProgressEv): void {
   if (ev.status === 'queued' || (ev.status === 'running' && ev.percent == null)) shown = 0;
   else if (cur != null) shown = Math.max(shown, cur);
   if (ev.status === 'completed') shown = 100;
-  // Record the latest tick so a playlist fold can aggregate progress + speed.
-  state.progress.set(ev.id, { percent: ev.percent ?? null, speed: ev.speed || '', status: ev.status, shown });
+  // Record the latest tick so a playlist fold can aggregate progress + speed —
+  // and so a rebuilt row can restore the live spans (see paintLiveFields).
+  state.progress.set(ev.id, {
+    percent: ev.percent ?? null, speed: ev.speed || '', eta: ev.eta || '',
+    phase: ev.phase || '', status: ev.status, shown,
+  });
   const li = state.rows.get(ev.id);
   if (!li) return; // unknown row; will appear on next list load
   const persisted = state.items.get(ev.id);
@@ -1113,25 +1214,14 @@ function patchRow(ev: ProgressEv): void {
     badge.textContent = statusLabel(ev.status);
     badge.className = 'badge badge-' + ev.status;
   }
-  const phase = li.querySelector('.phase');
-  if (phase) {
-    // Label the video/audio pass so the per-pass 0→100% reset reads as a new
-    // stage rather than the bar "jumping" backwards.
-    phase.textContent = ev.phase ? ev.phase.charAt(0).toUpperCase() + ev.phase.slice(1) : '';
-    phase.className = 'phase' + (ev.phase ? ' phase-' + ev.phase : '');
-  }
-  const speed = li.querySelector('.speed');
-  if (speed) speed.textContent = ev.speed || '';
-  const eta = li.querySelector('.eta');
-  if (eta) eta.textContent = ev.eta ? 'ETA ' + ev.eta : '';
+  paintLiveFields(li, ev.phase || '', ev.speed || '', ev.eta || '');
   const bar = li.querySelector('.progress');
   const fill = li.querySelector('.progress-fill') as HTMLElement | null;
   const terminal = !!TERMINAL[ev.status];
   if (terminal) {
     if (bar) bar.classList.add('hidden');
-    if (phase) phase.textContent = '';
-    if (speed) speed.textContent = '';
-    if (eta) eta.textContent = '';
+    paintLiveFields(li, '', '', '');
+    chipRefetched.delete(ev.id); // a retry starts a new job, which may pick a new height
     // A just-completed item gains a file: refetch to render play/save/share.
     // Flash the green Completed badge for 30s (markFreshCompleted) — this is a
     // fresh success, unlike the old completed rows whose badge stays hidden.
@@ -1153,11 +1243,156 @@ function patchRow(ev: ProgressEv): void {
   } else if (bar && fill) {
     bar.classList.remove('hidden');
     fill.style.width = shown + '%';
+    // The tick that STARTS a job (Running with no percent yet) is the moment the
+    // backend has just decided — and written — which resolution this download is
+    // going for. The row in hand predates that decision, so its live chip would
+    // spin without a quality beside it until the next poll happened along, up to
+    // 30s later. Refetch once, here, so the chip is complete from the first tick.
+    //
+    // Guarded on having ASKED, not on the answer: an audio-only job has no height
+    // to record, so `target_height` stays null however many times we look. Keying
+    // the guard off the answer made every start tick refetch and rebuild the row
+    // forever — which is what kept wiping the Audio label out of the statusline.
+    if (ev.status === 'running' && ev.percent == null && !persisted?.target_height
+        && !chipRefetched.has(ev.id)) {
+      chipRefetched.add(ev.id);
+      apiFetch(itemPath(ev.id))
+        .then((r) => (r.ok ? r.json() : null))
+        .then((it) => { if (it) upsertRow(it, false); })
+        .catch(() => { /* the poll will catch up */ });
+    }
   }
   // Roll this tick up into the fold header (total progress + live speed).
   const it = state.items.get(ev.id);
   const gk = it ? groupKeyOf(it) : null;
   if (gk) updateGroupProgress(gk);
+}
+
+// ---- Status filter --------------------------------------------------------
+// The funnel's options. Each is a server-side narrowing, never a client-side
+// sieve: `status` and `local` both become query params that the SQL applies, so
+// a filtered view costs one page of exactly the rows asked for. The alternative
+// — pulling history and testing each row here — would page the whole library to
+// show ten rows, and would break keyset pagination while doing it.
+//
+// "Downloaded" and "Cloud only" split the completed rows by whether a file
+// actually landed, which is the distinction the cards themselves draw (Save +
+// Share vs a Download button), so it's the one worth filtering on.
+const FILTERS: Array<{ key: string; label: string; status?: string; local?: boolean }> = [
+  { key: '', label: 'filter.all' },
+  { key: 'downloaded', label: 'filter.downloaded', status: 'completed', local: true },
+  { key: 'cloud', label: 'filter.cloud', status: 'completed', local: false },
+  { key: 'running', label: 'status.running', status: 'running' },
+  { key: 'queued', label: 'status.queued', status: 'queued' },
+  { key: 'paused', label: 'status.paused', status: 'paused' },
+  { key: 'canceled', label: 'status.canceled', status: 'canceled' },
+  { key: 'failed', label: 'status.failed', status: 'failed' },
+];
+
+function activeFilter(): { status?: string; local?: boolean } | null {
+  return FILTERS.find((f) => f.key === state.filter && f.key !== '') || null;
+}
+
+// Stamp the active filter onto an /api/items query. The single place that knows
+// how a filter becomes params, so the first page, the infinite scroll and the
+// 30s poll can't drift apart on what they're asking for.
+function applyFilterParams(params: URLSearchParams): void {
+  const f = activeFilter();
+  if (!f) return;
+  if (f.status) params.set('status', f.status);
+  if (f.local != null) params.set('local', String(f.local));
+}
+
+function renderFilterMenu(): void {
+  els.filterMenu.textContent = '';
+  for (const f of FILTERS) {
+    const b = document.createElement('button');
+    b.className = 'site-menu-item' + (state.filter === f.key ? ' filter-on' : '');
+    b.setAttribute('role', 'menuitem');
+    b.textContent = t(f.label);
+    b.addEventListener('click', () => {
+      closeFilterMenu();
+      if (state.filter === f.key) return; // already showing this — don't refetch
+      state.filter = f.key;
+      renderFilterMenu();
+      // The funnel fills in as the at-a-glance "you are not seeing everything".
+      els.filterBtn.classList.toggle('active', !!state.filter);
+      loadItems(true);
+    });
+    els.filterMenu.appendChild(b);
+  }
+}
+
+function closeFilterMenu(): void {
+  els.filterMenu.classList.add('hidden');
+  els.filterBtn.setAttribute('aria-expanded', 'false');
+}
+
+els.filterBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const open = els.filterMenu.classList.toggle('hidden');
+  els.filterBtn.setAttribute('aria-expanded', open ? 'false' : 'true');
+});
+document.addEventListener('click', (e) => {
+  if (!els.filterMenu.classList.contains('hidden')
+      && !(e.target as HTMLElement).closest('#filter-btn, #filter-menu')) closeFilterMenu();
+});
+
+// ---- First-paint cache ----------------------------------------------------
+// A reload used to cost a blank list plus a full round trip before the first card
+// existed, and then built every row from scratch. This is the stale-while-
+// revalidate pattern (the same idea as HTTP's Cache-Control: stale-while-
+// revalidate, and what SWR/React Query do): keep the last page we rendered, paint
+// it on the next boot without waiting for the network, then reconcile it against
+// the server in the background.
+//
+// The saving is real because upsertRow already diffs: the revalidate feeds every
+// row back through the signature guard, so rows that didn't change touch no DOM
+// and re-request no thumbnails. A refresh therefore rebuilds only what actually
+// moved, instead of all of it.
+//
+// Only the default view is cached. A filtered or searched list is a question the
+// user asked, not the one they'd expect to return to on a fresh load.
+const CACHE_KEY = 'orca_items_cache';
+const CACHE_VER = 1;
+
+function isDefaultView(): boolean {
+  return !state.q && !state.filter;
+}
+
+function cacheFirstPage(items: Item[]): void {
+  if (!isDefaultView()) return;
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      v: CACHE_VER, base: apiBase(), items: items.slice(0, PAGE_SIZE),
+    }));
+  } catch (_) {
+    // Quota or private mode. The cache is an optimisation with a working
+    // fallback (the network), so a failure to store is not worth reporting.
+  }
+}
+
+/**
+ * Paint the cached page synchronously, before any fetch. Returns whether it
+ * painted, which is what tells boot to reconcile (softRefresh) rather than cold-
+ * load — the difference between updating the list and rebuilding it.
+ */
+function hydrateFromCache(): boolean {
+  if (!getToken()) return false;
+  let snap: { v?: number; base?: string; items?: Item[] } | null = null;
+  try {
+    snap = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+  } catch (_) { return false; }
+  // Pinned to the server it came from, and to this build's shape: pointing the
+  // app at a different host must never flash the previous host's library, and a
+  // stale shape is not worth a migration path when the network refills it in a
+  // second anyway.
+  if (!snap || snap.v !== CACHE_VER || snap.base !== apiBase()) return false;
+  const items = snap.items || [];
+  if (!items.length) return false;
+  // Oldest→newest so the newest ends up on top, matching softRefresh.
+  for (let i = items.length - 1; i >= 0; i--) upsertRow(items[i]!, true);
+  return true;
 }
 
 // ---- List loading ---------------------------------------------------------
@@ -1173,14 +1408,17 @@ async function loadItems(reset?: boolean): Promise<void> {
     els.history.innerHTML = '';
     els.loader.classList.add('hidden'); // hide until we know there's a next page
   }
+  const firstPage = state.cursor == null; // scroll-loaded pages must not overwrite the cache
   const params = new URLSearchParams();
   if (state.q) params.set('q', state.q);
+  applyFilterParams(params);
   params.set('limit', String(PAGE_SIZE));
   if (state.cursor != null) params.set('before_id', String(state.cursor));
   try {
     const res = await apiFetch('/api/items?' + params.toString());
     if (!res.ok) { toast(t('toast.loadHistoryFail'), 'error'); return; }
     const data = await res.json();
+    if (firstPage) cacheFirstPage(data.items || []);
     (data.items || []).forEach((it: Item) => upsertRow(it, false));
     state.cursor = data.next_cursor;
     // Keep the spinner mounted (not display:none) while more pages exist so the
@@ -3567,7 +3805,35 @@ els.history.addEventListener('click', (e) => {
   else if (btn.dataset.act === 'pause') holdItem(id, true);
   else if (btn.dataset.act === 'resume') holdItem(id, false);
   else if (btn.dataset.act === 'retry') retryItem(id);
+  else if (btn.dataset.act === 'cancel') cancelItem(id);
 });
+
+// Give up on one download. Unlike pause this discards the partial file server-
+// side, so it asks first — the bytes already fetched are what's being thrown
+// away, and there is no undo beyond starting the download over.
+async function cancelItem(id: number): Promise<void> {
+  const item = state.items.get(id);
+  if (!item) return;
+  const ok = await askConfirm({
+    title: t('cancelConfirm.title'),
+    sub: t('cancelConfirm.sub'),
+    confirm: t('item.cancel'),
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const res = await apiFetch(itemPath(item, '/cancel'), { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.cancelFail'), 'error');
+      return;
+    }
+    upsertRow(data, false);
+    loadStats();
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+  }
+}
 
 // Re-queue a failed item. Like holdItem, the server echoes the updated row, so
 // the card repaints from the new status (Queued) and the retry button gives way
@@ -3636,12 +3902,15 @@ function toggleSelect(id: number): void {
   updateSelBar();
 }
 // The bar shows only the actions the CURRENT selection can actually take, rather
-// than every action always, greyed out. Nine permanently-present buttons made the
-// bar hard to read and hid which of them were live; a contextual toolbar is the
-// familiar answer (Finder, Photos, Gmail) and it shrinks the bar on a phone,
-// where all nine wrapped onto three cramped rows.
+// than every action always, greyed out. Nothing is enabled-but-hidden: if a
+// button is on screen it works.
 //
-// Nothing is enabled-but-hidden: if a button is on screen it works.
+// The split between the bar and its overflow menu is by frequency, not by
+// importance: Download / Share / Delete are what a selection is made FOR, so they
+// stay on the surface as icons; select-all, invert, unshare, copy-links and clean
+// are the once-in-a-while ones, and live one tap deeper. That's the same division
+// Gmail and Google Photos make, and it's what lets the bar fit a phone in one row
+// (it used to wrap nine word-buttons onto three).
 function updateSelBar(): void {
   const n = state.selected.size;
   const loaded = state.rows.size;
@@ -3651,23 +3920,50 @@ function updateSelBar(): void {
 
   els.selCount.textContent = n ? t('sel.countN', { n }) : t('sel.count0');
   els.selBar.classList.toggle('hidden', !state.selectMode);
+  if (!state.selectMode) closeSelMenu();
 
-  const show = (b: HTMLElement, on: boolean): void => { b.classList.toggle('hidden', !on); };
-  // Pickers: live as soon as there's anything to pick from. "Select all" flips to
-  // "Clear" once everything loaded is selected.
-  show(els.selAll, loaded > 0);
-  show(els.selInvert, loaded > 0);
-  els.selAll.textContent = loaded > 0 && n >= loaded ? t('sel.clear') : t('sel.all');
-
-  // Verbs: each needs something it can act ON.
+  const show = (b: HTMLElement, on: boolean): boolean => {
+    b.classList.toggle('hidden', !on);
+    return on;
+  };
+  // Primaries: each needs something it can act ON.
   show(els.selDownload, local.length > 0);   // needs a file to hand over
-  show(els.selCopy, done.length > 0);        // needs a finished item to link to
-  show(els.selClean, local.length > 0);      // needs a file to erase
   show(els.selShare, done.length > 0);       // needs a finished item to publish
-  show(els.selUnshare, picked.some((it) => it.public)); // needs a LIVE share
   show(els.selDelete, n > 0);                // any record can be deleted
+
+  // Overflow. "Select all" flips to "Clear" once everything loaded is selected —
+  // one entry covering both, the standard file-manager move.
+  const inMenu = [
+    show(els.selAll, loaded > 0),
+    show(els.selInvert, loaded > 0),
+    show(els.selCopy, done.length > 0),               // needs a finished item to link to
+    show(els.selUnshare, picked.some((it) => it.public)), // needs a LIVE share
+    show(els.selClean, local.length > 0),             // needs a file to erase
+  ];
+  els.selAll.textContent = loaded > 0 && n >= loaded ? t('sel.clear') : t('sel.all');
+  // An empty menu is worse than no menu: a ⋮ that opens onto nothing reads as a
+  // bug. Hide the trigger with its contents, and close it if it's open right now.
+  if (!show(els.selMore, inMenu.some(Boolean))) closeSelMenu();
   refreshGroupHeaders(); // keep fold headers' selected/partial state in sync
 }
+
+// ---- Select-bar overflow menu ----
+// Deliberately the same open/close shape as the website cards' ⋮ (see
+// closeSiteMenus): click the trigger to toggle, click anywhere else to dismiss.
+function closeSelMenu(): void {
+  els.selMenu.classList.add('hidden');
+  els.selMore.setAttribute('aria-expanded', 'false');
+}
+function toggleSelMenu(): void {
+  const open = els.selMenu.classList.toggle('hidden') === false;
+  els.selMore.setAttribute('aria-expanded', String(open));
+}
+els.selMore.addEventListener('click', (e) => { e.stopPropagation(); toggleSelMenu(); });
+// Any tap outside the menu dismisses it — including one on a menu item, which is
+// what closes the menu after the action it triggered.
+document.addEventListener('click', (e) => {
+  if (!(e.target as HTMLElement).closest('#sel-more')) closeSelMenu();
+});
 
 // Items backing the current selection (latest known objects).
 function selectedItems(): Item[] {
@@ -3737,7 +4033,39 @@ function renderQueueToggle(): void {
   btn.classList.toggle('active', resume); // paused queue is a state worth flagging
   btn.setAttribute('aria-label', label);
   btn.setAttribute('title', label);
+  // Cancel-all rides the same render, and reads the same two facts. It covers
+  // strictly more than pause does — paused items are outstanding downloads too —
+  // so it stays live whenever there is anything running OR anything parked.
+  const cancelBtn = els.queueCancel;
+  if (cancelBtn) {
+    cancelBtn.classList.remove('hidden');
+    cancelBtn.disabled = !active && paused === 0;
+  }
 }
+
+els.queueCancel?.addEventListener('click', async () => {
+  const ok = await askConfirm({
+    title: t('cancelAllConfirm.title'),
+    sub: t('cancelAllConfirm.sub'),
+    confirm: t('queue.cancelAll'),
+    danger: true,
+  });
+  if (!ok) return;
+  els.queueCancel.disabled = true;
+  try {
+    const res = await apiFetch('/api/queue/cancel', { method: 'POST' });
+    if (!res.ok) { toast(t('toast.saveFail'), 'error'); return; }
+    const data = await res.json().catch(() => ({}));
+    toast(t('toast.canceledN', { n: data.canceled ?? 0 }), 'ok');
+    // Same reasoning as the pause toggle: the server decided what the signal
+    // covered, so re-read rather than guess which rows changed.
+    await Promise.all([loadStats(), softRefresh()]);
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+  } finally {
+    renderQueueToggle();
+  }
+});
 
 els.queueToggle?.addEventListener('click', async () => {
   const resume = els.queueToggle.dataset.act === 'resume';
@@ -4776,6 +5104,7 @@ if (window.matchMedia) {
 // language picker's own "Auto (system)" row, and the website list if it's open.
 document.addEventListener('i18n:changed', () => {
   renderLangSelect();
+  renderFilterMenu(); // its rows are built from t(), not [data-i18n] markup
   renderArchiveRestore();
   renderAppPermissions();
   setServerStatus(serverUp);
@@ -4821,16 +5150,25 @@ function autoRefresh(): void {
 // genuinely-new rows are inserted at the top in order, and rows that vanished
 // server-side within the refreshed range are removed. Rows below the first page
 // (older, scroll-loaded) are left alone.
-async function softRefresh(): Promise<void> {
+// `establishPaging` is for the one caller that isn't a poll: a boot that painted
+// the list from cache. The 30s poll runs against a list loadItems already set the
+// cursor for and must not touch it — but a hydrated boot has never called
+// loadItems at all, so without this the cursor stays null, the loader stays
+// hidden, and the list dead-ends at the cached page with no way to scroll further.
+async function softRefresh(establishPaging = false): Promise<void> {
   if (state.loading) return;
   state.loading = true;
   try {
     const params = new URLSearchParams();
+    // The poll asks the same question the visible list was built from — without
+    // the filter it would prepend rows the filter excludes, quietly undoing it.
+    applyFilterParams(params);
     params.set('limit', String(PAGE_SIZE));
     const res = await apiFetch('/api/items?' + params.toString());
     if (!res.ok) return;
     const data = await res.json();
     const items: Item[] = data.items || [];
+    cacheFirstPage(items); // keep the next boot's first paint current
     // Iterate oldest→newest so prepending new rows leaves them newest-first.
     for (let i = items.length - 1; i >= 0; i--) upsertRow(items[i]!, true);
     // Drop rows deleted upstream. When a full page came back, only reconcile within
@@ -4842,6 +5180,14 @@ async function softRefresh(): Promise<void> {
       if (id >= floor && !present.has(id)) removeRow(id);
     }
     els.empty.classList.toggle('hidden', state.rows.size !== 0);
+    if (establishPaging) {
+      state.cursor = data.next_cursor;
+      // Keep the spinner mounted (not display:none) while more pages exist, so
+      // the IntersectionObserver can see it re-enter the viewport.
+      els.loader.classList.toggle('hidden', data.next_cursor == null);
+      // Runs after `finally` clears state.loading, so the top-up isn't a no-op.
+      requestAnimationFrame(topUpIfNeeded);
+    }
   } catch (e) {
     if (!isUnauthorized(e)) { /* transient; the next tick or SSE will heal it */ }
   } finally {
@@ -4856,19 +5202,107 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden && Date.now() - lastAutoRefresh >= AUTO_REFRESH_MS) autoRefresh();
 });
 
+// ---- First run ------------------------------------------------------------
+// Marks the welcome window as spent, so it is a one-time event rather than
+// something that returns whenever the server is briefly unreachable.
+const WELCOME_KEY = 'orca_welcome_done';
+
+function welcomeError(key: string): void {
+  els.welcomeError.textContent = t(key);
+  els.welcomeError.classList.remove('hidden');
+}
+
+/**
+ * First run = the welcome has never been completed AND there are no credentials
+ * already. The token check is what keeps an existing install — one that upgraded
+ * into this build already working — from being asked to set itself up again.
+ */
+function needsWelcome(): boolean {
+  if (localStorage.getItem(WELCOME_KEY) === '1') return false;
+  if (getToken()) { localStorage.setItem(WELCOME_KEY, '1'); return false; }
+  return true;
+}
+
+/**
+ * Check a candidate server + token by asking that server something only a valid
+ * token can answer. Deliberately not apiFetch: that reads the *saved* token and
+ * throws up the Settings sheet on a 401 — the very thing this flow replaces.
+ * Nothing is persisted until it comes back clean, so a typo leaves the app
+ * unconfigured rather than half-configured. Returns an i18n key, '' for success.
+ */
+async function verifyCreds(base: string, token: string): Promise<string> {
+  const path = '/api/items?limit=1';
+  let res: Response;
+  try {
+    res = await encryptedFetch(base + path, path, token, {});
+  } catch (_) {
+    return 'toast.network'; // wrong host, no DNS, server down, TLS refused
+  }
+  if (res.status === 401) return 'settings.tokenInvalid';
+  return res.ok ? '' : 'toast.loadHistoryFail';
+}
+
+async function submitWelcome(): Promise<void> {
+  const base = (els.welcomeServer.value || '').trim().replace(/\/+$/, '');
+  const token = (els.welcomeToken.value || '').trim();
+  els.welcomeError.classList.add('hidden');
+  // The same rule the Settings field enforces: a plain-http public server would
+  // ship the token and cookies across the internet in the clear.
+  if (isInsecurePublicBase(base)) { welcomeError('toast.insecureServer'); return; }
+  if (!token) { welcomeError('settings.tokenInvalid'); return; }
+  els.welcomeStart.disabled = true;
+  const err = await verifyCreds(base, token);
+  els.welcomeStart.disabled = false;
+  if (err) { welcomeError(err); return; }
+  setApiBase(base);
+  setToken(token);
+  // Verified, so the permission prompt is marked seen as well: the user was just
+  // asked, here. A second modal asking the same thing as this one closes reads as
+  // a bug rather than as thoroughness.
+  localStorage.setItem(WELCOME_KEY, '1');
+  localStorage.setItem(PERMISSION_PROMPT_NEVER, '1');
+  closeModal(els.welcome);
+  startApp(); // everything checks out → the main page, populated
+}
+
+function openWelcome(): void {
+  els.welcomeServer.value = apiBase();
+  // Permissions are an Android concept here; the browser build has nothing to ask
+  // for at this point and an empty section would just be furniture.
+  els.welcomePerms.classList.toggle('hidden', !isNativeApp);
+  openModal(els.welcome);
+  if (isNativeApp) void refreshAppPermissions();
+  els.welcomeToken.focus();
+}
+
+els.welcomeStart.addEventListener('click', () => void submitWelcome());
+
 // ---- Boot -----------------------------------------------------------------
+// Everything the main page needs once there are credentials to use it with.
+// Called straight away by an already-configured install, and by the welcome
+// window the moment it becomes configured — so a first run lands on a populated
+// page instead of an empty one waiting to be reloaded.
+function startApp(): void {
+  loadServerConfig();
+  connectEvents();
+  // Paint the last known page before the network answers, then reconcile it
+  // (see hydrateFromCache). Only a cold client rebuilds the list outright.
+  if (hydrateFromCache()) void softRefresh(true); else void loadItems(true);
+  loadStats();
+  if (getToken()) loadWebsites(); // per-site privacy-blur state for the home list
+}
+
 applyTheme();                // resolve theme before first paint work
 window.i18n.apply(document); // localize the static markup before anything shows
 renderThemePicker();
 renderLangSelect();
+renderFilterMenu();
 setServerStatus(false);      // start red; SSE onopen flips it green when live
-if (!getToken()) showTokenField(false);
-loadServerConfig();
-connectEvents();
-loadItems(true);
-loadStats();
-if (getToken()) loadWebsites(); // populate per-site privacy-blur state for the home list
+const welcoming = needsWelcome();
+if (welcoming) openWelcome(); else startApp();
 handleShareParam();
 setupNativeShare();
-setupAppPermissionRefresh();
+// The welcome window asks for permissions itself — a prompt stacked on top of it
+// would be the same question twice, in two windows.
+if (!welcoming) setupAppPermissionRefresh();
 setupDeepLinks();

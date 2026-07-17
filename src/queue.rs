@@ -238,6 +238,46 @@ pub async fn storage_full(cfg: &Config, db: &Db) -> bool {
     }
 }
 
+/// Throw away the half-finished files of a cancelled download.
+///
+/// This is the whole of the difference between cancel and pause. Both kill the
+/// yt-dlp child; pause then leaves the `.part` files alone precisely so
+/// `--continue` can pick the transfer back up, which is exactly what a cancel
+/// must NOT allow — an abandoned download that quietly kept its bytes would be a
+/// pause wearing another name, and would hold disk against the storage cap for a
+/// file nobody is waiting for.
+///
+/// Every partial lives directly in `<download_dir>/.part` (see `download_args`),
+/// named from the output template, which ends in `[<video_id>]` — that tag is how
+/// an item's own fragments are told apart from every other download's. Matching
+/// is confined to that one flat directory and to entries that are files, so a
+/// pathological video id can only ever fail to match, never reach outside.
+/// Best-effort throughout: a partial we cannot remove is litter, not a reason to
+/// refuse the cancel the user asked for.
+pub fn discard_partials(download_dir: &std::path::Path, video_id: &str) -> usize {
+    if video_id.is_empty() {
+        return 0;
+    }
+    let tag = format!("[{video_id}]");
+    let part_dir = download_dir.join(".part");
+    let Ok(entries) = std::fs::read_dir(&part_dir) else {
+        return 0; // no partials yet — nothing to discard
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.contains(&tag) || !entry.path().is_file() {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => removed += 1,
+            Err(e) => tracing::warn!(file = name, error = %e, "failed to discard partial"),
+        }
+    }
+    removed
+}
+
 /// The effective set of download heights for a URL: the env override if the
 /// operator set `ORCA_MAX_HEIGHT` (always wins, and is necessarily a single
 /// height), else the per-site set from the website registry, else the UI-stored
@@ -359,13 +399,13 @@ async fn run_job(
         }
     };
 
-    // A pause that landed after this job was queued: the job is already sitting in
-    // the channel and can't be pulled back out, so honour the pause here instead.
-    // Resume re-enqueues, and yt-dlp continues from the `.part` file. This is read
-    // before the Running write below — flipping the status first would clobber the
-    // pause the user just asked for.
-    if item.status == Status::Paused {
-        tracing::info!(job_id = id, variant = ?variant, "job skipped: item is paused");
+    // A pause or a cancel that landed after this job was queued: the job is
+    // already sitting in the channel and can't be pulled back out, so honour the
+    // decision here instead. Neither status may be overwritten by the Running
+    // write below — that would restart the very download the user just stopped.
+    if matches!(item.status, Status::Paused | Status::Canceled) {
+        tracing::info!(job_id = id, variant = ?variant, status = item.status.as_str(),
+            "job skipped: item is not to be downloaded");
         return;
     }
 
@@ -410,12 +450,29 @@ async fn run_job(
     // in the first place (submit keeps it stream-only).
     let cap = match variant {
         Some(h) => Some(h),
-        None => resolve_max_heights(cfg, db, &sites, &item.webpage_url)
-            .await
-            .heights()
-            .first()
-            .copied()
-            .filter(|h| *h > 0),
+        None => {
+            let heights = resolve_max_heights(cfg, db, &sites, &item.webpage_url).await;
+            // What this run is aiming for, snapped against the heights the source
+            // actually offers, and recorded for the card's live chip. It is NOT the
+            // cap below: the cap can be "no cap" (HIGHEST) or a 4320 the source
+            // never had, neither of which is a quality a user can be told to
+            // expect. Best-effort — a chip is not worth failing a download over.
+            let available = db
+                .get_available_heights(id)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let target = heights
+                .resolve(&available)
+                .first()
+                .copied()
+                .filter(|h| *h > 0);
+            if let Err(e) = db.set_target_height(id, target).await {
+                tracing::warn!(job_id = id, error = %e, "failed to record target height");
+            }
+            heights.heights().first().copied().filter(|h| *h > 0)
+        }
     };
     let mut job_cfg = cfg.clone();
     job_cfg.format = cfg.format_capped(cap);
@@ -655,5 +712,62 @@ async fn run_job(
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(path: &std::path::Path) {
+        std::fs::write(path, b"partial").unwrap();
+    }
+
+    /// The partial directory is shared by every in-flight download, so a cancel
+    /// has to take its own item's fragments and nothing else. The `[<video_id>]`
+    /// tag the output template puts in every name is what tells them apart.
+    #[test]
+    fn discard_partials_takes_only_the_matching_items_fragments() {
+        let dir = tempfile::tempdir().unwrap();
+        let part = dir.path().join(".part");
+        std::fs::create_dir_all(&part).unwrap();
+
+        let mine = [
+            "Chan - 2026-01-01 - Clip [abc123].mp4.part",
+            "Chan - 2026-01-01 - Clip [abc123].f137.mp4.part-Frag2.part",
+            "Chan - 2026-01-01 - Clip [abc123] [720p].mkv.part",
+        ];
+        let theirs = [
+            "Chan - 2026-01-01 - Other [zzz999].mp4.part",
+            // A near-miss: the id appears, but not as the template's tag.
+            "Chan - abc123 - Not tagged [zzz999].mp4.part",
+        ];
+        for name in mine.iter().chain(theirs.iter()) {
+            touch(&part.join(name));
+        }
+
+        assert_eq!(discard_partials(dir.path(), "abc123"), 3);
+        for name in mine {
+            assert!(!part.join(name).exists(), "{name} should be gone");
+        }
+        for name in theirs {
+            assert!(
+                part.join(name).exists(),
+                "{name} belongs to another download"
+            );
+        }
+    }
+
+    /// An item with no partials (nothing downloaded yet, or no `.part` dir at all)
+    /// is a no-op, not an error — cancelling it still has to succeed.
+    #[test]
+    fn discard_partials_is_a_no_op_when_there_is_nothing_to_discard() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(discard_partials(dir.path(), "abc123"), 0);
+        std::fs::create_dir_all(dir.path().join(".part")).unwrap();
+        assert_eq!(discard_partials(dir.path(), "abc123"), 0);
+        // An empty video id must never match "[]" or sweep the directory.
+        touch(&dir.path().join(".part").join("Something [].mp4.part"));
+        assert_eq!(discard_partials(dir.path(), ""), 0);
     }
 }

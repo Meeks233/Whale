@@ -327,6 +327,7 @@ mod tests {
             filepath: None,
             filesize: None,
             height: None,
+            target_height: None,
             source_max_height: None,
             source: Source::Download,
             status: Status::Queued,

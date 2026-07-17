@@ -44,6 +44,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         duration: row.try_get("duration")?,
         filesize: row.try_get("filesize")?,
         height: row.try_get("height")?,
+        target_height: row.try_get("target_height")?,
         source_max_height: row.try_get("source_max_height")?,
         source,
         status,
@@ -81,7 +82,8 @@ fn filepath_exists(filepath: &Option<String>) -> bool {
 
 const SELECT_COLS: &str =
     "id, public_slug AS resource_slug, extractor, video_id, archive_key, title, uploader, \
-    webpage_url, thumbnail_url, duration, filepath, filesize, height, source_max_height, source, \
+    webpage_url, thumbnail_url, duration, filepath, filesize, height, target_height, \
+    source_max_height, source, \
     status, error, created_at, completed_at, public, share_slug, public_until, public_hits, \
     playlist_index, \
     COALESCE((SELECT SUM(filesize) FROM item_resolutions WHERE item_id = items.id), filesize, 0) \
@@ -201,6 +203,16 @@ pub(super) async fn set_completed(
     .bind(id)
     .execute(&db.pool)
     .await?;
+    Ok(())
+}
+
+/// Record the height a starting download is aiming for (see `Item::target_height`).
+pub(super) async fn set_target_height(db: &Db, id: i64, height: Option<i64>) -> anyhow::Result<()> {
+    sqlx::query("UPDATE items SET target_height = ? WHERE id = ?")
+        .bind(height)
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
     Ok(())
 }
 
@@ -546,6 +558,32 @@ pub(super) async fn pause_active(db: &Db) -> anyhow::Result<Vec<i64>> {
     Ok(ids)
 }
 
+/// Give up on every download still outstanding — in flight, waiting its turn, or
+/// parked by a pause — and return their ids so the caller can kill the yt-dlp
+/// children and discard the partials. Paused rows are included deliberately:
+/// "cancel all downloads" means the queue is empty afterwards, and a paused item
+/// is a download that hasn't happened yet, not one that's finished.
+pub(super) async fn cancel_active(db: &Db) -> anyhow::Result<Vec<i64>> {
+    let rows = sqlx::query(
+        "SELECT id FROM items WHERE status IN ('queued', 'running', 'paused') ORDER BY id ASC",
+    )
+    .fetch_all(&db.pool)
+    .await?;
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|r| r.try_get("id"))
+        .collect::<Result<_, _>>()?;
+    if !ids.is_empty() {
+        sqlx::query(
+            "UPDATE items SET status = 'canceled', error = NULL \
+             WHERE status IN ('queued', 'running', 'paused')",
+        )
+        .execute(&db.pool)
+        .await?;
+    }
+    Ok(ids)
+}
+
 /// Flip an item's public flag. Every enable rotates the public capability; revoke
 /// clears it so a previously copied URL can never become live again.
 pub(super) async fn set_public(
@@ -801,6 +839,18 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
     let mut sql = format!("SELECT {SELECT_COLS} FROM items WHERE 1=1");
     if q.status.is_some() {
         sql.push_str(" AND status = ?");
+    }
+    // "Holds a file" as SQL: a non-empty `filepath`. That is what stream-only mode
+    // clears (mark_stream_only), so it separates downloaded from cloud-only rows
+    // without a table scan through the filesystem. It trusts the column where
+    // `local_available` re-stats the disk, so a file deleted behind the server's
+    // back still matches here — the row comes back with an honest
+    // `local_available: false`. Filtering on the stat instead would mean reading
+    // every page of history and sieving in Rust, which breaks keyset pagination.
+    match q.local {
+        Some(true) => sql.push_str(" AND filepath IS NOT NULL AND filepath <> ''"),
+        Some(false) => sql.push_str(" AND (filepath IS NULL OR filepath = '')"),
+        None => {}
     }
     for c in &search_clauses {
         sql.push_str(" AND ");
@@ -1518,6 +1568,61 @@ mod tests {
     /// is still waiting for, so a resume or retry across a restart can never
     /// succeed — it fails with "already in the download archive".
     #[tokio::test]
+    async fn list_local_filter_splits_downloaded_from_stream_only() {
+        let (db, _dir) = temp_db().await;
+        let downloaded = db
+            .insert_probe(&probe("youtube", "have", "Downloaded"), Source::Download)
+            .await
+            .unwrap();
+        db.set_completed(downloaded.id, "/downloads/have.mkv", 10, Some(1080))
+            .await
+            .unwrap();
+        let streamed = db
+            .insert_probe(&probe("youtube", "none", "Stream only"), Source::Download)
+            .await
+            .unwrap();
+        db.mark_stream_only(streamed.id).await.unwrap();
+
+        // local=true keeps only the row holding a file...
+        let local = db
+            .list(ListQuery {
+                limit: 10,
+                local: Some(true),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            local.items.iter().map(|i| i.id).collect::<Vec<_>>(),
+            vec![downloaded.id]
+        );
+
+        // ...and local=false is its exact complement, so the two partition the list.
+        let cloud = db
+            .list(ListQuery {
+                limit: 10,
+                local: Some(false),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            cloud.items.iter().map(|i| i.id).collect::<Vec<_>>(),
+            vec![streamed.id]
+        );
+
+        // Absent, it filters nothing.
+        let all = db
+            .list(ListQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(all.items.len(), 2);
+    }
+
+    #[tokio::test]
     async fn archive_seed_excludes_items_still_awaiting_download() {
         let (db, _dir) = temp_db().await;
         let done = db
@@ -1586,6 +1691,53 @@ mod tests {
 
         // Nothing in flight left to take.
         assert!(db.pause_active().await.unwrap().is_empty());
+    }
+
+    /// Cancel-all covers strictly more than pause-all: a paused item is a
+    /// download that still hasn't happened, so "cancel every download" has to
+    /// take it too. Anything already finished is not a download and is left be.
+    #[tokio::test]
+    async fn cancel_active_takes_every_outstanding_download_including_paused() {
+        let (db, _dir) = temp_db().await;
+        let queued = db
+            .insert_probe(&probe("youtube", "c1", "Queued"), Source::Download)
+            .await
+            .unwrap();
+        let running = db
+            .insert_probe(&probe("youtube", "c2", "Running"), Source::Download)
+            .await
+            .unwrap();
+        let parked = db
+            .insert_probe(&probe("youtube", "c3", "Paused"), Source::Download)
+            .await
+            .unwrap();
+        let done = db
+            .insert_probe(&probe("youtube", "c4", "Done"), Source::Download)
+            .await
+            .unwrap();
+        db.set_status(running.id, Status::Running, None)
+            .await
+            .unwrap();
+        db.set_status(parked.id, Status::Paused, None)
+            .await
+            .unwrap();
+        db.set_completed(done.id, "/downloads/done.mkv", 10, Some(1080))
+            .await
+            .unwrap();
+
+        let canceled = db.cancel_active().await.unwrap();
+        assert_eq!(canceled, vec![queued.id, running.id, parked.id]);
+        for id in canceled {
+            assert_eq!(db.get(id).await.unwrap().unwrap().status, Status::Canceled);
+        }
+        assert_eq!(
+            db.get(done.id).await.unwrap().unwrap().status,
+            Status::Completed,
+            "a finished download is not an outstanding one"
+        );
+        // The queue is empty afterwards — including of anything to resume.
+        assert_eq!(db.paused_count().await.unwrap(), 0);
+        assert!(db.cancel_active().await.unwrap().is_empty());
     }
 
     #[tokio::test]

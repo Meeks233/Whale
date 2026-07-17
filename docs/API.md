@@ -57,11 +57,13 @@ buffered.
 | `GET` | `/api/items` | Owner | Paginated history |
 | `GET` | `/api/items/:slug` | Owner | One item |
 | `DELETE` | `/api/items/:slug?delete_file=true` | Owner | Delete row and optional files |
-| `POST` | `/api/items/:slug/retry` | Owner | Retry failed item |
+| `POST` | `/api/items/:slug/retry` | Owner | Retry failed or canceled item |
 | `POST` | `/api/items/:slug/pause` | Owner | Park a queued/running download |
 | `POST` | `/api/items/:slug/resume` | Owner | Re-queue a paused download |
+| `POST` | `/api/items/:slug/cancel` | Owner | Abandon an outstanding download, discarding its partial |
 | `POST` | `/api/queue/pause` | Owner | Park every queued/running download |
 | `POST` | `/api/queue/resume` | Owner | Release every paused download, oldest first |
+| `POST` | `/api/queue/cancel` | Owner | Abandon every outstanding download (incl. paused) |
 | `GET`, `PUT` | `/api/items/:slug/resolutions` | Owner | Inspect/reconcile variants |
 | `POST` | `/api/items/:slug/public` | Owner | Create, update, or revoke share |
 | `GET` | `/api/items/:slug/file` | Owner query/header | Range stream or download |
@@ -102,9 +104,13 @@ bytes, request bodies to 16 KiB, and probes to 500 entries.
 
 ## Listing
 
-`GET /api/items?limit=50&before_id=123&q=...&status=completed` returns
+`GET /api/items?limit=50&before_id=123&q=...&status=completed&local=true` returns
 `{"items":[...],"next_cursor":123}`. `before_id` is an authenticated ordering
-cursor, not a resource route identifier.
+cursor, not a resource route identifier. `local=true` restricts the page to items
+holding a downloaded file and `local=false` to stream-only ones; omitted, it does
+not filter. It reads the `filepath` column rather than re-stating the disk, so a
+row whose file vanished behind the server's back still matches `local=true` and
+comes back with `local_available: false`.
 
 ## Sharing
 

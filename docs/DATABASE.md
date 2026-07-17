@@ -19,10 +19,17 @@ capability. Both have partial unique indexes.
 
 ## State Invariants
 
-- statuses are `queued`, `running`, `paused`, `completed`, `failed`, or `duplicate`
+- statuses are `queued`, `running`, `paused`, `canceled`, `completed`, `failed`,
+  or `duplicate`
 - `paused` is a held-back download — the user pressed pause, or the storage cap
   left no room. The record stays usable (online playback included) and its
   partial file is kept, so a resume continues rather than restarts
+- `canceled` is an abandoned download: the record stays (and stays streamable),
+  but the partial file is discarded, so there is nothing to resume — only retry,
+  which starts over. Cancelling is not deleting; the row survives
+- `target_height` is the height a download is aiming for, written when the job
+  starts. It is what the UI reports while a transfer is in flight, since `height`
+  describes the file that landed and is NULL until one does
 - startup resets `running` rows to `queued`
 - only completed rows with a local file can become public
 - revoking or expiring a share clears `share_slug`, expiry, and hit count
@@ -36,7 +43,8 @@ capability. Both have partial unique indexes.
 `0001` created items; `0002-0007` added public state, random slug, clients, expiry,
 and access counts; `0008-0013` added playlist/resolution/settings/height data;
 `0014-0016` added website policy and backfilled resource slugs; `0017` separated
-rotating public share capabilities from private resource slugs.
+rotating public share capabilities from private resource slugs; `0020` added the
+in-flight download's target height.
 
 ## Backup
 

@@ -549,11 +549,13 @@ input:focus { outline: none; border-color: var(--accent); }
    must point the UI at a remote server). In a browser the UI is same-origin,
    so hide the whole row — detected via html.app-native (set from
    window.__TAURI__), not user-agent sniffing. */
-html:not(.app-native) #server-row { display: none; }
+html:not(.app-native) #server-row,
+html:not(.app-native) #welcome-server-row { display: none; }
 /* …which leaves API token as the only row in the Connection box. `+` matches on
    DOM adjacency, not layout, so its separator would otherwise still draw — a
    hairline pinned under the box's top edge with nothing above it. */
-html:not(.app-native) #server-row + .form-row { border-top: none; }
+html:not(.app-native) #server-row + .form-row,
+html:not(.app-native) #welcome-server-row + .form-row { border-top: none; }
 /* Background activity and storage are Android grants with no web equivalent —
    the browser build can only ever ask about notifications, and doesn't insist on
    even that. Same html.app-native signal as the row above, not user-agent
@@ -989,8 +991,43 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-inset-bottom)); }
 
 .select-count { font-size: 13px; font-weight: 600; white-space: nowrap; }
-.select-actions { display: flex; gap: 6px; flex-wrap: wrap; }
-.select-bar .btn { padding: 8px 12px; font-size: 13px; border-radius: var(--r-md); }
+.select-actions { display: flex; align-items: center; gap: 2px; }
+/* One icon button for the whole bar — the close X, the three primaries, and the
+   overflow ⋮ are the same target size (44px, the touch minimum) so the row reads
+   as one strip of controls rather than a pill next to some glyphs. */
+.sel-act {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--text);
+  cursor: pointer;
+}
+.sel-act:hover { background: var(--surface); }
+.sel-act svg { display: block; }
+/* Delete is the one irreversible verb on the bar, and the only one coloured. */
+.sel-danger { color: var(--err); }
+/* The bar is pinned to the bottom edge, so its overflow opens upward — otherwise
+   the menu would render off-screen below the viewport. Qualified by
+   `.site-menu-pop` to outrank that base rule's `top`, which is declared later in
+   this file and would otherwise win on source order and drop the menu down. */
+.site-menu-pop.sel-menu { top: auto; bottom: 48px; }
+
+/* Status filter menu. Same qualifying trick, same reason: the base rule pins the
+   pop-up to its wrap's RIGHT edge, which suits the per-site kebab at the end of
+   its row but would hang this one off the left edge of the screen — the funnel
+   is the first control in the row. So it opens left-aligned, downward, since
+   unlike the select bar there is a whole page below it. */
+.site-menu-pop.filter-menu { left: 0; right: auto; }
+/* The chosen row, in the same accent the funnel itself takes while filtering. */
+.filter-menu .filter-on { color: var(--accent); font-weight: 600; }
+/* Pad the bar for icon buttons, which bring their own hit area. */
+.select-bar { padding: 6px 8px; gap: 6px; }
 
 .thumb-wrap {
   position: relative;
@@ -1063,19 +1100,6 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   border-radius: var(--r-xs);
   color: #fff;
   background: rgba(0,0,0,.72);
-}
-/* Cloud-only badge: top-right corner. */
-.cloud-badge {
-  position: absolute;
-  right: 5px;
-  top: 5px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  background: rgba(0,0,0,.6);
-  border-radius: var(--r-xs);
-  padding: 1px 3px;
 }
 /* Play affordance: subtle, small, bottom-right of a finished thumbnail. */
 .play-badge {
@@ -1168,6 +1192,9 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
    because the user said so or because the disk is full — so it reads as a
    resting state, not the alarm that --warn/--err would raise. */
 .badge-paused { background: var(--surface-2); color: var(--muted); }
+/* Canceled: quiet for the same reason as paused, and pointedly not red. The user
+   asked for this — it's a decision they made, not a failure to report. */
+.badge-canceled { background: var(--surface-2); color: var(--muted); }
 
 .progress {
   margin-top: 8px;
@@ -1211,6 +1238,9 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 /* Delete (trash) action: neutral by default, red on hover — its destructive
    intent, and it always routes through the confirm dialog. */
 .act-del:hover { color: var(--err); }
+/* Cancel: red on hover like delete, and for the same reason — it throws the
+   fetched bytes away — and behind the same confirm. */
+.act-cancel:hover { color: var(--err); }
 /* A live (public) share tints the share icon the Completed green, at-a-glance
    signalling "this is shared". */
 .act-share.act-on { color: var(--ok); }
@@ -1259,11 +1289,16 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 @media (hover: hover) {
   .chip-btn:hover { color: var(--accent); border-color: var(--accent); }
 }
+/* Live download capsule: the app's one spinner (shrunk to chip scale, turned by
+   the shared `spin` keyframes) plus the quality being fetched, in the same blue
+   the running badge and phase use — so "this is in flight" is one colour across
+   the card rather than three. */
+.chip-spin svg { width: 13px; height: 13px; animation: spin .8s linear infinite; }
+.chip-dl { color: var(--run); }
+.dl-res { color: var(--run); font-weight: 700; font-variant-numeric: tabular-nums; }
 /* The measured part of a chip stands out from its label/icon. */
 .hits-n { color: var(--text); }
 .res-btn-label { color: var(--text); font-variant-numeric: tabular-nums; }
-/* Cloud-only: a stated fact, not a control — dashed to read as "no file here". */
-.act-cloud { border-style: dashed; cursor: default; }
 
 /* Video/audio pass label next to the status badge. */
 .phase { font-weight: 600; color: var(--run); }
