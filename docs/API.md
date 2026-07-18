@@ -1,44 +1,70 @@
 # API
 
-The Web UI and Android app encrypt authenticated JSON requests and responses
-with token-derived AES-256-GCM. `Authorization: Bearer <token>` remains supported
-for CLI clients. Query-string owner auth is accepted only by media endpoints
-because `<video>` and download links cannot set request headers. Errors are
-`{"error":"code","message":"text"}`; internal details are logged, not returned.
+The Web UI and Android app talk to the server over the **Orca Secure Channel
+(OSC)** — a forward-secret, mutually-authenticated end-to-end encrypted channel
+that carries no token or token-derived value on the wire, so it is safe over
+plain HTTP behind an untrusted TLS terminator (e.g. a Cloudflare Tunnel). The
+full design and threat model live in [SECURITY.md](SECURITY.md); this section is
+the wire reference. A plaintext `Authorization: Bearer <token>` (and `?token=` on
+media/SSE) is honoured **only for loopback peers**, for local CLI/debugging.
+Errors are `{"error":"code","message":"text"}`; internal details are logged, not
+returned.
 
-## JSON E2EE
+## Handshake — `POST /api/session`
 
-For an owner token or trusted-client passphrase, calculate `auth_hash =
-SHA-256(credential)`, then:
+Unauthenticated. The client sends a fresh ephemeral **P-256** public key and a
+16-byte nonce; the server replies with its own and an opaque session id:
 
-- `key_id = SHA-256("orca-e2ee-kid-v1" || 0x00 || auth_hash)`, lowercase hex
-- `key = SHA-256("orca-e2ee-key-v1" || 0x00 || auth_hash)`
+```
+→ { "epk": "<base64 SEC1 uncompressed>", "n": "<base64 16B>" }
+← { "epk": "<base64 SEC1 uncompressed>", "n": "<base64 16B>", "sid": "<opaque>" }
+```
 
-Set `X-Orca-E2EE: 1` and `X-Orca-Key-Id: <key_id>`. When a request has a body,
-set `X-Orca-Encrypted-Body: 1` and send a JSON envelope
-`{"v":1,"n":"<base64 nonce>","c":"<base64 ciphertext+tag>"}`. Nonces are
-12 random bytes and tags are 16 bytes. Request AAD is
-`METHOD + "\n" + path_and_query`. Encrypted responses carry `X-Orca-E2EE: 1`
-and use `status_code + "\n" + path_and_query` as AAD. Authentication failures
-remain plaintext `401` responses because the server has not accepted a key.
+Both derive `Z` = the ECDH shared X coordinate, then
+`session_key = HKDF-SHA256(ikm=Z, salt=n_c‖n_s, info="orca-osc-v2-session\0"‖SHA256(token))`.
+`Z` is the only high-entropy secret and the source of forward secrecy; the token
+(as `SHA256(token)`) is mixed in so only a token holder derives the same key. The
+client discards its ephemeral private key immediately. Nothing token-derived is
+ever sent — the `sid` is random and rotates every handshake.
 
-The `key_id` is **not a credential**. It is derived by a public function and
-travels in cleartext on every request, so it only names which key to use. Every
-E2EE request must also carry `X-Orca-Auth`: base64 of an envelope sealing
-`{"t":<unix seconds>,"n":"<unique nonce>"}` under `key`, with AAD
-`"orca-auth-v1" + "\n" + METHOD + "\n" + path_and_query`. The server opens it to
-prove you hold the key, rejects a `t` more than 300 seconds from its clock, and
-refuses any nonce it has already seen inside that window. Without this, anyone
-who observed a `key_id` could drive every bodyless side-effecting route (the
-encrypted response they could not read would not stop the delete from happening).
+## JSON requests
 
-SSE uses `?key_id=...&auth=...`, where `auth` is the same authenticator bound to
-`GET` and the literal target `/api/events` — the real query string cannot be
-bound, since it contains the authenticator. Each `progress` event data field is
-an envelope with AAD `event\nprogress`. Legacy `?token=...` SSE remains available
-to clients that cannot decrypt events. Media Range and streaming routes retain
-query/header token authentication so bodies remain streaming rather than
-buffered.
+Set `X-Orca-E2EE: 1`, `X-Orca-Sid: <sid>`, and `X-Orca-Auth: <authenticator>`.
+The **authenticator** is base64 of an envelope sealing
+`{"t":<unix seconds>,"n":"<unique nonce>"}` under `session_key` with AAD
+`"orca-auth-v1" + "\n" + METHOD + "\n" + path_and_query`. The sid only *names* a
+session; the authenticator is the credential — the server rejects a `t` more than
+300 s from its clock and refuses any nonce seen inside that window, so a captured
+request can't be replayed or lifted onto another route.
+
+On the first request of a freshly handshaken session the server tries each
+candidate token's derived key; the one that opens the authenticator authenticates
+and identifies the peer, promoting the session to active (identity never travels
+in cleartext).
+
+Bodies use a JSON envelope `{"v":1,"n":"<base64 12B nonce>","c":"<base64
+ciphertext+16B tag>"}`, flagged with `X-Orca-Encrypted-Body: 1` and AAD
+`METHOD + "\n" + path_and_query`. Encrypted responses carry `X-Orca-E2EE: 1` and
+use `status_code + "\n" + path_and_query` as AAD. Authentication failures stay
+plaintext `401` (no session key was accepted).
+
+## SSE — `GET /api/events?sid=...&auth=...`
+
+`EventSource` can't set headers, so the sid and authenticator ride in the query
+(both opaque). The authenticator is bound to `GET` and the literal target
+`/api/events`. Each `progress` event data field is an envelope with AAD
+`event\nprogress`, sealed under the session key.
+
+## Media plane
+
+`<video>`/`<img>`/`<track>`/download links point at same-origin `/__m/...` URLs a
+**Service Worker** owns. It fetches the encrypted media (`X-Orca-Sid` +
+authenticator, plus `X-Orca-Range: <start>-<end>` for a plaintext byte range),
+decrypts the chunked AEAD stream, and hands the element plaintext. Each 64 KiB
+chunk is `AES-GCM(HKDF(session_key, "orca-osc-v2-media\0"‖resource), nonce=index,
+chunk)`; the server returns the covering chunks (capped to a 1 MiB window) as a
+plain `200` with `X-Orca-Plain-Len`, `X-Orca-Chunk`, and `X-Orca-Chunk-Index`
+headers. The token never appears in a media URL.
 
 ## Access Classes
 
@@ -53,6 +79,7 @@ buffered.
 | --- | --- | --- | --- |
 | `GET` | `/api/health` | Public | Version, yt-dlp version, public URL |
 | `POST` | `/api/clients/register` | Public | Register pending client passphrase |
+| `POST` | `/api/session` | Public | OSC handshake (ephemeral ECDH) |
 | `POST` | `/api/items` | Submitter | Probe, deduplicate, enqueue URL |
 | `GET` | `/api/items` | Owner | Paginated history |
 | `GET` | `/api/items/:slug` | Owner | One item |
@@ -66,11 +93,11 @@ buffered.
 | `POST` | `/api/queue/cancel` | Owner | Abandon every outstanding download (incl. paused) |
 | `GET`, `PUT` | `/api/items/:slug/resolutions` | Owner | Inspect/reconcile variants |
 | `POST` | `/api/items/:slug/public` | Owner | Create, update, or revoke share |
-| `GET` | `/api/items/:slug/file` | Owner query/header | Range stream or download |
-| `GET` | `/api/stream/:slug` | Owner query/header | Online playback proxy |
-| `GET` | `/api/stream/:slug/prepare` | Owner query/header | Warm stream URL cache |
+| `GET` | `/api/items/:slug/file` | Owner (OSC/loopback) | Encrypted range stream or download |
+| `GET` | `/api/stream/:slug` | Owner (OSC/loopback) | Encrypted online playback proxy |
+| `GET` | `/api/stream/:slug/prepare` | Owner (OSC/loopback) | Warm stream URL cache |
 | `GET` | `/api/p/:share_slug` | Capability | Live public file |
-| `GET` | `/api/events?key_id=...&auth=...` | Owner query | Encrypted SSE progress |
+| `GET` | `/api/events?sid=...&auth=...` | Owner (OSC) | Encrypted SSE progress |
 | `GET` | `/api/stats` | Owner | Download count, bytes, storage cap, paused count |
 | `GET` | `/api/logs` | Owner | Bounded recent errors |
 | `GET`, `PUT` | `/api/settings` | Owner | Runtime resolution/storage defaults |

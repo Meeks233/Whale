@@ -3,6 +3,8 @@
 mod archive;
 pub mod auth;
 mod clients;
+mod emedia;
+mod handshake;
 mod cookies;
 mod events;
 mod items;
@@ -30,6 +32,7 @@ pub struct AppState {
     pub errlog: crate::errlog::ErrorLog,
     pub stream_urls: crate::ytdlp::StreamUrlCache,
     pub subtitle_urls: crate::ytdlp::SubtitleCache,
+    pub sessions: crate::session::SessionStore,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -118,6 +121,9 @@ pub fn router(state: AppState) -> Router {
 
     let public = Router::new()
         .route("/api/health", get(items::health))
+        // Secure-channel handshake: establishes the forward-secret session key.
+        // Unauthenticated by design — it carries only ephemeral public keys.
+        .route("/api/session", post(handshake::hello))
         .route("/api/events", get(events::events))
         .route("/api/items/:slug/file", get(media::file))
         // One subtitle track for the player's <track> elements. Self-authorizes

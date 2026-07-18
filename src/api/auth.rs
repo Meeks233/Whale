@@ -2,10 +2,11 @@
 
 use super::AppState;
 use crate::error::AppError;
-use axum::extract::{Request, State};
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::HeaderMap;
 use axum::middleware::Next;
 use axum::response::Response;
+use std::net::SocketAddr;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AuthContext {
@@ -144,7 +145,12 @@ async fn run_authenticated(
         .map(|v| v.as_str())
         .unwrap_or(request.uri().path())
         .to_string();
-    let credential = authenticate(state, request.headers(), allow_client, &method, &target).await?;
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
+    let credential =
+        authenticate(state, request.headers(), peer, allow_client, &method, &target).await?;
     let encrypted_body = request
         .headers()
         .contains_key(crate::e2ee::HEADER_ENCRYPTED_BODY);
@@ -164,59 +170,137 @@ async fn run_authenticated(
     }
 }
 
-async fn authenticate(
+/// True when the connecting peer is on the machine's loopback interface, the
+/// only place the plaintext bearer fallback is honoured. An unknown peer (no
+/// connect-info) is treated as remote — fail closed.
+fn is_loopback(peer: Option<std::net::IpAddr>) -> bool {
+    peer.is_some_and(|ip| ip.is_loopback())
+}
+
+/// Authenticate a media request (`/file`, `/thumb`, `/stream`, `/subs/:lang`)
+/// that cannot go through the auth middleware because `<video>`/`<img>`/`<track>`
+/// elements can't attach headers — the Service Worker fetches these on their
+/// behalf and *can*. Returns:
+/// - `Ok(Some(key))` — a secure-channel session; the route must encrypt its bytes
+///   under `key` (the browser's SW decrypts them).
+/// - `Ok(None)` — the loopback plaintext fallback (`?token=`); serve plaintext,
+///   for local `curl`/debugging only.
+///
+/// `target` must be the request path (no query), which the SW mirrors in the
+/// authenticator's AAD.
+pub async fn authenticate_media(
     state: &AppState,
     headers: &HeaderMap,
-    allow_client: bool,
-    method: &str,
+    query: &str,
+    peer: Option<std::net::IpAddr>,
     target: &str,
-) -> Result<Credential, AppError> {
-    let encrypted = headers
-        .get(crate::e2ee::HEADER_E2EE)
-        .and_then(|v| v.to_str().ok())
-        == Some("1");
-    if encrypted {
-        let requested_id = headers
-            .get(crate::e2ee::HEADER_KEY_ID)
-            .and_then(|v| v.to_str().ok())
-            .ok_or(AppError::Unauthorized)?;
-        // The key id only *names* a key — it is public and replayable, so it
-        // never authenticates on its own. Every candidate must still prove it
-        // holds the key by opening its sealed authenticator.
+) -> Result<Option<[u8; 32]>, AppError> {
+    if let Some(sid) = headers.get(crate::e2ee::HEADER_SID).and_then(|v| v.to_str().ok()) {
         let authenticator = headers
             .get(crate::e2ee::HEADER_AUTH)
             .and_then(|v| v.to_str().ok())
             .ok_or(AppError::Unauthorized)?;
-        let now = crate::types::now_unix();
-        let owner_hash = crate::e2ee::auth_hash(&state.cfg.token);
-        if ct_eq(requested_id, &crate::e2ee::key_id(&owner_hash)) {
-            let key = crate::e2ee::encryption_key(&owner_hash);
-            crate::e2ee::verify_authenticator(&key, authenticator, method, target, now)?;
-            return Ok(Credential {
-                context: AuthContext { client_id: None },
-                encryption_key: Some(key),
-            });
+        let (_client_id, key) =
+            resolve_session(state, sid, authenticator, "GET", target, false).await?;
+        return Ok(Some(key));
+    }
+    if is_loopback(peer)
+        && extract_token(headers, query)
+            .as_deref()
+            .is_some_and(|t| ct_eq(t, &state.cfg.token))
+    {
+        return Ok(None);
+    }
+    Err(AppError::Unauthorized)
+}
+
+/// Resolve and verify a secure-channel session for one request, returning its
+/// identity and derived key. Shared by the auth middleware and the header-less
+/// media/SSE routes (which pass `allow_client = false`).
+///
+/// The sid names a session but proves nothing on its own — possession is proven
+/// by the sealed `authenticator`, which only a holder of the session key could
+/// have produced, bound to this method+target and single-use. An established
+/// session verifies against its known key; a freshly handshaken one is still
+/// *pending* with an unknown identity, so each candidate token's derived session
+/// key is tried and the one that opens the authenticator both authenticates and
+/// identifies the peer, promoting the session to active. A wrong candidate fails
+/// to open and never burns the authenticator's nonce.
+pub async fn resolve_session(
+    state: &AppState,
+    sid: &str,
+    authenticator: &str,
+    method: &str,
+    target: &str,
+    allow_client: bool,
+) -> Result<(Option<i64>, [u8; 32]), AppError> {
+    let now = crate::types::now_unix();
+
+    if let Some((client_id, key)) = state.sessions.active_key(sid) {
+        if client_id.is_some() && !allow_client {
+            return Err(AppError::Unauthorized);
         }
-        if allow_client {
-            for (client_id, stored_hash) in state.db.trusted_client_auth_hashes().await? {
-                let Some(hash) = crate::e2ee::auth_hash_from_hex(&stored_hash) else {
-                    continue;
-                };
-                if ct_eq(requested_id, &crate::e2ee::key_id(&hash)) {
-                    let key = crate::e2ee::encryption_key(&hash);
-                    crate::e2ee::verify_authenticator(&key, authenticator, method, target, now)?;
-                    return Ok(Credential {
-                        context: AuthContext {
-                            client_id: Some(client_id),
-                        },
-                        encryption_key: Some(key),
-                    });
-                }
-            }
-        }
-        return Err(AppError::Unauthorized);
+        crate::e2ee::verify_authenticator(&key, authenticator, method, target, now)?;
+        return Ok((client_id, key));
     }
 
+    let pending = state.sessions.pending(sid).ok_or(AppError::Unauthorized)?;
+    let owner_key = crate::e2ee::session_key(
+        &pending.shared_x,
+        &pending.n_c,
+        &pending.n_s,
+        &crate::e2ee::auth_hash(&state.cfg.token),
+    );
+    if crate::e2ee::verify_authenticator(&owner_key, authenticator, method, target, now).is_ok() {
+        state.sessions.activate(sid, owner_key, None);
+        return Ok((None, owner_key));
+    }
+    if allow_client {
+        for (client_id, stored_hash) in state.db.trusted_client_auth_hashes().await? {
+            let Some(psk) = crate::e2ee::auth_hash_from_hex(&stored_hash) else {
+                continue;
+            };
+            let key = crate::e2ee::session_key(&pending.shared_x, &pending.n_c, &pending.n_s, &psk);
+            if crate::e2ee::verify_authenticator(&key, authenticator, method, target, now).is_ok() {
+                state.sessions.activate(sid, key, Some(client_id));
+                return Ok((Some(client_id), key));
+            }
+        }
+    }
+    Err(AppError::Unauthorized)
+}
+
+async fn authenticate(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::IpAddr>,
+    allow_client: bool,
+    method: &str,
+    target: &str,
+) -> Result<Credential, AppError> {
+    // Secure-channel path: an opaque session id plus a sealed authenticator.
+    if let Some(sid) = headers
+        .get(crate::e2ee::HEADER_SID)
+        .and_then(|v| v.to_str().ok())
+    {
+        let authenticator = headers
+            .get(crate::e2ee::HEADER_AUTH)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AppError::Unauthorized)?;
+        let (client_id, key) =
+            resolve_session(state, sid, authenticator, method, target, allow_client).await?;
+        return Ok(Credential {
+            context: AuthContext { client_id },
+            encryption_key: Some(key),
+        });
+    }
+
+    // Plaintext bearer fallback — loopback only. Off the local machine the token
+    // must never travel in clear (a Cloudflare Tunnel edge would see it), so a
+    // remote request without a session is refused outright.
+    if !is_loopback(peer) {
+        return Err(AppError::Unauthorized);
+    }
     let Some(token) = header_token(headers) else {
         return Err(AppError::Unauthorized);
     };

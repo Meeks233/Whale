@@ -2,7 +2,7 @@
 // ../web/app.js by build.ts. Importing i18n for its side effect installs
 // window.i18n before any app code runs.
 import './i18n';
-import { decryptEvent, encryptedEventSourceUrl, encryptedFetch } from './e2ee';
+import { decryptEvent, encryptedEventSourceUrl, encryptedFetch, pushSessionToWorker } from './e2ee';
 
 type Params = Record<string, string | number>;
 
@@ -619,28 +619,56 @@ function itemPath(item: Item | number, suffix = ''): string {
   return '/api/items/' + encodeURIComponent(resolved.slug) + suffix;
 }
 
+// The media plane (video, thumbnails, subtitles, downloads) is served end-to-end
+// encrypted through the service worker: elements point at same-origin `/__m/...`
+// URLs the SW owns, and it fetches the ciphertext (adding the session id + a
+// sealed authenticator) and decrypts it — so Cloudflare never sees the token or
+// the plaintext bytes. See sw.ts + src/api/emedia.rs.
+//
+// When no SW controls the page (a fresh first visit before activation, or the
+// native app whose webview has no SW), fall back to the loopback `?token=` route,
+// which is honoured only for local peers.
+function swControls(): boolean {
+  return typeof navigator !== 'undefined' && !!navigator.serviceWorker?.controller;
+}
+
+function mediaUrl(kind: string, slug: string, extra?: string): string {
+  const segs = [kind, encodeURIComponent(slug)];
+  if (extra != null) segs.push(encodeURIComponent(extra));
+  return '/__m/' + segs.join('/');
+}
+
 function fileUrl(item: Item | number, download?: boolean): string {
+  const resolved = typeof item === 'number' ? state.items.get(item) : item;
+  const slug = resolved?.slug;
+  if (slug && swControls()) {
+    if (download) {
+      const name = resolved?.title ? '?name=' + encodeURIComponent(resolved.title) : '';
+      return mediaUrl('dl', slug) + name;
+    }
+    return mediaUrl('file', slug);
+  }
   const tok = encodeURIComponent(getToken());
   return apiUrl(itemPath(item, '/file') + '?token=' + tok + (download ? '&download=1' : ''));
 }
 
-// Thumbnail through the backend proxy/cache instead of the source CDN. The
-// server fetches the recorded thumbnail_url once, stashes it, and serves it —
-// so a browser (or a blocker) that refuses e.g. pbs.twimg.com still shows the
-// picture, and the CDN never sees the request. Token rides in the query, since
-// an <img> can't set headers. Returns '' when the item has no thumbnail slug.
+// Thumbnail through the backend proxy/cache instead of the source CDN. The server
+// fetches the recorded thumbnail_url once, stashes it, and serves it — so a
+// browser (or a blocker) that refuses e.g. pbs.twimg.com still shows the picture,
+// and the CDN never sees the request. Returns '' when the item has no thumbnail slug.
 function thumbUrl(item: Item): string {
   if (!item.thumbnail_url || !item.slug) return '';
+  if (swControls()) return mediaUrl('thumb', item.slug);
   const tok = encodeURIComponent(getToken());
   return apiUrl(itemPath(item, '/thumb') + '?token=' + tok);
 }
 
-// Online-playback proxy: the backend resolves the upstream URL (with cookies)
-// and streams the bytes back, so the browser plays through us instead of hitting
-// a stale, IP-bound CDN URL directly. Keyed by the item's unguessable slug (like
-// share links), never its sequential id, so the URL can't be used to enumerate
-// other items. Token rides in the query — a <video> can't set headers.
+// Online-playback proxy: the backend resolves the upstream URL (with cookies) and
+// streams the bytes back, so the browser plays through us instead of hitting a
+// stale, IP-bound CDN URL directly. Keyed by the item's unguessable slug (like
+// share links), never its sequential id.
 function streamUrl(slug: string): string {
+  if (swControls()) return mediaUrl('stream', slug);
   const tok = encodeURIComponent(getToken());
   return apiUrl('/api/stream/' + encodeURIComponent(slug) + '?token=' + tok);
 }
@@ -1871,14 +1899,14 @@ async function connectEvents(): Promise<void> {
   if (!token) { setServerStatus(false); return; }
   if (es) { es.close(); es = null; }
   const generation = ++eventGeneration;
-  const encrypted = await encryptedEventSourceUrl(apiUrl('/api/events'), token);
+  const encrypted = await encryptedEventSourceUrl(apiUrl('/api/events'), '/api/events', token);
   if (generation !== eventGeneration) return;
   es = new EventSource(encrypted.url);
   // Stream established → server is reachable (green breathing light).
   es.onopen = () => setServerStatus(true);
   es.addEventListener('progress', async (e) => {
     setServerStatus(true); // any delivered event also confirms liveness
-    try { patchRow(JSON.parse(await decryptEvent(encrypted.key, (e as MessageEvent).data))); } catch (_) { /* ignore */ }
+    try { patchRow(JSON.parse(await decryptEvent(encrypted.session, (e as MessageEvent).data))); } catch (_) { /* ignore */ }
   });
   // Stream dropped → red. EventSource retries a merely-stalled stream itself,
   // but on some (Android WebView) engines a connection that never opened — e.g.
@@ -5786,14 +5814,19 @@ async function loadSubtitles(id: number): Promise<void> {
     // fold) while this was in flight — don't graft stale tracks onto it.
     if (els.player.classList.contains('hidden')) return;
     if (playQueue.length && playQueue[playIndex]?.id !== id) return;
+    const slugForTrack = state.items.get(id)?.slug;
     const tok = encodeURIComponent(getToken());
     subs.forEach((s, i) => {
       const track = document.createElement('track');
       track.kind = 'subtitles';
       track.srclang = s.lang;
       track.label = s.label || s.lang;
-      // Token rides in the query — a <track> can't set headers, same as <video>.
-      track.src = apiUrl(itemPath(id, '/subs/' + encodeURIComponent(s.lang)) + '?token=' + tok);
+      // Through the SW media plane (decrypted to a text/vtt blob) when a worker
+      // controls the page; else the loopback `?token=` fallback. A <track> can't
+      // set headers, same as <video>.
+      track.src = slugForTrack && swControls()
+        ? mediaUrl('subs', slugForTrack, s.lang)
+        : apiUrl(itemPath(id, '/subs/' + encodeURIComponent(s.lang)) + '?token=' + tok);
       if (i === 0) track.default = true;
       els.playerVideo.appendChild(track);
     });
@@ -6123,6 +6156,18 @@ function focusItemBySlug(slug: string): void {
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => { /* ignore */ });
+  });
+  // Hand the worker a fresh session whenever it asks (it needs the session key to
+  // decrypt the media plane, and asks right after activation or an idle expiry).
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if ((e.data as { type?: string } | null)?.type === 'orca-need-session') pushSessionToWorker();
+  });
+  // A newly-activated worker taking control should get the current session too,
+  // and any rows rendered before it took control still point at the loopback
+  // `?token=` fallback — re-render them so their media routes through the worker.
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    pushSessionToWorker();
+    void softRefresh();
   });
 }
 

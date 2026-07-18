@@ -2,30 +2,29 @@
 
 // Orca service worker. Built to ../web/sw.js by build.ts. Registered at the
 // origin root (/sw.js) so its scope covers the whole app.
+//
+// Two jobs:
+//  1. App-shell cache (offline-friendly, network-first for code edits).
+//  2. The **media plane**. `<video>`/`<img>`/`<track>` can't attach auth headers
+//     or decrypt bytes, so they point at same-origin `/__m/...` URLs this worker
+//     owns. It fetches the encrypted media (adding the session id + a sealed
+//     authenticator), decrypts the chunked AEAD stream, and answers the element
+//     with plaintext — so Cloudflare only ever sees ciphertext. See src/api/emedia.rs.
 export {};
 declare const self: ServiceWorkerGlobalScope;
 
-// Cache name is versioned so activate() can purge stale generations. The fetch
-// handler below is network-first, so code edits load without bumping this.
-const CACHE = 'orca-shell-v6';
+import { authenticator, decryptChunk, mediaKey, sessionFromRaw, MEDIA_TAG, type Session } from './e2ee';
+
+const CACHE = 'orca-shell-v7';
 const SHELL = [
-  '/',
-  '/index.html',
-  '/app.js',
-  '/theme.js',
-  '/style.css',
-  '/manifest.webmanifest',
-  '/favicon.ico',
-  '/icons/favicon-32.png',
-  '/third-party-notices.txt',
-  '/icons/192.png',
-  '/icons/512.png',
+  '/', '/index.html', '/app.js', '/theme.js', '/style.css',
+  '/manifest.webmanifest', '/favicon.ico', '/icons/favicon-32.png',
+  '/third-party-notices.txt', '/icons/192.png', '/icons/512.png',
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE)
-      // Best-effort: don't fail install if an optional asset (e.g. an icon) is missing.
       .then((cache) => Promise.allSettled(SHELL.map((u) => cache.add(u))))
       .then(() => self.skipWaiting())
   );
@@ -39,23 +38,210 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// ---- Session hand-off from the app -----------------------------------------
+
+let session: Session | null = null;
+let waiters: Array<(s: Session) => void> = [];
+
+self.addEventListener('message', (event) => {
+  const data = event.data as { type?: string; base?: string; sid?: string; key?: string } | null;
+  // `base` is '' for a same-origin app — check for presence, not truthiness.
+  if (data?.type === 'orca-session' && typeof data.base === 'string' && data.sid && data.key) {
+    void sessionFromRaw(data.base, data.sid, data.key).then((s) => {
+      session = s;
+      waiters.splice(0).forEach((resolve) => resolve(s));
+    });
+  }
+});
+
+/// The current session, asking the app for one (and waiting briefly) if absent.
+async function getSession(): Promise<Session> {
+  if (session) return session;
+  const clients = await self.clients.matchAll({ includeUncontrolled: true });
+  clients.forEach((c) => c.postMessage({ type: 'orca-need-session' }));
+  return new Promise<Session>((resolve, reject) => {
+    waiters.push(resolve);
+    setTimeout(() => {
+      waiters = waiters.filter((w) => w !== resolve);
+      reject(new Error('no session'));
+    }, 5000);
+  });
+}
+
+// ---- Media plane ------------------------------------------------------------
+
+const CHUNK = 65536;
+
+interface Target { apiPath: string; resource: string; kind: 'video' | 'blob' | 'download'; }
+
+/// Map a `/__m/...` URL to its backend route, stream key label, and delivery mode.
+function route(parts: string[]): Target | null {
+  const [kind, slug, extra] = parts;
+  if (!slug) return null;
+  const s = decodeURIComponent(slug);
+  switch (kind) {
+    case 'file': return { apiPath: `/api/items/${encodeURIComponent(s)}/file`, resource: `file:${s}`, kind: 'video' };
+    case 'stream': return { apiPath: `/api/stream/${encodeURIComponent(s)}`, resource: `stream:${s}`, kind: 'video' };
+    case 'dl': return { apiPath: `/api/items/${encodeURIComponent(s)}/file`, resource: `file:${s}`, kind: 'download' };
+    case 'thumb': return { apiPath: `/api/items/${encodeURIComponent(s)}/thumb`, resource: `thumb:${s}`, kind: 'blob' };
+    case 'subs': {
+      if (!extra) return null;
+      const lang = decodeURIComponent(extra);
+      return { apiPath: `/api/items/${encodeURIComponent(s)}/subs/${encodeURIComponent(lang)}`, resource: `subs:${s}:${lang}`, kind: 'blob' };
+    }
+    default: return null;
+  }
+}
+
+interface WindowData { plainLen: number; windowStart: number; plaintext: Uint8Array<ArrayBuffer>; }
+
+/// Fetch and decrypt one encrypted window starting at plaintext byte `start`.
+async function fetchWindow(s: Session, t: Target, start: number, end?: number): Promise<WindowData> {
+  const auth = await authenticator(s.gcm, 'GET', t.apiPath);
+  const res = await fetch(`${s.base}${t.apiPath}`, {
+    headers: {
+      'X-Orca-Sid': s.sid,
+      'X-Orca-Auth': auth,
+      'X-Orca-Range': `${start}-${end == null ? '' : end}`,
+    },
+  });
+  if (res.status === 401) { session = null; throw new Error('session expired'); }
+  if (!res.ok || res.headers.get('X-Orca-E2EE') !== '1') throw new Error(`media fetch ${res.status}`);
+
+  const plainLen = Number(res.headers.get('X-Orca-Plain-Len') || '0');
+  const i0 = Number(res.headers.get('X-Orca-Chunk-Index') || '0');
+  const body = new Uint8Array(await res.arrayBuffer());
+  const key = await mediaKey(s.key, t.resource);
+
+  const out: Uint8Array[] = [];
+  let off = 0;
+  let idx = i0;
+  while (off < body.length) {
+    const ptLen = Math.min(CHUNK, plainLen - idx * CHUNK);
+    const ctLen = ptLen + MEDIA_TAG;
+    const ct = body.subarray(off, off + ctLen) as Uint8Array<ArrayBuffer>;
+    out.push(await decryptChunk(key, idx, ct));
+    off += ctLen;
+    idx += 1;
+  }
+  const total = out.reduce((n, c) => n + c.length, 0);
+  const plaintext = new Uint8Array(total);
+  let p = 0;
+  for (const c of out) { plaintext.set(c, p); p += c.length; }
+  return { plainLen, windowStart: i0 * CHUNK, plaintext };
+}
+
+/// Serve a seekable `<video>` range: one decrypted window as a `206`.
+async function serveVideo(s: Session, t: Target, range: string | null, ct: string): Promise<Response> {
+  const m = range && /bytes=(\d+)-(\d*)/.exec(range);
+  const start = m ? Number(m[1]) : 0;
+  const end = m && m[2] ? Number(m[2]) : undefined;
+  const w = await fetchWindow(s, t, start, end);
+  if (w.plainLen === 0) return new Response(null, { status: 200, headers: { 'Content-Type': ct } });
+
+  // Slice the decrypted window to exactly what the element asked for.
+  const from = Math.max(0, start - w.windowStart);
+  const to = end == null ? w.plaintext.length : Math.min(w.plaintext.length, end + 1 - w.windowStart);
+  const slice = w.plaintext.slice(from, Math.max(from, to));
+  const first = w.windowStart + from;
+  const last = first + slice.length - 1;
+  return new Response(slice, {
+    status: 206,
+    headers: {
+      'Content-Type': ct,
+      'Content-Range': `bytes ${first}-${last}/${w.plainLen}`,
+      'Content-Length': String(slice.length),
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+/// Serve a whole small resource (thumbnail, subtitle) as one decrypted blob.
+async function serveBlob(s: Session, t: Target, ct: string): Promise<Response> {
+  const w = await fetchWindow(s, t, 0);
+  const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
+  headers['Content-Type'] = t.resource.startsWith('subs:')
+    ? 'text/vtt; charset=utf-8'
+    : (ct || sniffImage(w.plaintext));
+  return new Response(w.plaintext, { status: 200, headers });
+}
+
+/// Serve a full file as a decrypted download, streaming window by window so a
+/// multi-gigabyte file never buffers whole in memory.
+async function serveDownload(s: Session, t: Target, name: string | null): Promise<Response> {
+  const first = await fetchWindow(s, t, 0);
+  const plainLen = first.plainLen;
+  let next = first.plaintext.length;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(first.plaintext); },
+    async pull(controller) {
+      if (next >= plainLen) { controller.close(); return; }
+      try {
+        const w = await fetchWindow(s, t, next);
+        if (w.plaintext.length === 0) { controller.close(); return; }
+        controller.enqueue(w.plaintext);
+        next += w.plaintext.length;
+      } catch (e) { controller.error(e); }
+    },
+  });
+  const disposition = name ? `attachment; filename*=UTF-8''${encodeURIComponent(name)}` : 'attachment';
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(plainLen),
+      'Content-Disposition': disposition,
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+function sniffImage(b: Uint8Array): string {
+  if (b[0] === 0xff && b[1] === 0xd8) return 'image/jpeg';
+  if (b[0] === 0x89 && b[1] === 0x50) return 'image/png';
+  if (b[0] === 0x47 && b[1] === 0x49) return 'image/gif';
+  if (b[0] === 0x52 && b[8] === 0x57) return 'image/webp';
+  return 'application/octet-stream';
+}
+
+async function handleMedia(req: Request, parts: string[], url: URL): Promise<Response> {
+  const t = route(parts);
+  if (!t) return new Response('bad media path', { status: 400 });
+  try {
+    const s = await getSession();
+    const ct = url.searchParams.get('ct') || '';
+    if (t.kind === 'download') return await serveDownload(s, t, url.searchParams.get('name'));
+    if (t.kind === 'blob') return await serveBlob(s, t, ct);
+    return await serveVideo(s, t, req.headers.get('Range'), ct || 'video/mp4');
+  } catch {
+    // A transient failure (no session yet, expiry) — let the element retry.
+    return new Response('media unavailable', { status: 503 });
+  }
+}
+
+// ---- Fetch routing ----------------------------------------------------------
+
 self.addEventListener('fetch', (event) => {
   const req = event.request;
   const url = new URL(req.url);
+  if (url.origin !== self.location.origin) return;
 
-  // Only handle same-origin GETs; everything else goes straight to the network.
-  if (req.method !== 'GET' || url.origin !== self.location.origin) return;
+  // Encrypted media plane.
+  if (url.pathname.startsWith('/__m/')) {
+    const parts = url.pathname.slice('/__m/'.length).split('/');
+    event.respondWith(handleMedia(req, parts, url));
+    return;
+  }
 
-  // Bypass the worker entirely for API traffic — don't call respondWith, so the
-  // browser fetches straight from the network. Piping API responses back through
-  // the worker was actively harmful: the `/api/events` SSE stream (and `/api/stream`
-  // media) are long-lived responses, and routing them through the worker's
-  // respondWith tied it up, stalling every `<img>` thumbnail load until the SSE's
-  // 15s keep-alive tick. Not handling these leaves data live AND unblocks images.
+  if (req.method !== 'GET') return;
+
+  // Bypass the worker for API traffic — SSE (`/api/events`) and any direct API
+  // call go straight to the network (routing long-lived responses through
+  // respondWith stalls the worker; see the thumbnail-load regression).
   if (url.pathname.startsWith('/api/')) return;
 
-  // App shell: network-first so code edits (app.js/style.css/index.html) load
-  // immediately; warm the cache and fall back to it only when offline.
+  // App shell: network-first so code edits load immediately; fall back offline.
   event.respondWith(
     fetch(req)
       .then((res) => {

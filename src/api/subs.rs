@@ -23,11 +23,12 @@
 use super::AppState;
 use crate::error::AppError;
 use crate::types::{Item, Status};
-use axum::extract::{Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
+use std::net::SocketAddr;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
 
@@ -175,8 +176,18 @@ pub async fn get(
     Path((slug, lang)): Path<(String, String)>,
     req: Request,
 ) -> Result<Response, AppError> {
-    check_token(&state, &req)?;
+    // Own the request parts before the first await so the handler future stays
+    // `Send` (a borrow of `Request` held across `.await` would not).
+    let headers = req.headers().clone();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let path = req.uri().path().to_string();
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip());
     drop(req);
+    let session_key =
+        super::auth::authenticate_media(&state, &headers, &query, peer, &path).await?;
     let item = state
         .db
         .find_by_slug(&slug)
@@ -189,15 +200,21 @@ pub async fn get(
         None => remote_track(&state, &item, &lang).await?,
     };
 
-    Ok((
-        [
-            (header::CONTENT_TYPE, "text/vtt; charset=utf-8"),
-            (header::CACHE_CONTROL, "private, no-store"),
-            (header::REFERRER_POLICY, "no-referrer"),
-        ],
-        body,
-    )
-        .into_response())
+    match session_key {
+        // Secure channel: seal the WebVTT; the Service Worker decrypts it to a
+        // `text/vtt` blob for the `<track>` element.
+        Some(key) => super::emedia::serve_bytes(&key, &format!("subs:{slug}:{lang}"), body.as_bytes()),
+        // Loopback plaintext fallback.
+        None => Ok((
+            [
+                (header::CONTENT_TYPE, "text/vtt; charset=utf-8"),
+                (header::CACHE_CONTROL, "private, no-store"),
+                (header::REFERRER_POLICY, "no-referrer"),
+            ],
+            body,
+        )
+            .into_response()),
+    }
 }
 
 /// Read a discovered on-disk sidecar and return it as WebVTT (SRT converted). The
@@ -251,24 +268,6 @@ async fn remote_track(state: &AppState, item: &Item, lang: &str) -> Result<Strin
     } else {
         srt_to_vtt(&raw)
     })
-}
-
-/// Token-gate a request, mirroring `media::file`'s auth (the token may ride in
-/// the query, since a `<track>` element can't set headers).
-///
-/// Deliberately synchronous: a borrow of `Request` held across an `.await` would
-/// make the handler future non-`Send`, so callers check first, then await.
-fn check_token(state: &AppState, req: &Request) -> Result<(), AppError> {
-    let query = req.uri().query().unwrap_or("");
-    let token = super::auth::extract_token(req.headers(), query);
-    if token
-        .as_deref()
-        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
-    {
-        Ok(())
-    } else {
-        Err(AppError::Unauthorized)
-    }
 }
 
 /// Convert SubRip to WebVTT. The two formats share a cue structure, so this is a

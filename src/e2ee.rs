@@ -1,4 +1,17 @@
-//! Token-derived application-layer encryption for authenticated JSON APIs.
+//! Forward-secret application-layer secure channel (Orca Secure Channel, "OSC").
+//! See docs/SECURITY.md.
+//!
+//! The transport (a Cloudflare Tunnel edge, or any TLS terminator) is treated as
+//! an active man-in-the-middle: nothing it can log — URL path/query, headers,
+//! bodies — may carry the token or any value reversible to it, and traffic it
+//! captured today must stay secret even if the token later leaks. That rules out
+//! the old static, token-derived encryption key: a session key is instead
+//! established per connection by an ephemeral P-256 ECDH exchange with the token
+//! mixed in as a pre-shared key (the mature Noise-`NNpsk0` / TLS-ECDHE-PSK
+//! construction), so the wire carries only ephemeral public keys, an opaque
+//! random session id, and ciphertext. This module holds the AEAD envelope, the
+//! per-request authenticator, HKDF key schedule, and the chunked media cipher;
+//! `src/session.rs` drives the handshake and session store.
 
 use crate::error::{AppError, AppResult};
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
@@ -9,17 +22,41 @@ use axum::http::{header, HeaderValue};
 use axum::response::Response;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const HEADER_E2EE: &str = "x-orca-e2ee";
-pub const HEADER_KEY_ID: &str = "x-orca-key-id";
+/// Opaque, server-issued session id. Replaces the old key id, which was a stable
+/// `SHA256(SHA256(token))` — a per-token tracking handle and an offline-guessing
+/// oracle. A session id is random, rotates every handshake, and reveals nothing.
+pub const HEADER_SID: &str = "x-orca-sid";
 pub const HEADER_ENCRYPTED_BODY: &str = "x-orca-encrypted-body";
 /// Proof-of-possession authenticator. See [`verify_authenticator`].
 pub const HEADER_AUTH: &str = "x-orca-auth";
+/// Plaintext byte range the Service Worker wants (`"start-end"`, end inclusive,
+/// or `"start-"` open). Sent as a custom header rather than HTTP `Range` so the
+/// server↦SW hop stays a plain `200` — the transport never sees Range semantics
+/// whose byte math wouldn't match the ciphertext body length.
+pub const HEADER_RANGE_REQ: &str = "x-orca-range";
+/// Response headers describing the encrypted-media layout to the Service Worker.
+pub const HEADER_PLAIN_LEN: &str = "x-orca-plain-len";
+pub const HEADER_CHUNK: &str = "x-orca-chunk";
+/// Index of the first chunk in the response body, so the SW knows each chunk's
+/// nonce and the plaintext offset the window starts at.
+pub const HEADER_CHUNK_INDEX: &str = "x-orca-chunk-index";
 const MAX_ENVELOPE_BYTES: usize = 3 * 1024 * 1024;
-const KID_DOMAIN: &[u8] = b"orca-e2ee-kid-v1\0";
-const KEY_DOMAIN: &[u8] = b"orca-e2ee-key-v1\0";
+
+/// HKDF `info` domains — one per key role, so a session key and a media key can
+/// never collide even off the same input.
+const SESSION_INFO: &[u8] = b"orca-osc-v2-session\0";
+const MEDIA_INFO: &[u8] = b"orca-osc-v2-media\0";
+
+/// Plaintext bytes per media chunk. Each sealed chunk is this plus a 16-byte GCM
+/// tag; the Service Worker and the media routes both hardcode it.
+pub const MEDIA_CHUNK: usize = 65536;
+/// AES-GCM tag length appended to every sealed chunk.
+pub const MEDIA_TAG: usize = 16;
 
 /// An authenticator older/newer than this is refused, bounding how long a
 /// captured one stays replayable to the size of the nonce cache's memory.
@@ -56,20 +93,72 @@ pub fn auth_hash_from_hex(value: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-pub fn key_id(hash: &[u8; 32]) -> String {
-    let digest = Sha256::new()
-        .chain_update(KID_DOMAIN)
-        .chain_update(hash)
-        .finalize();
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+/// Derive the forward-secret session key both peers share after the handshake.
+///
+/// `shared_x` is the X coordinate of the ephemeral P-256 ECDH point — the only
+/// high-entropy secret, and the source of forward secrecy: it exists only while
+/// both ephemeral private keys do. The token-derived `psk` is mixed into the
+/// HKDF `info` so only a token holder derives the same key (authentication),
+/// while the nonces (`n_c`, `n_s`) as salt make each session key unique even for
+/// a repeated ECDH point. An eavesdropper who never learns `shared_x` gains no
+/// offline guessing oracle for the token from any of the public handshake values.
+pub fn session_key(shared_x: &[u8; 32], n_c: &[u8], n_s: &[u8], psk: &[u8; 32]) -> [u8; 32] {
+    let mut salt = Vec::with_capacity(n_c.len() + n_s.len());
+    salt.extend_from_slice(n_c);
+    salt.extend_from_slice(n_s);
+    let mut info = Vec::with_capacity(SESSION_INFO.len() + psk.len());
+    info.extend_from_slice(SESSION_INFO);
+    info.extend_from_slice(psk);
+    let mut okm = [0u8; 32];
+    Hkdf::<Sha256>::new(Some(&salt), shared_x)
+        .expand(&info, &mut okm)
+        .expect("32 is a valid HKDF-SHA256 output length");
+    okm
 }
 
-pub fn encryption_key(hash: &[u8; 32]) -> [u8; 32] {
-    Sha256::new()
-        .chain_update(KEY_DOMAIN)
-        .chain_update(hash)
-        .finalize()
-        .into()
+/// Per-resource media sub-key, derived from the session key and a resource label.
+/// Keeping media under its own key (and out of the JSON key's domain) lets a
+/// chunk nonce be the plain chunk index: the `(stream_key, index)` pair never
+/// repeats across different plaintext within a session, which is all AES-GCM
+/// requires. `resource` must uniquely name the byte stream — e.g. `"file:<slug>"`
+/// vs `"thumb:<slug>"` — so two streams that share a slug get independent keys and
+/// their chunk-0 nonces never collide. The label is not secret.
+pub fn media_stream_key(session_key: &[u8; 32], resource: &str) -> [u8; 32] {
+    let mut info = Vec::with_capacity(MEDIA_INFO.len() + resource.len());
+    info.extend_from_slice(MEDIA_INFO);
+    info.extend_from_slice(resource.as_bytes());
+    let mut okm = [0u8; 32];
+    Hkdf::<Sha256>::new(None, session_key)
+        .expand(&info, &mut okm)
+        .expect("32 is a valid HKDF-SHA256 output length");
+    okm
+}
+
+/// Seal one media chunk under the stream key with a deterministic nonce = the
+/// chunk index (big-endian, right-aligned in the 12-byte nonce). Safe because
+/// `stream_key` is unique per session+slug, so no `(key, nonce)` pair is ever
+/// reused across differing plaintext. Output is `plaintext.len() + 16` bytes.
+pub fn seal_chunk(stream_key: &[u8; 32], index: u64, plaintext: &[u8]) -> AppResult<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(stream_key)
+        .map_err(|_| AppError::Internal("media cipher init failed".into()))?;
+    let mut nonce = [0u8; 12];
+    nonce[4..].copy_from_slice(&index.to_be_bytes());
+    cipher
+        .encrypt(Nonce::from_slice(&nonce), plaintext)
+        .map_err(|_| AppError::Internal("media chunk encryption failed".into()))
+}
+
+/// Inverse of [`seal_chunk`]; used by tests (the browser Service Worker opens
+/// chunks itself with WebCrypto).
+#[cfg(test)]
+pub fn open_chunk(stream_key: &[u8; 32], index: u64, ciphertext: &[u8]) -> AppResult<Vec<u8>> {
+    let cipher = Aes256Gcm::new_from_slice(stream_key)
+        .map_err(|_| AppError::Internal("media cipher init failed".into()))?;
+    let mut nonce = [0u8; 12];
+    nonce[4..].copy_from_slice(&index.to_be_bytes());
+    cipher
+        .decrypt(Nonce::from_slice(&nonce), ciphertext)
+        .map_err(|_| AppError::BadRequest("media chunk authentication failed".into()))
 }
 
 pub fn seal(key: &[u8; 32], plaintext: &[u8], aad: &[u8]) -> AppResult<Vec<u8>> {
@@ -238,17 +327,42 @@ pub async fn encrypt_response(
 mod tests {
     use super::*;
 
+    /// A deterministic session key standing in for a completed handshake.
+    fn test_key() -> [u8; 32] {
+        let psk = auth_hash("test-token");
+        session_key(&[7u8; 32], b"nonce-c-16-bytes", b"nonce-s-16-bytes", &psk)
+    }
+
     #[test]
-    fn token_derivation_is_domain_separated_and_stable() {
-        let hash = auth_hash("test-token");
-        assert_eq!(key_id(&hash).len(), 64);
-        assert_ne!(key_id(&hash).as_bytes(), encryption_key(&hash));
-        assert_eq!(auth_hash_from_hex(&hex(&hash)), Some(hash));
+    fn session_key_binds_psk_nonces_and_ecdh_point() {
+        let psk = auth_hash("test-token");
+        let base = session_key(&[7u8; 32], b"nc", b"ns", &psk);
+        // Different token, ECDH point, or nonces all yield a different key.
+        assert_ne!(base, session_key(&[7u8; 32], b"nc", b"ns", &auth_hash("other")));
+        assert_ne!(base, session_key(&[9u8; 32], b"nc", b"ns", &psk));
+        assert_ne!(base, session_key(&[7u8; 32], b"nX", b"ns", &psk));
+        // Stable for identical inputs (both peers must land on the same key).
+        assert_eq!(base, session_key(&[7u8; 32], b"nc", b"ns", &psk));
+        assert_eq!(auth_hash_from_hex(&hex(&psk)), Some(psk));
+    }
+
+    #[test]
+    fn media_chunks_round_trip_and_are_index_bound() {
+        let stream = media_stream_key(&test_key(), "abc123");
+        let chunk = b"the quick brown fox".repeat(1000);
+        let sealed = seal_chunk(&stream, 5, &chunk).unwrap();
+        assert_eq!(sealed.len(), chunk.len() + MEDIA_TAG);
+        assert_eq!(open_chunk(&stream, 5, &sealed).unwrap(), chunk);
+        // A chunk sealed at index 5 must not open at index 6 (reorder/splice guard).
+        assert!(open_chunk(&stream, 6, &sealed).is_err());
+        // A different item's stream key can't open it either.
+        let other = media_stream_key(&test_key(), "xyz789");
+        assert!(open_chunk(&other, 5, &sealed).is_err());
     }
 
     #[test]
     fn aes_gcm_round_trip_binds_aad_and_rejects_tampering() {
-        let key = encryption_key(&auth_hash("test-token"));
+        let key = test_key();
         let sealed = seal(&key, br#"{"ok":true}"#, b"GET\n/api/items").unwrap();
         assert_eq!(
             open(&key, &sealed, b"GET\n/api/items").unwrap(),
@@ -263,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn encrypted_response_is_marked_for_clients() {
-        let key = encryption_key(&auth_hash("test-token"));
+        let key = test_key();
         let response = Response::new(Body::from(r#"{"ok":true}"#));
         let response = encrypt_response(response, &key, b"200\n/api/test")
             .await
@@ -287,7 +401,7 @@ mod tests {
 
     #[test]
     fn authenticator_proves_key_possession_for_one_request() {
-        let key = encryption_key(&auth_hash("test-token"));
+        let key = test_key();
         let now = 1_700_000_000;
         let auth = authenticator(&key, "DELETE", "/api/items/abc", now, "nonce-a");
         assert!(verify_authenticator(&key, &auth, "DELETE", "/api/items/abc", now).is_ok());
@@ -298,8 +412,8 @@ mod tests {
     /// authenticator can be produced, so a bodyless DELETE cannot be forged.
     #[test]
     fn authenticator_from_a_different_key_is_refused() {
-        let owner = encryption_key(&auth_hash("test-token"));
-        let attacker = encryption_key(&auth_hash("guessed-token"));
+        let owner = test_key();
+        let attacker = session_key(&[7u8; 32], b"nonce-c-16-bytes", b"nonce-s-16-bytes", &auth_hash("guessed-token"));
         let now = 1_700_000_000;
         let forged = authenticator(&attacker, "DELETE", "/api/items/abc", now, "nonce-b");
         assert!(verify_authenticator(&owner, &forged, "DELETE", "/api/items/abc", now).is_err());
@@ -307,7 +421,7 @@ mod tests {
 
     #[test]
     fn authenticator_cannot_be_lifted_onto_another_route_or_method() {
-        let key = encryption_key(&auth_hash("test-token"));
+        let key = test_key();
         let now = 1_700_000_000;
         let auth = authenticator(&key, "GET", "/api/health", now, "nonce-c");
         assert!(verify_authenticator(&key, &auth, "DELETE", "/api/items/abc", now).is_err());
@@ -317,7 +431,7 @@ mod tests {
 
     #[test]
     fn authenticator_is_single_use_and_time_bound() {
-        let key = encryption_key(&auth_hash("test-token"));
+        let key = test_key();
         let now = 1_700_000_000;
         let auth = authenticator(&key, "POST", "/api/items/x/retry", now, "nonce-d");
         assert!(verify_authenticator(&key, &auth, "POST", "/api/items/x/retry", now).is_ok());
@@ -332,7 +446,7 @@ mod tests {
 
     #[test]
     fn malformed_authenticators_are_refused() {
-        let key = encryption_key(&auth_hash("test-token"));
+        let key = test_key();
         let now = 1_700_000_000;
         assert!(verify_authenticator(&key, "", "GET", "/api/items", now).is_err());
         assert!(verify_authenticator(&key, "not-base64!!", "GET", "/api/items", now).is_err());
