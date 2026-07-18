@@ -505,6 +505,14 @@
             <span class="permission-copy"><strong data-i18n="settings.permBackground">Background activity</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
             <span class="permission-result" aria-hidden="true"></span>
           </button>
+          <!-- Clipboard: web-only (hidden on the native app via CSS). Granting it
+               lets the paste box and link-grabber read URLs without a per-read
+               prompt. -->
+          <button class="permission-item" type="button" data-permission="clipboard" data-state="checking">
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></span>
+            <span class="permission-copy"><strong data-i18n="settings.permClipboard">Clipboard</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+            <span class="permission-result" aria-hidden="true"></span>
+          </button>
           <!-- Storage: needed before Save can write anything at all. On Android
                11+ this opens the "All files access" screen, not a dialog. -->
           <button class="permission-item" type="button" data-permission="storage" data-state="checking">
