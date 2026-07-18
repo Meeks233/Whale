@@ -487,9 +487,25 @@ async fn run_job(
     // empty set both mean "no cap" here — an empty set never reaches a download
     // in the first place (submit keeps it stream-only).
     let cap = match variant {
-        Some(h) => Some(h),
+        Some(h) => {
+            // A variant is a resolution upgrade against an already-completed item.
+            // Its status never flips to Running, so the card's live chip has only
+            // `target_height` to name the quality being fetched — record the exact
+            // height this variant pins so the chip reads e.g. "1080p", not a bare
+            // spinner, for any client that (re)loads the row mid-download.
+            if let Err(e) = db.set_target_height(id, Some(h)).await {
+                tracing::warn!(job_id = id, error = %e, "failed to record variant target height");
+            }
+            Some(h)
+        }
         None => {
-            let heights = resolve_max_heights(cfg, db, &sites, &item.webpage_url).await;
+            // A prepare-card submission pins one height for this item (goal 4):
+            // honour it as the cap in place of the settings ladder. `Some(0)` is an
+            // explicit "highest available", so it caps at nothing like HIGHEST does.
+            let heights = match item.requested_height {
+                Some(h) => crate::resolution::HeightSet::from_heights(&[h]).unwrap_or_default(),
+                None => resolve_max_heights(cfg, db, &sites, &item.webpage_url).await,
+            };
             // What this run is aiming for, snapped against the heights the source
             // actually offers, and recorded for the card's live chip. It is NOT the
             // cap below: the cap can be "no cap" (HIGHEST) or a 4320 the source
@@ -554,6 +570,30 @@ async fn run_job(
         // now would race that caller and clobber it; exit quietly instead.
         Err(crate::ytdlp::YtdlpError::Cancelled) => {
             tracing::info!(job_id = id, variant = ?variant, "download cancelled");
+            // A cancelled PRIMARY exits quietly: its pause/cancel handler already
+            // wrote the item's new status, and a tick now would race that. A
+            // cancelled VARIANT is different — it runs against an item whose status
+            // never changed, so nothing else tells the clients the live chip is
+            // done. Emit a terminal tick carrying the item's unchanged status. This
+            // runs AFTER `forwarder.abort()`, so it is guaranteed to be the last
+            // event for this job — no in-flight running tick can re-arm the row.
+            if variant.is_some() {
+                let status = db
+                    .get(id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|it| it.status)
+                    .unwrap_or(Status::Completed);
+                let _ = events.send(ProgressEvent {
+                    id,
+                    status,
+                    percent: None,
+                    speed: None,
+                    eta: None,
+                    phase: None,
+                });
+            }
         }
         // yt-dlp skipped the download because the archive already has this key (a
         // re-submit / force of something already downloaded). Don't fail the item:

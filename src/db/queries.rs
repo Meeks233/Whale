@@ -45,6 +45,7 @@ fn row_to_item(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<Item> {
         filesize: row.try_get("filesize")?,
         height: row.try_get("height")?,
         target_height: row.try_get("target_height")?,
+        requested_height: row.try_get("requested_height")?,
         source_max_height: row.try_get("source_max_height")?,
         source,
         status,
@@ -83,7 +84,7 @@ fn filepath_exists(filepath: &Option<String>) -> bool {
 const SELECT_COLS: &str =
     "id, public_slug AS resource_slug, extractor, video_id, archive_key, title, uploader, \
     webpage_url, thumbnail_url, duration, filepath, filesize, height, target_height, \
-    source_max_height, source, \
+    requested_height, source_max_height, source, \
     status, error, created_at, completed_at, public, share_slug, public_until, public_hits, \
     playlist_index, \
     COALESCE((SELECT SUM(filesize) FROM item_resolutions WHERE item_id = items.id), filesize, 0) \
@@ -209,6 +210,17 @@ pub(super) async fn set_completed(
 /// Record the height a starting download is aiming for (see `Item::target_height`).
 pub(super) async fn set_target_height(db: &Db, id: i64, height: Option<i64>) -> anyhow::Result<()> {
     sqlx::query("UPDATE items SET target_height = ? WHERE id = ?")
+        .bind(height)
+        .bind(id)
+        .execute(&db.pool)
+        .await?;
+    Ok(())
+}
+
+/// Record the prepare-card resolution override for an item (see
+/// `Item::requested_height`). `Some(0)` pins "highest available".
+pub(super) async fn set_requested_height(db: &Db, id: i64, height: Option<i64>) -> anyhow::Result<()> {
+    sqlx::query("UPDATE items SET requested_height = ? WHERE id = ?")
         .bind(height)
         .bind(id)
         .execute(&db.pool)

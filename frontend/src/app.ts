@@ -294,6 +294,10 @@ const els = {
   clipList: byId('clip-list'),
   clipSub: byId('clip-sub'),
   submitForm: byId<HTMLFormElement>('submit-form'),
+  stage: byId('stage'),
+  stageList: byId('stage-list'),
+  stageDownload: byId<HTMLButtonElement>('stage-download'),
+  stageCancel: byId<HTMLButtonElement>('stage-cancel'),
   url: byId<HTMLInputElement>('url'),
   submitBtn: byId<HTMLButtonElement>('submit-btn'),
   search: byId<HTMLInputElement>('search'),
@@ -784,10 +788,19 @@ function actionsHtml(item: Item): string {
   // delete / save / share, so the button under your thumb doesn't move as an item
   // completes. Save and share are absent for the reason they'd be useless: there
   // is no file to hand over yet.
-  if (item.status === 'queued' || item.status === 'running') {
+  // A resolution-upgrade job against an already-completed item never flips the
+  // stored status to running, so its live signal is resJobLive (the SSE tick),
+  // not `status`. Treat it exactly like a first-time download: the whole row
+  // converts to download mode — animated chip plus the three stop buttons — so
+  // the capsule AND the right-side buttons switch together, not just the capsule.
+  const upgrade = resJobLive(item);
+  if (item.status === 'queued' || item.status === 'running' || upgrade) {
     const cancel = `<button class="act act-cancel" data-act="cancel" data-id="${item.id}" aria-label="${esc(t('item.cancel'))}" title="${esc(t('item.cancel'))}">${CANCEL_SVG}</button>`;
     const pause = `<button class="act" data-act="pause" data-id="${item.id}" aria-label="${esc(t('item.pause'))}" title="${esc(t('item.pause'))}">${PAUSE_SVG}</button>`;
-    return `<div class="actions">${dlChipHtml(item)}${del}${cancel}${pause}</div>`;
+    // An upgrade keeps the completed item's existing file on disk, so its size
+    // chip stays beside the live chip; a first download has no file yet.
+    const size = upgrade ? metaChipsHtml(item) : '';
+    return `<div class="actions">${size}${dlChipHtml(item)}${del}${cancel}${pause}</div>`;
   }
   // Pause / resume, only while there's a transfer to hold or release. A paused
   // item keeps its partial file, so resuming continues rather than restarts.
@@ -817,16 +830,10 @@ function actionsHtml(item: Item): string {
       <button class="act act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
       : `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.download'))}" title="${esc(t('item.download'))}">${RETRY_SVG}</button>`;
   }
-  // Order: size+resolution capsule · pause/resume · delete · save/share.
-  // While a resolution-upgrade job runs against this already-completed item its
-  // stored status never flips to running, so the resolution slot would otherwise
-  // freeze on the old number. Swap in the live download chip — the same animated
-  // spinner + target height a first download shows — for the duration of the job,
-  // keeping the size chip beside it (the merge is only for the resting state).
-  const sizeRes = resJobLive(item)
-    ? `${metaChipsHtml(item)}${dlChipHtml(item)}`
-    : sizeResHtml(item);
-  return `<div class="actions">${sizeRes}${hold}${del}${mediaActions}</div>`;
+  // Order: size+resolution capsule · pause/resume · delete · save/share. A live
+  // resolution-upgrade job is handled above (the whole row converts to download
+  // mode), so by here the item is genuinely at rest and shows the merged capsule.
+  return `<div class="actions">${sizeResHtml(item)}${hold}${del}${mediaActions}</div>`;
 }
 
 // Play affordance shown on a finished thumbnail (bottom-right). Tapping the
@@ -1277,13 +1284,20 @@ function patchRow(ev: ProgressEv): void {
   const persisted = state.items.get(ev.id);
   // A resolution-upgrade job runs against an item that is already terminal
   // (completed / canceled): its stored status never changes, so actionsHtml would
-  // keep painting the frozen static resolution chip. Rebuild the row the moment
-  // the job goes live (the Running-with-no-percent start tick) so the resolution
-  // slot becomes the animated live download chip — resJobLive reads the tick we
-  // just recorded above. Done before the badge/bar patches below so they land on
-  // the fresh DOM; rowSig dedup keeps later ticks from re-rendering, so the
-  // spinner animates continuously until the job reaches a terminal state.
-  if (persisted && ev.status === 'running' && ev.percent == null
+  // keep painting the frozen static resolution chip and the resting save/share
+  // buttons. Rebuild the row the moment the job goes live so the whole action row
+  // converts to download mode — resJobLive reads the tick we just recorded above.
+  //
+  // Keyed on the not-live → live TRANSITION, not on a null-percent start tick: a
+  // variant download emits neither a synthetic start event nor a status flip, so
+  // its first observable tick is an ordinary Running-with-a-percent. Rebuilding on
+  // the transition catches that first tick; `wasLive` being true thereafter keeps
+  // later ticks from re-rendering, so the spinner animates continuously until the
+  // job reaches a terminal state. Done before the badge/bar patches below so they
+  // land on the fresh DOM.
+  const wasLive = !!prevP && (prevP.status === 'running' || prevP.status === 'queued');
+  const nowLive = ev.status === 'running' || ev.status === 'queued';
+  if (persisted && nowLive && !wasLive
       && (persisted.status === 'completed' || persisted.status === 'canceled')) {
     upsertRow(persisted, false);
   }
@@ -1621,13 +1635,57 @@ function parseLinks(text: string): string[] {
 // Submit every link in the box, one at a time. Sequential rather than parallel:
 // the backend paces downloads politely, and a burst of concurrent probes is
 // exactly the batch-downloader signature the queue works to avoid.
-async function submitInput(): Promise<void> {
+// ---- Manual prepare stage (goal 4) ----------------------------------------
+// The Download button no longer submits behind the user's back: it probes the
+// entered link(s) into prepare cards shown in a staging area above the search bar
+// (which separates the staged cards from the downloaded history), each with a
+// thumbnail and a resolution picker. A click on the stage's own Download button
+// batch-submits the selected cards. `prepCardEl` / `probePrepEntries` /
+// `submitPrepEntries` are shared with the clipboard modal (defined later; hoisted).
+let stageEntries: PrepEntry[] = [];
+let stageBusy = false;
+
+function clearStage(): void {
+  stageEntries = [];
+  els.stageList.textContent = '';
+  els.stage.classList.add('hidden');
+}
+
+async function stageInput(): Promise<void> {
+  if (stageBusy) return;
   const raw = els.url.value.trim();
   if (!raw) return;
+  if (!getToken()) { showTokenField(false); toast(t('toast.setToken'), 'error'); return; }
   const links = parseLinks(raw);
-  // A lone unparseable string still goes to the backend, which surfaces the real
-  // error — silently dropping it would be worse than a clear "probe failed".
-  for (const link of (links.length ? links : [raw])) await submitUrl(link);
+  // A lone unparseable string still goes straight to the backend, which surfaces
+  // the real error — silently dropping it would be worse than a clear "probe fail".
+  if (!links.length) { await submitUrl(raw); els.url.value = ''; return; }
+  const shown = links.slice(0, CLIP_MAX_LINKS);
+  stageBusy = true;
+  setSubmitBusy(true);
+  els.stage.classList.remove('hidden');
+  els.stageList.textContent = '';
+  const loading = document.createElement('div');
+  loading.className = 'clip-loading';
+  loading.textContent = t('clip.loading');
+  els.stageList.appendChild(loading);
+  els.stageDownload.disabled = true;
+  try {
+    stageEntries = await probePrepEntries(shown);
+  } catch (e) {
+    stageBusy = false;
+    setSubmitBusy(false);
+    if (isUnauthorized(e)) { clearStage(); return; }
+    stageEntries = [];
+  }
+  stageBusy = false;
+  setSubmitBusy(false);
+  els.stageList.textContent = '';
+  if (!stageEntries.length) { clearStage(); toast(t('toast.probeFail'), 'error'); return; }
+  for (const entry of stageEntries) els.stageList.appendChild(prepCardEl(entry));
+  if (links.length > shown.length) toast(t('clip.capped', { n: links.length - shown.length }), 'info');
+  els.stageDownload.disabled = false;
+  els.url.value = '';
 }
 
 // Submit-button working state: the download glyph swaps to the shared spinner
@@ -1645,15 +1703,18 @@ function setSubmitBusy(busy: boolean): void {
   els.submitBtn.innerHTML = on ? SPINNER_SVG : SUBMIT_ICON;
 }
 
-async function submitUrl(url: string): Promise<void> {
+async function submitUrl(url: string, maxHeight?: number | null): Promise<void> {
   if (!url) return;
   if (!getToken()) { showTokenField(false); toast(t('toast.setToken'), 'error'); return; }
   setSubmitBusy(true);
   try {
+    // A prepare card can pin one resolution for this submission (goal 4); leaving
+    // it unset lets the settings ladder decide server-side, exactly as before.
+    const options = maxHeight == null ? {} : { max_height: maxHeight };
     const res = await apiFetch('/api/items', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url, options: {} }),
+      body: JSON.stringify({ url: url, options }),
     });
     const data = await res.json().catch(() => ({}));
     if (res.status === 422 || (data && data.error === 'probe_failed')) {
@@ -3383,11 +3444,38 @@ async function saveResolutions(): Promise<void> {
     // upgrade is invisible where the user actually watches it. Flag it now; the
     // pull happens once the download lands (see runPendingLocalUpgrade).
     flagLocalUpgrade(target, heights);
+    // Flip the card into download mode NOW, without waiting for the first SSE tick
+    // (up to a poll away): a variant job sends no synthetic start event, so the row
+    // would otherwise sit on its resting capsule + save/share buttons until real
+    // bytes flow. Seed a live progress tick and the target height (tallest queued),
+    // then rebuild — resJobLive then reads the seeded tick, so the capsule shows the
+    // target resolution with its spinner and the three buttons convert immediately.
+    const queuedHeights: number[] = (data && data.queued) || [];
+    const it0 = state.items.get(target);
+    const optimisticTarget = queuedHeights.length ? Math.max(...queuedHeights) : null;
+    if (it0 && optimisticTarget && (it0.status === 'completed' || it0.status === 'canceled')) {
+      it0.target_height = optimisticTarget;
+      const prev = state.progress.get(target);
+      state.progress.set(target, {
+        percent: null, speed: '', eta: '', phase: '', status: 'queued', shown: prev ? prev.shown : 0,
+      });
+      upsertRow(it0, false);
+    }
     // Refetch so the card's resolution label/size reflect the new highest kept
     // version immediately (removals repoint the primary server-side; Req 3).
     apiFetch(itemPath(target))
       .then((r) => (r.ok ? r.json() : null))
-      .then((it) => { if (it) upsertRow(it, false); })
+      .then((it) => {
+        if (!it) return;
+        // While this upgrade is live the chip must name the height WE just queued,
+        // not whatever target_height the backend still holds — that field only
+        // updates once the variant job starts, so an early refetch carries either
+        // null (never set) or a stale value left over from a previous upgrade of
+        // the same item (which would mislabel the chip, e.g. show 4K for a 2K
+        // fetch). The freshly-requested target always wins for the duration.
+        if (optimisticTarget && resJobLive(it)) it.target_height = optimisticTarget;
+        upsertRow(it, false);
+      })
       .catch(() => { /* SSE / next load will catch up */ });
   } catch (e) {
     if (!isUnauthorized(e)) toast('Network error', 'error');
@@ -3896,8 +3984,17 @@ if (els.settingsSave) {
 
 els.submitForm.addEventListener('submit', (e) => {
   e.preventDefault();
-  submitInput();
+  void stageInput();
 });
+
+// Stage actions: Download batch-submits the selected prepare cards; Clear discards
+// the staging area without downloading anything.
+els.stageDownload.addEventListener('click', async () => {
+  const entries = stageEntries.slice();
+  clearStage();
+  await submitPrepEntries(entries);
+});
+els.stageCancel.addEventListener('click', clearStage);
 
 // Read clipboard text across platforms: the Tauri clipboard-manager plugin in the
 // native app (reliable inside the Android WebView, which restricts the web API),
@@ -3950,7 +4047,28 @@ if (els.pasteBtn) {
 // the same content. Cleared implicitly when the clipboard text changes.
 let lastClipText = '';
 let clipOpen = false;
-let clipReadyLinks: string[] = [];
+
+// Cooldown: once a link is declined (goal 2), don't auto-offer it again for 12h,
+// even across sessions or after the clipboard cycles away and back. Persisted as a
+// { url: dismissedAtMs } map in localStorage, pruned of stale entries on write.
+const CLIP_COOLDOWN_MS = 12 * 60 * 60 * 1000;
+const CLIP_COOLDOWN_KEY = 'orca.clipCooldown';
+function loadClipCooldowns(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem(CLIP_COOLDOWN_KEY) || '{}') || {}; }
+  catch (_) { return {}; }
+}
+function clipInCooldown(url: string): boolean {
+  const t0 = loadClipCooldowns()[url];
+  return typeof t0 === 'number' && Date.now() - t0 < CLIP_COOLDOWN_MS;
+}
+function markClipCooldown(urls: string[]): void {
+  if (!urls.length) return;
+  const m = loadClipCooldowns();
+  const now = Date.now();
+  for (const u of urls) m[u] = now;
+  for (const k of Object.keys(m)) if (now - (m[k] ?? 0) >= CLIP_COOLDOWN_MS) delete m[k];
+  try { localStorage.setItem(CLIP_COOLDOWN_KEY, JSON.stringify(m)); } catch (_) { /* quota */ }
+}
 
 // Hosts of every ENABLED website, lower-cased — the whitelist a copied link must
 // match before we offer to grab it.
@@ -3962,6 +4080,11 @@ function linkMatchesWhitelist(url: string): boolean {
     .flatMap((w) => w.hosts.map((h) => h.toLowerCase()));
   return hosts.some((h) => !!h && (host === h || host.endsWith('.' + h)));
 }
+
+// Cap on links auto-offered at once so a clipboard full of URLs can't paint an
+// unbounded, screen-blowing list (goal 3). Extras beyond the cap are noted, not
+// probed — the user can paste the rest deliberately.
+const CLIP_MAX_LINKS = 25;
 
 async function detectClipboard(): Promise<void> {
   if (clipOpen || !getToken() || document.hidden) return;
@@ -3975,9 +4098,9 @@ async function detectClipboard(): Promise<void> {
   const links = parseLinks(text).filter(linkMatchesWhitelist);
   if (!links.length) return;
   // Skip anything already staged in the input, so we don't nag about links the user
-  // is already about to submit.
+  // is already about to submit; and anything still inside its 12h decline cooldown.
   const staged = els.url.value;
-  const fresh = links.filter((l) => staged.indexOf(l) < 0);
+  const fresh = links.filter((l) => staged.indexOf(l) < 0 && !clipInCooldown(l));
   if (!fresh.length) return;
   await showClipConfirm(fresh);
 }
@@ -3989,87 +4112,202 @@ interface ClipPreview {
   site_name?: string | null;
   extractor?: string;
   available_heights?: number[];
+  default_height?: number | null;
+  thumbnail?: string | null;
   duplicate?: boolean;
 }
 
-async function showClipConfirm(links: string[]): Promise<void> {
-  clipOpen = true;
-  clipReadyLinks = links;
-  els.clipList.textContent = '';
-  els.clipSub.textContent = t('clip.loading');
-  els.clipConfirmBtn.disabled = true;
-  const loading = document.createElement('div');
-  loading.className = 'clip-loading';
-  loading.textContent = t('clip.loading');
-  els.clipList.appendChild(loading);
-  openModal(els.clipConfirm);
-  // Probe each link for metadata, sequentially (the politeness submit already uses).
-  // A multi-video post probes into several entries — each becomes its own row.
-  const rows: { url: string; meta: ClipPreview | null }[] = [];
-  for (const url of links) {
+// One prepare card per URL: the probed primary entry is the face, any siblings of
+// a multi-video post are noted as "+N more". Selection (default on) and the chosen
+// resolution live here so both the clipboard modal and the manual stage share one
+// card component and one submit path.
+interface PrepEntry {
+  url: string;
+  meta: ClipPreview | null;
+  extra: number;
+  selected: boolean;
+  height: number; // 0 = highest available; seeded from the settings-resolved default
+}
+
+// Probe URLs into prepare entries, sequentially (the politeness submit uses).
+// Rethrows only on auth failure so the caller can bail; a probe miss just yields a
+// bare (metadata-less) card the user can still choose to download.
+async function probePrepEntries(urls: string[]): Promise<PrepEntry[]> {
+  const out: PrepEntry[] = [];
+  for (const url of urls) {
+    let meta: ClipPreview | null = null;
+    let extra = 0;
     try {
       const res = await apiFetch('/api/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, options: {} }),
       });
-      if (!res.ok) { rows.push({ url, meta: null }); continue; }
-      const data = await res.json();
-      const entries: ClipPreview[] = Array.isArray(data.previews) ? data.previews : [];
-      if (!entries.length) rows.push({ url, meta: null });
-      else for (const m of entries) rows.push({ url, meta: m });
+      if (res.ok) {
+        const data = await res.json();
+        const entries: ClipPreview[] = Array.isArray(data.previews) ? data.previews : [];
+        meta = entries[0] ?? null;
+        extra = Math.max(0, entries.length - 1);
+      }
     } catch (e) {
-      if (isUnauthorized(e)) { closeModal(els.clipConfirm); clipOpen = false; return; }
-      rows.push({ url, meta: null });
+      if (isUnauthorized(e)) throw e;
     }
+    out.push({ url, meta, extra, selected: true, height: meta?.default_height ?? 0 });
+  }
+  return out;
+}
+
+// The shared prepare card. Built with DOM methods (textContent / data-URI src),
+// never innerHTML, because the title/uploader/thumbnail are attacker-influenced.
+// Reuses the history card's shape (thumbnail + body) so it reads as "a video".
+function prepCardEl(entry: PrepEntry): HTMLElement {
+  const card = document.createElement('div');
+  card.className = 'prep-card';
+  card.classList.toggle('selected', entry.selected);
+
+  const check = document.createElement('div');
+  check.className = 'prep-check';
+  check.setAttribute('aria-hidden', 'true');
+  card.appendChild(check);
+
+  const m = entry.meta;
+  if (m?.thumbnail) {
+    const img = document.createElement('img');
+    img.className = 'prep-thumb';
+    img.src = m.thumbnail; // inline data: URI from the backend (goal 1)
+    img.alt = '';
+    img.loading = 'lazy';
+    card.appendChild(img);
+  } else {
+    const ph = document.createElement('div');
+    ph.className = 'prep-thumb prep-thumb-empty';
+    card.appendChild(ph);
+  }
+
+  const body = document.createElement('div');
+  body.className = 'prep-body';
+
+  const title = document.createElement('div');
+  title.className = 'prep-title';
+  title.textContent = m?.title || entry.url;
+  body.appendChild(title);
+
+  const sub = document.createElement('div');
+  sub.className = 'prep-sub';
+  const bits: string[] = [];
+  if (m?.site_name) bits.push(m.site_name);
+  else if (m?.extractor) bits.push(m.extractor);
+  if (m?.uploader) bits.push(m.uploader);
+  if (m?.duration) bits.push(fmtDuration(m.duration));
+  if (entry.extra > 0) bits.push(t('prep.more', { n: entry.extra }));
+  sub.textContent = bits.join('  ·  ');
+  body.appendChild(sub);
+
+  const row = document.createElement('div');
+  row.className = 'prep-row';
+  row.appendChild(buildResSelect(entry));
+  if (m?.duplicate) {
+    const dup = document.createElement('span');
+    dup.className = 'prep-dup';
+    dup.textContent = t('clip.duplicate');
+    row.appendChild(dup);
+  }
+  body.appendChild(row);
+  card.appendChild(body);
+
+  // Tapping the card toggles its selection (reusing the multi-select mental model,
+  // goal 3), except when the tap is on the resolution picker.
+  card.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('.prep-res')) return;
+    entry.selected = !entry.selected;
+    card.classList.toggle('selected', entry.selected);
+  });
+  return card;
+}
+
+// The per-card resolution picker: "Best available" plus every concrete height the
+// source offers, seeded to the settings-resolved default but switchable here
+// (goal 4). Writes the choice back onto the entry.
+function buildResSelect(entry: PrepEntry): HTMLSelectElement {
+  const sel = document.createElement('select');
+  sel.className = 'prep-res';
+  sel.setAttribute('aria-label', t('res.pick'));
+  const best = document.createElement('option');
+  best.value = '0';
+  best.textContent = t('prep.best');
+  sel.appendChild(best);
+  const uniq = Array.from(new Set((entry.meta?.available_heights || []).filter((h) => h > 0)))
+    .sort((a, b) => b - a);
+  for (const h of uniq) {
+    const o = document.createElement('option');
+    o.value = String(h);
+    o.textContent = resLabel(h);
+    sel.appendChild(o);
+  }
+  sel.value = String(entry.height);
+  if (sel.selectedIndex < 0) { sel.value = '0'; } // seeded height not offered → Best
+  entry.height = Number(sel.value);
+  sel.addEventListener('change', () => { entry.height = Number(sel.value); });
+  return sel;
+}
+
+// Submit every selected entry at its chosen resolution, sequentially.
+async function submitPrepEntries(entries: PrepEntry[]): Promise<void> {
+  for (const e of entries) {
+    if (e.selected) await submitUrl(e.url, e.height);
+  }
+}
+
+// ---- Clipboard confirm modal (built on prepare cards) ---------------------
+let clipEntries: PrepEntry[] = [];
+
+async function showClipConfirm(links: string[]): Promise<void> {
+  clipOpen = true;
+  clipEntries = [];
+  const total = links.length;
+  const shown = links.slice(0, CLIP_MAX_LINKS);
+  els.clipList.textContent = '';
+  els.clipConfirmBtn.disabled = true;
+  const loading = document.createElement('div');
+  loading.className = 'clip-loading';
+  loading.textContent = t('clip.loading');
+  els.clipList.appendChild(loading);
+  els.clipSub.textContent = t('clip.loading');
+  openModal(els.clipConfirm);
+  let entries: PrepEntry[];
+  try {
+    entries = await probePrepEntries(shown);
+  } catch (e) {
+    if (isUnauthorized(e)) { closeModal(els.clipConfirm); clipOpen = false; return; }
+    entries = [];
   }
   // The dialog may have been dismissed while probing — don't repaint a closed sheet.
   if (!clipOpen) return;
-  renderClipList(rows);
-  els.clipConfirmBtn.disabled = false;
-  els.clipSub.textContent = t(rows.length === 1 ? 'clip.subOne' : 'clip.subN', { n: rows.length });
-}
-
-// One row per probed video. Built with DOM methods (textContent), never innerHTML,
-// because the title/uploader are attacker-influenced strings from the source.
-function renderClipList(rows: { url: string; meta: ClipPreview | null }[]): void {
+  clipEntries = entries;
   els.clipList.textContent = '';
-  for (const { url, meta } of rows) {
-    const row = document.createElement('div');
-    row.className = 'clip-item';
-    const title = document.createElement('div');
-    title.className = 'clip-item-title';
-    title.textContent = meta?.title || url;
-    row.appendChild(title);
-    const sub = document.createElement('div');
-    sub.className = 'clip-item-sub';
-    const bits: string[] = [];
-    if (meta?.site_name) bits.push(meta.site_name);
-    else if (meta?.extractor) bits.push(meta.extractor);
-    if (meta?.uploader) bits.push(meta.uploader);
-    if (meta?.duration) bits.push(fmtDuration(meta.duration));
-    if (meta?.available_heights && meta.available_heights[0]) bits.push(resLabel(meta.available_heights[0]));
-    sub.textContent = bits.join('  ·  ');
-    row.appendChild(sub);
-    if (meta?.duplicate) {
-      const dup = document.createElement('span');
-      dup.className = 'clip-item-dup';
-      dup.textContent = t('clip.duplicate');
-      row.appendChild(dup);
-    }
-    els.clipList.appendChild(row);
-  }
+  for (const entry of entries) els.clipList.appendChild(prepCardEl(entry));
+  els.clipConfirmBtn.disabled = false;
+  const base = t(entries.length === 1 ? 'clip.subOne' : 'clip.subN', { n: entries.length });
+  els.clipSub.textContent = total > shown.length
+    ? base + ' ' + t('clip.capped', { n: total - shown.length })
+    : base;
 }
 
 function dismissClip(): void {
+  // Anything still on the sheet was declined — start its 12h cooldown (goal 2).
+  markClipCooldown(clipEntries.map((e) => e.url));
   closeModal(els.clipConfirm);
   clipOpen = false;
 }
 if (els.clipConfirmBtn) {
   els.clipConfirmBtn.addEventListener('click', async () => {
-    const links = clipReadyLinks.slice();
-    dismissClip();
-    for (const url of links) await submitUrl(url);
+    const entries = clipEntries.slice();
+    // Only the un-selected ones were declined; the selected ones are downloading.
+    markClipCooldown(entries.filter((e) => !e.selected).map((e) => e.url));
+    clipEntries = [];
+    closeModal(els.clipConfirm);
+    clipOpen = false;
+    await submitPrepEntries(entries);
   });
   els.clipCancel.addEventListener('click', dismissClip);
   els.clipClose.addEventListener('click', dismissClip);
@@ -4278,6 +4516,11 @@ async function cancelItem(id: number): Promise<void> {
       toast((data && (data.message || data.error)) || t('toast.cancelFail'), 'error');
       return;
     }
+    // Stopping a resolution upgrade leaves the item terminal (it was never flipped
+    // to running), so its live SSE tick would otherwise linger and keep resJobLive
+    // true — freezing the row in download mode. Drop the tick so the row repaints
+    // back to its resting capsule + save/share.
+    if (data.status === 'completed' || data.status === 'canceled') state.progress.delete(id);
     upsertRow(data, false);
     loadStats();
   } catch (e) {
@@ -4318,6 +4561,10 @@ async function holdItem(id: number, pause: boolean): Promise<void> {
       toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
       return;
     }
+    // Pausing a resolution upgrade stops the variant but leaves the item terminal;
+    // clear the lingering live tick so the row falls back to its resting state
+    // instead of staying frozen in download mode (see cancelItem).
+    if (data.status === 'completed' || data.status === 'canceled') state.progress.delete(id);
     upsertRow(data, false);
     loadStats(); // the paused count moved — re-render the global toggle with it
   } catch (e) {

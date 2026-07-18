@@ -448,6 +448,32 @@ async fn fetch_thumbnail(
         .map_err(|e| AppError::Internal(format!("thumbnail read failed: {e}")))
 }
 
+/// Fetch an upstream thumbnail and encode it as a `data:` URI, or `None` on any
+/// failure. Powers the clipboard/prepare preview cards, which have no item slug
+/// yet (so the cached `/thumb` route can't serve them) and can't point an `<img>`
+/// straight at the CDN host (blocked/leaky — the very reason `/thumb` exists). A
+/// missing thumbnail must never fail the preview, hence the swallowed errors.
+pub(super) async fn thumbnail_data_uri(
+    upstream: &str,
+    referer: &str,
+    allow_private_dns: bool,
+) -> Option<String> {
+    if upstream.is_empty() {
+        return None;
+    }
+    let bytes = fetch_thumbnail(upstream, referer, allow_private_dns).await.ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    let mime = sniff_image_type(&bytes);
+    if mime == "application/octet-stream" {
+        return None; // not an image we recognise — don't hand the UI garbage
+    }
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(format!("data:{mime};base64,{b64}"))
+}
+
 /// Fetch a small upstream text resource (a subtitle track) fully into memory,
 /// SSRF-guarding every redirect hop the way `proxy_upstream` does and carrying the
 /// session `cookie_header` for cookie-gated CDNs. `max_bytes` caps the buffer so a

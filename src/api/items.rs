@@ -119,7 +119,16 @@ pub async fn submit(
     // kept as completed stream-only records (no local file). Anything else names
     // the copies to fetch — the tallest as the item's primary, the rest as
     // variants enqueued once the row exists.
-    let heights = crate::queue::resolve_max_heights(&state.cfg, &state.db, &sites, &url).await;
+    // A prepare card can pin one resolution for this submission (goal 4),
+    // overriding the settings ladder. `0` is the "highest available" sentinel; any
+    // other height must be on the ladder or we reject rather than silently ignore.
+    // The override is also persisted per item below so run_job's primary honours it.
+    let requested_height = req.options.as_ref().and_then(|o| o.max_height);
+    let heights = match requested_height {
+        Some(h) => crate::resolution::HeightSet::from_heights(&[h])
+            .map_err(AppError::BadRequest)?,
+        None => crate::queue::resolve_max_heights(&state.cfg, &state.db, &sites, &url).await,
+    };
     let no_download = heights.is_empty();
     // Out of room: still probe and record the item (so it stays searchable and
     // streamable via /api/stream/:slug), but park the fetch as Paused rather than
@@ -138,6 +147,11 @@ pub async fn submit(
 
         if let Some(item) = existing {
             if force {
+                // Carry the prepare card's resolution choice onto the reused row so
+                // the re-enqueued primary honours it, same as a fresh submit.
+                if let Some(h) = requested_height {
+                    state.db.set_requested_height(item.id, Some(h)).await?;
+                }
                 // Reuse the row: reset to queued and re-enqueue — unless there's no
                 // room, in which case park it exactly like a fresh submit would.
                 if no_space {
@@ -162,6 +176,12 @@ pub async fn submit(
             .db
             .insert_probe(&probe, crate::types::Source::Download)
             .await?;
+        // Persist the prepare card's resolution override before the job is enqueued
+        // so run_job's primary reads it (goal 4). Harmless on the stream-only /
+        // paused paths — it's only consulted when a primary download actually runs.
+        if let Some(h) = requested_height {
+            state.db.set_requested_height(item.id, Some(h)).await?;
+        }
         if no_download {
             // Keep the entry as a stream-only record; don't fetch anything.
             state.db.mark_stream_only(item.id).await?;
@@ -271,11 +291,29 @@ pub async fn preview(
     if probes.len() > 500 {
         return Err(AppError::BadRequest("playlist exceeds 500 items".into()));
     }
+    // The resolution the current settings would pick for this URL, resolved per
+    // entry against what that entry actually offers — the prepare card seeds its
+    // resolution selector with it (goal 4), and the user may override it before
+    // submitting via SubmitOptions.max_height.
+    let heights = crate::queue::resolve_max_heights(&state.cfg, &state.db, &sites, &url).await;
     // Report whether each entry already exists (dedup), so the dialog can flag a
     // link the user has downloaded before instead of silently re-fetching it.
     let mut previews: Vec<serde_json::Value> = Vec::with_capacity(probes.len());
-    for p in &probes {
+    for (i, p) in probes.iter().enumerate() {
         let known = state.db.find_by_archive_key(&p.archive_key()).await?.is_some();
+        // Synchronously pull the thumbnail and inline it as a data URI so the card
+        // can show it without an item slug or a CDN round-trip from the client
+        // (goal 1). Best-effort: a missing thumbnail leaves the field null. Only the
+        // first entry is fetched — the prepare card shows that one as the face, so a
+        // 500-item playlist still costs a single thumbnail fetch, not 500.
+        let thumbnail = match (i, p.thumbnail_url.as_deref()) {
+            (0, Some(u)) => {
+                super::media::thumbnail_data_uri(u, &p.webpage_url, state.cfg.allow_private_dns)
+                    .await
+            }
+            _ => None,
+        };
+        let default_height = heights.resolve(&p.available_heights).first().copied();
         previews.push(json!({
             "title": p.title.clone(),
             "uploader": p.uploader.clone(),
@@ -284,6 +322,8 @@ pub async fn preview(
             "extractor": p.extractor.clone(),
             "site_name": site_name.clone(),
             "available_heights": p.available_heights.clone(),
+            "default_height": default_height,
+            "thumbnail": thumbnail,
             "duplicate": known,
         }));
     }
@@ -406,6 +446,21 @@ pub async fn retry(State(state): State<AppState>, Path(slug): Path<String>) -> A
 /// it doesn't retract the record.
 pub async fn pause(State(state): State<AppState>, Path(slug): Path<String>) -> AppResult<Response> {
     let item = item_by_slug(&state, &slug).await?;
+    // A resolution-upgrade job runs against an already-terminal item (completed /
+    // canceled) without ever flipping its status to running, so pausing it can't go
+    // through the status machine below. Stop the variant's yt-dlp child but keep its
+    // `.part` and leave the completed file and status untouched — the row simply
+    // drops back to its resting state. `false` (no live job) falls through so the
+    // usual "nothing to pause" rejection still applies to a truly idle item.
+    if matches!(item.status, Status::Completed | Status::Canceled) {
+        if state.queue.cancel(item.id) {
+            // The killed variant's run_job broadcasts a terminal tick as it unwinds,
+            // which clears the live chip on every client; the item keeps its status
+            // and file.
+            let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
+            return Ok(Json(refreshed).into_response());
+        }
+    }
     if !matches!(item.status, Status::Queued | Status::Running) {
         return Err(AppError::BadRequest(
             "only a queued or running download can be paused".into(),
@@ -429,6 +484,21 @@ pub async fn cancel(
     Path(slug): Path<String>,
 ) -> AppResult<Response> {
     let item = item_by_slug(&state, &slug).await?;
+    // A resolution-upgrade job runs against an already-terminal item (completed /
+    // canceled) without flipping its status. Cancelling it must stop the variant
+    // fetch and drop its partials while keeping the existing completed file and the
+    // item's status intact. `false` (no live job) falls through so the normal
+    // rejection still guards a truly idle item.
+    if matches!(item.status, Status::Completed | Status::Canceled) {
+        if state.queue.cancel(item.id) {
+            crate::queue::discard_partials(&state.cfg.download_dir, &item.video_id);
+            // The killed variant's run_job broadcasts a terminal tick as it unwinds,
+            // which clears the live chip on every client; the item keeps its status
+            // and file.
+            let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
+            return Ok(Json(refreshed).into_response());
+        }
+    }
     if !matches!(
         item.status,
         Status::Queued | Status::Running | Status::Paused

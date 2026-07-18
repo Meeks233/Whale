@@ -77,6 +77,10 @@ impl Db {
         queries::set_target_height(self, id, height).await
     }
 
+    pub async fn set_requested_height(&self, id: i64, height: Option<i64>) -> anyhow::Result<()> {
+        queries::set_requested_height(self, id, height).await
+    }
+
     /// Repoint the item's primary file at its highest downloaded resolution.
     pub async fn repoint_primary(&self, id: i64) -> anyhow::Result<()> {
         queries::repoint_primary(self, id).await

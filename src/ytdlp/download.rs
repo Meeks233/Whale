@@ -330,6 +330,7 @@ mod tests {
             filesize: None,
             height: None,
             target_height: None,
+            requested_height: None,
             source_max_height: None,
             source: Source::Download,
             status: Status::Queued,

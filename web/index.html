@@ -67,6 +67,19 @@
     </form>
   </section>
 
+  <!-- Prepare stage (goal 4). The Download button probes the entered link(s) into
+       prepare cards here — thumbnail, metadata, and a per-card resolution picker
+       seeded from settings — rather than submitting behind the user's back. The
+       stage's own Download button batch-submits the selected cards; the search bar
+       below visually separates this staging area from the downloaded history. -->
+  <section id="stage" class="stage hidden" aria-label="Prepare downloads">
+    <div id="stage-list" class="prep-list"></div>
+    <div class="stage-actions">
+      <button id="stage-cancel" class="btn btn-ghost" type="button" data-i18n="stage.clear">Clear</button>
+      <button id="stage-download" class="btn" type="button" data-i18n="stage.download">Download</button>
+    </div>
+  </section>
+
   <section class="controls">
     <!-- Status filter. The funnel narrows the list to one lifecycle state, and it
          does so at the source: the choice becomes a `status`/`local` query param,

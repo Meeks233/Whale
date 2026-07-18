@@ -133,6 +133,12 @@ pub struct Item {
     /// anything submitted before this column existed.
     #[serde(default)]
     pub target_height: Option<i64>,
+    /// Resolution a prepare-card submission pinned for this item (goal 4), used by
+    /// `run_job` as the primary download's height cap in place of the settings
+    /// ladder. `Some(0)` = "highest available" was chosen explicitly; `None` = no
+    /// override (follow settings). Internal — not surfaced to the UI.
+    #[serde(default)]
+    pub requested_height: Option<i64>,
     /// Highest pixel height the source offers, probed once (lazily, when the
     /// resolution picker is first opened) and cached so the picker needn't
     /// re-probe yt-dlp on every open. `None` until first probed.
@@ -315,6 +321,10 @@ pub struct SubmitRequest {
 #[derive(Debug, Default, Deserialize)]
 pub struct SubmitOptions {
     pub force: Option<bool>,
+    /// Per-submission resolution override chosen on the prepare card. A concrete
+    /// ladder height downloads just that copy; `0` means "highest available".
+    /// When absent the settings ladder (`resolve_max_heights`) decides as before.
+    pub max_height: Option<i64>,
 }
 
 /// Response body for POST /api/items (single item form).
