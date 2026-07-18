@@ -48,7 +48,7 @@ pub struct HelloResponse {
     /// base64 16-byte server nonce.
     n: String,
     /// Opaque session id the client echoes in `X-Orca-Sid`.
-    sid: String,
+    pub sid: String,
 }
 
 struct Pending {

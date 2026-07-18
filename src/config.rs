@@ -131,6 +131,14 @@ pub struct Config {
     /// share links so they carry the real domain instead of whatever origin
     /// the UI happens to be loaded from. `None` falls back to the UI origin.
     pub public_url: Option<String>,
+    /// Encrypt the media plane (video/thumbnail/subtitle bytes) under the
+    /// forward-secret session key. `true` (default) is full E2EE: media flows
+    /// through the Service Worker as ciphertext and is never cacheable. `false`
+    /// is the selective profile — the API/secrets plane keeps forward-secret
+    /// E2EE, but media is served as cacheable plaintext authenticated by an
+    /// HttpOnly session cookie (no token on the wire, no per-byte crypto). Trades
+    /// media-content confidentiality at the tunnel edge for far lower CPU/heat.
+    pub encrypt_media: bool,
 }
 
 /// Parse a human storage size — `500GB`, `1.5 TB`, `250mb`, or a plain byte
@@ -322,6 +330,7 @@ impl Config {
         let cookies = env_opt("ORCA_COOKIES").map(PathBuf::from);
         let ytdlp_path = env_or("ORCA_YTDLP_PATH", "yt-dlp");
         let allow_private_dns = env_bool("ORCA_ALLOW_PRIVATE_DNS", false);
+        let encrypt_media = env_bool("ORCA_ENCRYPT_MEDIA", true);
         // Strip trailing slashes so it concatenates cleanly with `/api/p/:slug`.
         let public_url = env_opt("ORCA_PUBLIC_URL")
             .map(|u| u.trim().trim_end_matches('/').to_string())
@@ -360,6 +369,7 @@ impl Config {
             ytdlp_path,
             allow_private_dns,
             public_url,
+            encrypt_media,
         })
     }
 

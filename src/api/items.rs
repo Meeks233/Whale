@@ -1154,6 +1154,9 @@ pub async fn health(State(state): State<AppState>) -> Response {
         // Canonical public domain for share links; null when the operator
         // hasn't declared ORCA_PUBLIC_URL (UI falls back to its own origin).
         "public_url": state.cfg.public_url,
+        // Whether the media plane is encrypted. false = selective profile: the UI
+        // fetches media directly (cookie-authed plaintext) and skips the SW plane.
+        "encrypt_media": state.cfg.encrypt_media,
     }))
     .into_response()
 }

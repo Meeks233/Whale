@@ -177,6 +177,29 @@ fn is_loopback(peer: Option<std::net::IpAddr>) -> bool {
     peer.is_some_and(|ip| ip.is_loopback())
 }
 
+/// Name of the HttpOnly cookie that authenticates plaintext media requests in
+/// the selective profile (`ORCA_ENCRYPT_MEDIA=0`). Its value is the session
+/// `sid` — an opaque public handle already visible on the wire in `X-Orca-Sid`,
+/// so the cookie reveals nothing the transport can't already see. It grants only
+/// media reads (which are plaintext in this profile anyway), never API access:
+/// the API plane still demands a sealed per-request authenticator no cookie can
+/// forge. Set at handshake; see `api::handshake`.
+pub const MEDIA_COOKIE: &str = "orca_sess";
+
+/// Extract the `orca_sess` session id from the request's `Cookie` header, if any.
+fn media_cookie_sid(headers: &HeaderMap) -> Option<String> {
+    let raw = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|v| v.to_str().ok())?;
+    raw.split(';').find_map(|part| {
+        let (k, v) = part.split_once('=')?;
+        (k.trim() == MEDIA_COOKIE)
+            .then(|| v.trim())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    })
+}
+
 /// Authenticate a media request (`/file`, `/thumb`, `/stream`, `/subs/:lang`)
 /// that cannot go through the auth middleware because `<video>`/`<img>`/`<track>`
 /// elements can't attach headers — the Service Worker fetches these on their
@@ -203,6 +226,19 @@ pub async fn authenticate_media(
         let (_client_id, key) =
             resolve_session(state, sid, authenticator, "GET", target, false).await?;
         return Ok(Some(key));
+    }
+    // Selective profile: `<video>`/`<img>`/`<track>` fetch media directly (no SW,
+    // no headers) and carry the HttpOnly `orca_sess` cookie, whose value names an
+    // active forward-secret session. A live session authorises plaintext media —
+    // no sealing. The API/secrets plane is untouched and still forward-secret; the
+    // cookie can't open it (that path demands a sealed authenticator). Off here so
+    // the full profile can't be downgraded to cookie auth.
+    if !state.cfg.encrypt_media {
+        if let Some(sid) = media_cookie_sid(headers) {
+            if state.sessions.active_key(&sid).is_some() {
+                return Ok(None);
+            }
+        }
     }
     if is_loopback(peer)
         && extract_token(headers, query)
@@ -332,5 +368,28 @@ mod tests {
         assert!(ct_eq("0123456789abcdef", "0123456789abcdef"));
         assert!(!ct_eq("0123456789abcdee", "0123456789abcdef"));
         assert!(!ct_eq("short", "longer"));
+    }
+
+    fn cookie_header(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::COOKIE, v.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn media_cookie_sid_extracts_only_the_session_cookie() {
+        // Sole cookie.
+        assert_eq!(media_cookie_sid(&cookie_header("orca_sess=abc123")).as_deref(), Some("abc123"));
+        // Among others, order-independent, tolerant of spaces.
+        assert_eq!(
+            media_cookie_sid(&cookie_header("theme=dark; orca_sess=xy_z ; k=v")).as_deref(),
+            Some("xy_z"),
+        );
+        // A different cookie whose name merely contains the marker is not matched.
+        assert_eq!(media_cookie_sid(&cookie_header("not_orca_sess=nope")), None);
+        // Empty value and absent cookie both yield None.
+        assert_eq!(media_cookie_sid(&cookie_header("orca_sess=")), None);
+        assert_eq!(media_cookie_sid(&cookie_header("theme=dark")), None);
+        assert_eq!(media_cookie_sid(&HeaderMap::new()), None);
     }
 }

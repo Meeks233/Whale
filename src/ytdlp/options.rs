@@ -238,6 +238,7 @@ mod tests {
             token: "secret".into(),
             token_generated: false,
             public_url: None,
+            encrypt_media: true,
             client_tofu: true,
             bind: "0.0.0.0:8080".parse::<SocketAddr>().unwrap(),
             data_dir: PathBuf::from("/data"),

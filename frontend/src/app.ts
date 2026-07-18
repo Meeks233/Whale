@@ -209,10 +209,18 @@ function isInsecurePublicBase(raw: string): boolean {
 // from /api/health on boot. Empty until loaded (or if unset) — publicUrl()
 // then falls back to the server base / current origin.
 let serverPublicUrl = '';
+// Whether the server encrypts the media plane. Default true (fail safe to the
+// full E2EE profile) until /api/health answers. When false (selective profile),
+// media is fetched directly as cacheable plaintext, authenticated by the HttpOnly
+// orca_sess cookie, and the Service Worker media plane is not used.
+let encryptMedia = true;
 function loadServerConfig(): Promise<void> {
   return fetch(apiUrl('/api/health'))
     .then((r) => (r.ok ? r.json() : null))
-    .then((j) => { serverPublicUrl = ((j && j.public_url) || '').replace(/\/+$/, ''); })
+    .then((j) => {
+      serverPublicUrl = ((j && j.public_url) || '').replace(/\/+$/, '');
+      if (j && typeof j.encrypt_media === 'boolean') encryptMedia = j.encrypt_media;
+    })
     .catch(() => { /* offline / unreachable — keep the origin fallback */ });
 }
 
@@ -629,7 +637,20 @@ function itemPath(item: Item | number, suffix = ''): string {
 // native app whose webview has no SW), fall back to the loopback `?token=` route,
 // which is honoured only for local peers.
 function swControls(): boolean {
-  return typeof navigator !== 'undefined' && !!navigator.serviceWorker?.controller;
+  return encryptMedia && typeof navigator !== 'undefined' && !!navigator.serviceWorker?.controller;
+}
+
+// Auth query for the direct (non-SW) media path. Full profile: the loopback
+// `?token=` fallback. Selective profile: none — the HttpOnly orca_sess cookie
+// authenticates, so no secret ever rides in a media URL.
+function mediaTokenParam(): string {
+  return encryptMedia ? 'token=' + encodeURIComponent(getToken()) : '';
+}
+
+// Join a path with an optional query built from `parts` (already `k=v`, may be '').
+function withQuery(path: string, ...parts: string[]): string {
+  const qs = parts.filter((p) => p).join('&');
+  return apiUrl(qs ? path + '?' + qs : path);
 }
 
 function mediaUrl(kind: string, slug: string, extra?: string): string {
@@ -648,8 +669,7 @@ function fileUrl(item: Item | number, download?: boolean): string {
     }
     return mediaUrl('file', slug);
   }
-  const tok = encodeURIComponent(getToken());
-  return apiUrl(itemPath(item, '/file') + '?token=' + tok + (download ? '&download=1' : ''));
+  return withQuery(itemPath(item, '/file'), mediaTokenParam(), download ? 'download=1' : '');
 }
 
 // Thumbnail through the backend proxy/cache instead of the source CDN. The server
@@ -659,8 +679,7 @@ function fileUrl(item: Item | number, download?: boolean): string {
 function thumbUrl(item: Item): string {
   if (!item.thumbnail_url || !item.slug) return '';
   if (swControls()) return mediaUrl('thumb', item.slug);
-  const tok = encodeURIComponent(getToken());
-  return apiUrl(itemPath(item, '/thumb') + '?token=' + tok);
+  return withQuery(itemPath(item, '/thumb'), mediaTokenParam());
 }
 
 // Online-playback proxy: the backend resolves the upstream URL (with cookies) and
@@ -669,8 +688,7 @@ function thumbUrl(item: Item): string {
 // share links), never its sequential id.
 function streamUrl(slug: string): string {
   if (swControls()) return mediaUrl('stream', slug);
-  const tok = encodeURIComponent(getToken());
-  return apiUrl('/api/stream/' + encodeURIComponent(slug) + '?token=' + tok);
+  return withQuery('/api/stream/' + encodeURIComponent(slug), mediaTokenParam());
 }
 
 const streamPrewarmed = new Set<string>();
@@ -5815,18 +5833,18 @@ async function loadSubtitles(id: number): Promise<void> {
     if (els.player.classList.contains('hidden')) return;
     if (playQueue.length && playQueue[playIndex]?.id !== id) return;
     const slugForTrack = state.items.get(id)?.slug;
-    const tok = encodeURIComponent(getToken());
     subs.forEach((s, i) => {
       const track = document.createElement('track');
       track.kind = 'subtitles';
       track.srclang = s.lang;
       track.label = s.label || s.lang;
       // Through the SW media plane (decrypted to a text/vtt blob) when a worker
-      // controls the page; else the loopback `?token=` fallback. A <track> can't
-      // set headers, same as <video>.
+      // controls the page; else the direct path — `?token=` on the full profile's
+      // loopback fallback, or the orca_sess cookie under the selective profile. A
+      // <track> can't set headers, same as <video>.
       track.src = slugForTrack && swControls()
         ? mediaUrl('subs', slugForTrack, s.lang)
-        : apiUrl(itemPath(id, '/subs/' + encodeURIComponent(s.lang)) + '?token=' + tok);
+        : withQuery(itemPath(id, '/subs/' + encodeURIComponent(s.lang)), mediaTokenParam());
       if (i === 0) track.default = true;
       els.playerVideo.appendChild(track);
     });
@@ -6155,7 +6173,18 @@ function focusItemBySlug(slug: string): void {
 // ---- Service worker -------------------------------------------------------
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => { /* ignore */ });
+    void loadServerConfig().finally(() => {
+      if (encryptMedia) {
+        navigator.serviceWorker.register('/sw.js').catch(() => { /* ignore */ });
+      } else {
+        // Selective profile has no media plane. Retire any worker left over from a
+        // previous full-profile session so it can't intercept media — the app no
+        // longer emits /__m/ URLs, so the plane is simply never used.
+        navigator.serviceWorker.getRegistrations()
+          .then((regs) => { for (const r of regs) void r.unregister(); })
+          .catch(() => { /* ignore */ });
+      }
+    });
   });
   // Hand the worker a fresh session whenever it asks (it needs the session key to
   // decrypt the media plane, and asks right after activation or an idle expiry).
@@ -6422,7 +6451,7 @@ async function submitWelcome(): Promise<void> {
   localStorage.setItem(WELCOME_KEY, '1');
   localStorage.setItem(PERMISSION_PROMPT_NEVER, '1');
   closeModal(els.welcome);
-  startApp(); // everything checks out → the main page, populated
+  void startApp(); // everything checks out → the main page, populated
 }
 
 function openWelcome(): void {
@@ -6442,8 +6471,12 @@ els.welcomeStart.addEventListener('click', () => void submitWelcome());
 // Called straight away by an already-configured install, and by the welcome
 // window the moment it becomes configured — so a first run lands on a populated
 // page instead of an empty one waiting to be reloaded.
-function startApp(): void {
-  loadServerConfig();
+async function startApp(): Promise<void> {
+  // Learn the media profile before the first render so media URLs are built with
+  // the right auth (SW plane vs cookie plaintext) and don't need a rebuild pass.
+  // /api/health is unauthenticated and same-origin, so this is a sub-millisecond
+  // wait in practice.
+  await loadServerConfig();
   connectEvents();
   // Paint the last known page before the network answers, then reconcile it
   // (see hydrateFromCache). Only a cold client rebuilds the list outright.
@@ -6462,7 +6495,7 @@ renderSortMenu();
 setSortIcon();
 setServerStatus(false);      // start red; SSE onopen flips it green when live
 const welcoming = needsWelcome();
-if (welcoming) openWelcome(); else startApp();
+if (welcoming) openWelcome(); else void startApp();
 handleShareParam();
 setupNativeShare();
 // The welcome window asks for permissions itself — a prompt stacked on top of it
