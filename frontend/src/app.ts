@@ -3146,8 +3146,14 @@ async function applyServerUrl(): Promise<boolean> {
 // files access" grant, which is the only way to write Downloads/Orca (and the
 // only way at all to create the hidden .Orca folder; MediaStore refuses a
 // dot-prefixed directory).
-type AppPermissionStatus = { notifications: boolean; background: boolean; storage: boolean };
+type AppPermissionStatus = { notifications: boolean; background: boolean; storage: boolean; clipboard: boolean };
 let appPermissions: AppPermissionStatus | null = null;
+// The browser's clipboard-read grant, as last read from the Permissions API.
+// 'unsupported' covers browsers that can't query it (Firefox/Safari) — there we
+// hide the row and never nag, since a plain readText() on gesture is the only
+// path and needs no persistent grant.
+type ClipboardPermState = 'granted' | 'denied' | 'prompt' | 'unsupported';
+let clipboardPermState: ClipboardPermState = 'unsupported';
 // Not a permission — where saves land. Mirrored from the native side, which
 // owns the setting, so it survives reinstall-free app restarts.
 let hideDownloads = false;
@@ -3160,75 +3166,125 @@ migrateLegacyStorage(PERMISSION_PROMPT_NEVER, 'permissions_prompt_never');
 // and baseline the system font felt like, which is what made the row look
 // unfinished next to its icon. Colour comes from the row's [data-state] (see
 // .permission-result in style.css), so the green lives in one place.
-type PermissionState = 'granted' | 'missing' | 'checking';
+type PermissionState = 'granted' | 'missing' | 'denied' | 'checking';
 const PERMISSION_RESULT: Record<PermissionState, string> = {
   granted: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>`,
   missing: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>`,
+  // A hard block the browser won't let script re-request — a "no entry" glyph, not
+  // a chevron, so the row reads as a status rather than a button that does nothing.
+  denied: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>`,
   checking: `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="spin"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`,
 };
 
 function renderAppPermission(kind: keyof AppPermissionStatus): void {
   const granted = appPermissions?.[kind] ?? null;
   const requesting = requestingPermissions.has(kind);
-  const state: PermissionState = requesting || granted == null ? 'checking' : granted ? 'granted' : 'missing';
+  // Web permissions have a third state Android's boolean map can't carry: a hard
+  // 'denied' that script can never re-request. It must read as blocked (a dead,
+  // non-clickable status) rather than collapse into 'missing' — a "Tap to grant"
+  // button that silently does nothing was the crux of the "detection is crippled"
+  // report.
+  const webDenied = !isNativeApp && (
+    (kind === 'notifications' && 'Notification' in window && Notification.permission === 'denied')
+    || (kind === 'clipboard' && clipboardPermState === 'denied'));
+  const state: PermissionState = requesting || granted == null ? 'checking'
+    : webDenied ? 'denied' : granted ? 'granted' : 'missing';
   document.querySelectorAll<HTMLButtonElement>(`.permission-item[data-permission="${kind}"]`).forEach((button) => {
     button.dataset.state = state;
-    button.disabled = requesting;
+    // Only 'missing' offers an action; 'denied' is inert, so don't let it fire the
+    // request handler (which would resolve instantly to 'denied' and change nothing).
+    button.disabled = requesting || state === 'denied';
     const status = button.querySelector<HTMLElement>('.permission-status');
     const result = button.querySelector<HTMLElement>('.permission-result');
     if (status) status.textContent = t(requesting
       ? 'settings.permRequesting'
+      : state === 'denied' ? 'settings.permBlocked'
       : granted == null ? 'settings.permChecking' : granted ? 'settings.permGranted' : 'settings.permMissing');
     if (result) result.innerHTML = PERMISSION_RESULT[state];
   });
 }
 
 /**
- * Which permission rows still have something to ask for. Empty → the whole block
- * hides (see renderAppPermissions): a list of green ticks is furniture, and the
- * section only earns its space while it has an action to offer.
+ * Which permission rows still want the user's attention. Empty → the whole block
+ * hides (see renderAppPermissions): once a platform's permissions are all
+ * satisfied a list of green ticks is furniture, so the section only earns its
+ * space while something is unsatisfied.
  *
- * The two platforms genuinely differ. Android needs all three and cannot work
- * without storage. The web build has exactly one worth asking about —
- * notifications, for download-finished alerts — and never insists: everything
- * works without it. A hard `denied` there is also filtered out, because script
- * cannot re-request it, so the row would be a button that does nothing.
+ * The platforms differ in what they count. Android needs all three and cannot
+ * work without storage. The web build has one that matters — notifications, for
+ * download-finished alerts — pending unless it's actually granted. A hard
+ * `denied` still counts as unsatisfied (the row stays to explain the block
+ * rather than vanish), but a plain grant empties the list and hides the section.
  */
 function pendingPermissions(): Array<keyof AppPermissionStatus> {
   if (!appPermissions) return [];
-  if (isAndroidApp()) {
-    return (['notifications', 'background', 'storage'] as const)
-      .filter((k) => !appPermissions![k]);
-  }
-  return webNotificationsPending() ? ['notifications'] : [];
-}
-
-function webNotificationsPending(): boolean {
-  return 'Notification' in window && Notification.permission === 'default';
+  const keys: Array<keyof AppPermissionStatus> = isAndroidApp()
+    ? ['notifications', 'background', 'storage']
+    : ['notifications', 'clipboard'];
+  return keys.filter((k) => !appPermissions![k]);
 }
 
 function renderAppPermissions(): void {
   renderAppPermission('notifications');
   renderAppPermission('background');
   renderAppPermission('storage');
+  renderAppPermission('clipboard');
   renderHideDownloads();
+  // Drop a web row the browser can't back: no Notification API, or a clipboard-read
+  // grant it won't let script query. Either would otherwise sit there as a dead
+  // button or a green tick of furniture.
+  els.permRow.querySelector('.permission-item[data-permission="notifications"]')
+    ?.classList.toggle('hidden', !isNativeApp && !('Notification' in window));
+  els.permRow.querySelector('.permission-item[data-permission="clipboard"]')
+    ?.classList.toggle('hidden', !isNativeApp && clipboardPermState === 'unsupported');
+  // One rule for both platforms: the block hides the moment nothing is left
+  // unsatisfied (all granted). A blocked or ungranted permission keeps it up.
   els.permRow.classList.toggle('hidden', pendingPermissions().length === 0);
 }
 
 /**
  * The browser build's permission state. Mirrors the Android shape so the one
  * renderer serves both; `background`/`storage` are reported granted because they
- * have no browser equivalent and must never count as pending.
+ * have no browser equivalent and must never count as pending. Clipboard is the
+ * one browser-only member — read from the Permissions API, or treated as granted
+ * where that can't be queried so it never nags.
  */
-function refreshWebPermissions(): void {
+async function refreshWebPermissions(): Promise<void> {
   if (isNativeApp) return;
-  if (!('Notification' in window)) { els.permRow.classList.add('hidden'); return; }
+  clipboardPermState = await queryClipboardPermission();
   appPermissions = {
-    notifications: Notification.permission === 'granted',
+    // Unsupported → treated granted (nothing to ask), and its row is hidden below,
+    // so it never lingers as a dead button or a green tick of furniture.
+    notifications: !('Notification' in window) || Notification.permission === 'granted',
+    clipboard: clipboardPermState === 'granted' || clipboardPermState === 'unsupported',
     background: true,
     storage: true,
   };
   renderAppPermissions();
+}
+
+async function queryClipboardPermission(): Promise<ClipboardPermState> {
+  if (!navigator.clipboard || !navigator.permissions?.query) return 'unsupported';
+  try {
+    const status = await navigator.permissions.query({ name: 'clipboard-read' as PermissionName });
+    return status.state as ClipboardPermState; // 'granted' | 'denied' | 'prompt'
+  } catch (_) {
+    return 'unsupported'; // Firefox/Safari reject the clipboard-read query outright.
+  }
+}
+
+// Web startup: learn the notification + clipboard state up front so the Settings
+// section is accurate the first time it opens, and make a best-effort clipboard
+// request. readText() only prompts under a user gesture, so a cold-load attempt
+// usually no-ops silently — the real grant still comes from the user tapping the
+// row (or Paste); this picks up a grant that's already there and asks where the
+// browser permits it.
+async function initWebPermissions(): Promise<void> {
+  await refreshWebPermissions();
+  if (clipboardPermState === 'prompt') {
+    try { await navigator.clipboard.readText(); } catch (_) { /* no gesture / denied */ }
+    await refreshWebPermissions();
+  }
 }
 
 // The hide toggle is meaningless without storage access (we couldn't move the
@@ -3255,6 +3311,7 @@ async function refreshAppPermissions(): Promise<AppPermissionStatus | null> {
       notifications: !!status.notifications,
       background: !!status.background,
       storage: !!status.storage,
+      clipboard: true, // no native clipboard permission; its row is hidden here.
     };
     hideDownloads = !!status.hideDownloads;
     // Visibility is renderAppPermissions' call now — it hides the block once
@@ -3272,7 +3329,8 @@ async function refreshAppPermissions(): Promise<AppPermissionStatus | null> {
   }
 }
 
-const PERMISSION_COMMANDS: Record<keyof AppPermissionStatus, string> = {
+// Native-only: clipboard has no request command (it's web-only, hidden here).
+const PERMISSION_COMMANDS: Partial<Record<keyof AppPermissionStatus, string>> = {
   notifications: 'request_notification_permission',
   background: 'request_background_permission',
   storage: 'request_storage_permission',
@@ -3280,20 +3338,33 @@ const PERMISSION_COMMANDS: Record<keyof AppPermissionStatus, string> = {
 
 async function requestAppPermission(kind: keyof AppPermissionStatus): Promise<void> {
   const T = window.__TAURI__;
-  if (!T?.core?.invoke) return;
+  const command = PERMISSION_COMMANDS[kind];
+  if (!T?.core?.invoke || !command) return;
   const current = await refreshAppPermissions();
   if (!current || current[kind]) return;
   requestingPermissions.add(kind);
   renderAppPermission(kind);
   try {
-    await T.core.invoke(PERMISSION_COMMANDS[kind]);
+    await T.core.invoke(command);
   } catch (_) { /* the next state read shows the actual result */ }
   requestingPermissions.delete(kind);
   await refreshAppPermissions();
 }
 
+// The browser has no requestPermission() for clipboard; a readText() under the
+// click's user activation is what triggers its prompt. Whatever the user answers,
+// the re-check reflects it (grant hides the row, a block turns it inert).
+async function requestWebClipboard(): Promise<void> {
+  requestingPermissions.add('clipboard');
+  renderAppPermission('clipboard');
+  try { await navigator.clipboard.readText(); }
+  catch (_) { /* denied or dismissed — the re-check below shows the real state */ }
+  requestingPermissions.delete('clipboard');
+  await refreshWebPermissions();
+}
+
 function isPermissionKind(v: string | undefined): v is keyof AppPermissionStatus {
-  return v === 'notifications' || v === 'background' || v === 'storage';
+  return v === 'notifications' || v === 'background' || v === 'storage' || v === 'clipboard';
 }
 
 document.addEventListener('click', (e) => {
@@ -3304,7 +3375,9 @@ document.addEventListener('click', (e) => {
   // Web: the browser's own prompt. Whatever the user answers, re-render — a
   // grant hides the block, a denial does too (it can't be asked again).
   if (kind === 'notifications' && 'Notification' in window) {
-    Notification.requestPermission().finally(() => refreshWebPermissions());
+    Notification.requestPermission().finally(() => { void refreshWebPermissions(); });
+  } else if (kind === 'clipboard') {
+    void requestWebClipboard();
   }
 });
 
@@ -6585,5 +6658,8 @@ setupNativeShare();
 // The welcome window asks for permissions itself — a prompt stacked on top of it
 // would be the same question twice, in two windows.
 if (!welcoming) setupAppPermissionRefresh();
+// Web: check (and best-effort request) the browser permissions at startup, once
+// we're past the welcome window so the two don't ask at the same time.
+if (!isNativeApp && !welcoming) void initWebPermissions();
 setupDeepLinks();
 setupClipboardWatch();

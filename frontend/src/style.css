@@ -585,6 +585,9 @@ html:not(.app-native) #welcome-server-row + .form-row { border-top: none; }
    prompt) without either having to know the other exists. */
 html:not(.app-native) .permission-item[data-permission="background"],
 html:not(.app-native) .permission-item[data-permission="storage"] { display: none; }
+/* Clipboard is the mirror case: a browser-only permission with no native app
+   equivalent, so it drops out of the native builds. */
+html.app-native .permission-item[data-permission="clipboard"] { display: none; }
 .hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
 .hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
 .hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: var(--r-xs); font-size: 11px; }
@@ -653,6 +656,9 @@ html:not(.app-native) .permission-item[data-permission="storage"] { display: non
 }
 .permission-item + .permission-item { border-top: 1px solid var(--border); }
 .permission-item:disabled { cursor: wait; }
+/* A hard-blocked web permission is disabled but not "loading" — it's a settled
+   status the user reads, so the wait cursor would lie. */
+.permission-item[data-state="denied"]:disabled { cursor: default; }
 .permission-icon {
   display: grid;
   place-items: center;
@@ -685,6 +691,11 @@ html:not(.app-native) .permission-item[data-permission="storage"] { display: non
   color: var(--err);
   background: color-mix(in oklab, var(--err) 12%, var(--surface));
 }
+.permission-item[data-state="denied"] .permission-icon {
+  color: var(--warn);
+  background: color-mix(in oklab, var(--warn) 12%, var(--surface));
+}
+.permission-item[data-state="denied"] .permission-result { color: var(--warn); }
 .permission-prompt-card { max-width: 430px; }
 .permission-prompt-actions { margin-top: 14px; }
 
