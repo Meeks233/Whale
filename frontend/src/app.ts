@@ -6249,6 +6249,17 @@ if ('serviceWorker' in navigator) {
     void loadServerConfig().finally(() => {
       if (encryptMedia) {
         navigator.serviceWorker.register('/sw.js').catch(() => { /* ignore */ });
+        // A page reloaded (F5) while the worker was already active can boot
+        // UNCONTROLLED: the worker only claims clients in `activate`, which does
+        // not re-run for a live worker, so `controllerchange` never fires. An
+        // uncontrolled page has no working media plane — `/__m/...` thumbnails
+        // 404 (no server route) and the `?token=` fallback 401s off loopback
+        // (behind Docker/Cloudflare the peer is never local). Ask the live worker
+        // to claim us; the resulting `controllerchange` re-renders media through
+        // it (see the handler below).
+        void navigator.serviceWorker.ready.then((reg) => {
+          if (!navigator.serviceWorker.controller) reg.active?.postMessage({ type: 'orca-claim' });
+        }).catch(() => { /* ignore */ });
       } else {
         // Selective profile has no media plane. Retire any worker left over from a
         // previous full-profile session so it can't intercept media — the app no
