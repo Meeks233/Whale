@@ -1,7 +1,7 @@
 //! Item handlers: submit / list / get / retry / delete + health. See docs/API.md.
 
 use super::AppState;
-use crate::db::ListQuery;
+use crate::db::{ListQuery, SortKey};
 use crate::error::{AppError, AppResult};
 use crate::types::{Item, Status, SubmitRequest, SubmitResponse};
 use axum::extract::{Extension, Path, Query, State};
@@ -341,6 +341,10 @@ pub struct ListParams {
     /// stream-only ones. Answered in SQL so "show me what's downloaded" costs one
     /// filtered page rather than paging the whole history to sieve it client-side.
     pub local: Option<bool>,
+    /// Column to order by: `time` (default), `size`, `duration`, `resolution`.
+    pub sort: Option<String>,
+    /// `reverse=true` flips the default descending order to ascending.
+    pub reverse: Option<bool>,
 }
 
 /// GET /api/items — keyset-paginated history.
@@ -363,6 +367,8 @@ pub async fn list(
             limit,
             before_id: params.before_id,
             local: params.local,
+            sort: params.sort.as_deref().map(SortKey::parse).unwrap_or_default(),
+            reverse: params.reverse.unwrap_or(false),
         })
         .await?;
     let sites = state.db.list_websites().await.unwrap_or_default();
@@ -836,6 +842,17 @@ pub async fn set_resolutions(
             .queue
             .enqueue_resolution_replacing(id, *h, deferred_removals.clone())
             .await;
+    }
+
+    // Make the persisted `target_height` authoritative the instant the request
+    // returns. The worker only writes it when it actually picks up the variant
+    // job (queue.rs run_job), so without this an immediate GET — which the UI
+    // fires right after saving — still reports the OLD target and the
+    // "downloading" capsule paints the stale height (e.g. 240p after a switch to
+    // 720p). Pin it to the tallest newly-queued height, which is what the card
+    // is now working toward.
+    if let Some(target) = to_add.iter().copied().max() {
+        state.db.set_target_height(id, Some(target)).await?;
     }
 
     // Remove deselected files immediately when another selected local version is

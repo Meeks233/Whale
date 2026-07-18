@@ -1,6 +1,6 @@
 //! SQL query implementations. Workstream A owns this file. See docs/DATABASE.md.
 
-use super::{Db, ListPage, ListQuery};
+use super::{Db, ListPage, ListQuery, SortKey};
 use crate::seal_import::{ImportOutcome, SealRecord};
 use crate::types::{Client, Item, ItemResolution, ProbeResult, SiteCount, Source, Status, Website};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -108,9 +108,19 @@ pub(super) async fn connect(data_dir: &Path) -> anyhow::Result<Db> {
     if !db_path.exists() && legacy_path.exists() {
         std::fs::copy(&legacy_path, &db_path)?;
     }
+    // WAL lets the download worker keep writing progress/status while HTTP reads
+    // (list/get/stream, one connection per browser tab) run concurrently, instead
+    // of readers and the writer serializing against each other under the default
+    // rollback journal. NORMAL synchronous is WAL's canonical pairing: it drops
+    // an fsync per commit (cheaper progress writes) and, unlike on a rollback
+    // journal, still can't corrupt the DB — the worst case is losing the last
+    // commits on a power cut, acceptable for a re-runnable downloader. sqlx
+    // already defaults foreign_keys=ON and a 5s busy_timeout, so those stay implicit.
     let opts = SqliteConnectOptions::new()
         .filename(db_path)
-        .create_if_missing(true);
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal);
 
     let pool = SqlitePoolOptions::new().connect_with(opts).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
@@ -847,10 +857,48 @@ fn build_search(q: &str) -> (Vec<String>, Vec<Bind>) {
     (clauses, binds)
 }
 
+/// The numeric SQL expression a [`SortKey`] orders by. Every branch yields an
+/// integer so the keyset cursor can carry one `i64` boundary whatever the sort.
+/// `NULL`s (audio-only durations, not-yet-downloaded heights) collapse to `-1`
+/// so they order deterministically after real values in the default descending
+/// view — and the same expression drives both the ORDER BY and the keyset WHERE,
+/// so paging can't disagree with ordering.
+fn sort_expr(k: SortKey) -> &'static str {
+    match k {
+        SortKey::Time => "created_at",
+        SortKey::Size => {
+            "COALESCE((SELECT SUM(filesize) FROM item_resolutions WHERE item_id = items.id), filesize, 0)"
+        }
+        SortKey::Duration => "COALESCE(duration, -1)",
+        SortKey::Resolution => "COALESCE(height, -1)",
+    }
+}
+
 pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
     let (search_clauses, search_binds) = match q.q.as_deref() {
         Some(s) if !s.trim().is_empty() => build_search(s),
         _ => (Vec::new(), Vec::new()),
+    };
+
+    let expr = sort_expr(q.sort);
+
+    // Keyset boundary: the sort value of the cursor row. Fetched up front so the
+    // WHERE clause can compare against a plain bound integer instead of embedding
+    // a correlated subquery. A cursor pointing at a since-deleted row yields no
+    // boundary — treat that as "no more pages" rather than restart from the top,
+    // which would re-emit already-seen rows.
+    let boundary: Option<i64> = match q.before_id {
+        Some(bid) => {
+            let row = sqlx::query(&format!("SELECT {expr} AS v FROM items WHERE id = ?"))
+                .bind(bid)
+                .fetch_optional(&db.pool)
+                .await?;
+            match row {
+                Some(r) => Some(r.try_get::<i64, _>("v")?),
+                None => return Ok(ListPage { items: Vec::new(), next_cursor: None }),
+            }
+        }
+        None => None,
     };
 
     let mut sql = format!("SELECT {SELECT_COLS} FROM items WHERE 1=1");
@@ -873,10 +921,19 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
         sql.push_str(" AND ");
         sql.push_str(c);
     }
-    if q.before_id.is_some() {
-        sql.push_str(" AND id < ?");
+    // Keyset step: everything ordered strictly after the boundary row. The `id`
+    // tiebreak makes the order total, so rows sharing a sort value (same second,
+    // same size, no duration) never straddle a page edge. Directions flip
+    // together with the ORDER BY when `reverse` is set.
+    if boundary.is_some() {
+        if q.reverse {
+            sql.push_str(&format!(" AND ({expr} > ? OR ({expr} = ? AND id > ?))"));
+        } else {
+            sql.push_str(&format!(" AND ({expr} < ? OR ({expr} = ? AND id < ?))"));
+        }
     }
-    sql.push_str(" ORDER BY created_at DESC, id DESC LIMIT ?");
+    let dir = if q.reverse { "ASC" } else { "DESC" };
+    sql.push_str(&format!(" ORDER BY {expr} {dir}, id {dir} LIMIT ?"));
 
     let mut query = sqlx::query(&sql);
     if let Some(status) = q.status {
@@ -888,8 +945,8 @@ pub(super) async fn list(db: &Db, q: ListQuery) -> anyhow::Result<ListPage> {
             Bind::Int(n) => query.bind(n),
         };
     }
-    if let Some(before_id) = q.before_id {
-        query = query.bind(before_id);
+    if let (Some(before_id), Some(bval)) = (q.before_id, boundary) {
+        query = query.bind(bval).bind(bval).bind(before_id);
     }
     query = query.bind(q.limit);
 
@@ -1399,6 +1456,54 @@ mod tests {
         assert_eq!(page2.items.len(), 1);
         assert_eq!(page2.items[0].id, ids[0]);
         assert_eq!(page2.next_cursor, None);
+    }
+
+    #[tokio::test]
+    async fn list_sort_by_duration_paginates_both_directions() {
+        let (db, _dir) = temp_db().await;
+        // Insert with durations out of id order so a duration sort can't be
+        // mistaken for the default id sort.
+        for secs in [10_i64, 30, 20] {
+            let mut p = probe("youtube", &format!("d{secs}"), &format!("Title {secs}"));
+            p.duration = Some(secs);
+            db.insert_probe(&p, Source::Download).await.unwrap();
+        }
+
+        // Descending: longest first, crossing a page boundary via the cursor.
+        let p1 = db
+            .list(ListQuery { limit: 2, sort: SortKey::Duration, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(p1.items.iter().map(|i| i.duration).collect::<Vec<_>>(), vec![Some(30), Some(20)]);
+        let p2 = db
+            .list(ListQuery {
+                limit: 2,
+                sort: SortKey::Duration,
+                before_id: p1.next_cursor,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(p2.items.iter().map(|i| i.duration).collect::<Vec<_>>(), vec![Some(10)]);
+        assert_eq!(p2.next_cursor, None);
+
+        // Reverse (ascending): shortest first, same keyset walk the other way.
+        let r1 = db
+            .list(ListQuery { limit: 2, sort: SortKey::Duration, reverse: true, ..Default::default() })
+            .await
+            .unwrap();
+        assert_eq!(r1.items.iter().map(|i| i.duration).collect::<Vec<_>>(), vec![Some(10), Some(20)]);
+        let r2 = db
+            .list(ListQuery {
+                limit: 2,
+                sort: SortKey::Duration,
+                reverse: true,
+                before_id: r1.next_cursor,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(r2.items.iter().map(|i| i.duration).collect::<Vec<_>>(), vec![Some(30)]);
     }
 
     #[test]
