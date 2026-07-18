@@ -14,7 +14,7 @@
 //! `src/session.rs` drives the handshake and session store.
 
 use crate::error::{AppError, AppResult};
-use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
+use aes_gcm::aead::{Aead, AeadCore, AeadInPlace, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use axum::body::{to_bytes, Body};
 use axum::extract::Request;
@@ -134,18 +134,46 @@ pub fn media_stream_key(session_key: &[u8; 32], resource: &str) -> [u8; 32] {
     okm
 }
 
-/// Seal one media chunk under the stream key with a deterministic nonce = the
-/// chunk index (big-endian, right-aligned in the 12-byte nonce). Safe because
-/// `stream_key` is unique per session+slug, so no `(key, nonce)` pair is ever
-/// reused across differing plaintext. Output is `plaintext.len() + 16` bytes.
-pub fn seal_chunk(stream_key: &[u8; 32], index: u64, plaintext: &[u8]) -> AppResult<Vec<u8>> {
-    let cipher = Aes256Gcm::new_from_slice(stream_key)
-        .map_err(|_| AppError::Internal("media cipher init failed".into()))?;
+/// Build the AEAD cipher for a media stream once, so a multi-chunk window pays the
+/// AES-256 key schedule a single time instead of once per 64 KiB chunk. Reused by
+/// [`seal_into`] across every chunk of one response.
+pub fn media_cipher(stream_key: &[u8; 32]) -> AppResult<Aes256Gcm> {
+    Aes256Gcm::new_from_slice(stream_key)
+        .map_err(|_| AppError::Internal("media cipher init failed".into()))
+}
+
+/// Seal one media chunk into `out` under an already-built `cipher`, with a
+/// deterministic nonce = the chunk index (big-endian, right-aligned in the 12-byte
+/// nonce). Safe because `stream_key` is unique per session+slug, so no
+/// `(key, nonce)` pair is ever reused across differing plaintext.
+///
+/// The plaintext is appended to `out` and encrypted in place, then the 16-byte GCM
+/// tag is appended — no per-chunk cipher construction, no per-chunk scratch `Vec`.
+/// Appends exactly `plaintext.len() + 16` bytes.
+pub fn seal_into(
+    cipher: &Aes256Gcm,
+    index: u64,
+    plaintext: &[u8],
+    out: &mut Vec<u8>,
+) -> AppResult<()> {
     let mut nonce = [0u8; 12];
     nonce[4..].copy_from_slice(&index.to_be_bytes());
-    cipher
-        .encrypt(Nonce::from_slice(&nonce), plaintext)
-        .map_err(|_| AppError::Internal("media chunk encryption failed".into()))
+    let start = out.len();
+    out.extend_from_slice(plaintext);
+    let tag = cipher
+        .encrypt_in_place_detached(Nonce::from_slice(&nonce), &[], &mut out[start..])
+        .map_err(|_| AppError::Internal("media chunk encryption failed".into()))?;
+    out.extend_from_slice(&tag);
+    Ok(())
+}
+
+/// Seal one standalone media chunk. Output is `plaintext.len() + 16` bytes. Thin
+/// wrapper over [`media_cipher`] + [`seal_into`] for single-chunk callers/tests.
+pub fn seal_chunk(stream_key: &[u8; 32], index: u64, plaintext: &[u8]) -> AppResult<Vec<u8>> {
+    let cipher = media_cipher(stream_key)?;
+    let mut out = Vec::with_capacity(plaintext.len() + MEDIA_TAG);
+    seal_into(&cipher, index, plaintext, &mut out)?;
+    Ok(out)
 }
 
 /// Inverse of [`seal_chunk`]; used by tests (the browser Service Worker opens

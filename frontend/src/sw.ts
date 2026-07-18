@@ -43,11 +43,41 @@ self.addEventListener('activate', (event) => {
 let session: Session | null = null;
 let waiters: Array<(s: Session) => void> = [];
 
+// Per-session media caches. Both are keyed by the resource label and are only
+// valid under the current session key, so they're cleared whenever the session
+// rotates (a new key makes old derived keys and decrypted bytes useless — and
+// dropping them keeps one session's plaintext from ever surfacing under another).
+//
+//  - `mediaKeyCache`: the derived+imported per-resource AES-GCM key. Deriving it
+//    is HKDF + two `importKey`s; without this it was recomputed on *every* window
+//    fetch (every thumbnail render, every video range).
+//  - `blobCache`: decrypted small resources (thumbnails, subtitles). These are
+//    re-requested constantly as the list re-renders/scrolls; caching the decrypted
+//    bytes in RAM turns a re-render into a zero-cost hit — no server round-trip
+//    (so no re-seal), no re-decrypt. Kept in memory only (never persisted to disk),
+//    so it doesn't weaken forward secrecy, and bounded so it can't grow unbounded.
+let mediaKeyCache = new Map<string, Promise<CryptoKey>>();
+let blobCache = new Map<string, Uint8Array<ArrayBuffer>>();
+const BLOB_CACHE_MAX = 96;
+
+function resetMediaCaches(): void {
+  mediaKeyCache = new Map();
+  blobCache = new Map();
+}
+
+/// The per-resource media key, derived once per session and reused thereafter.
+function streamKey(s: Session, resource: string): Promise<CryptoKey> {
+  let p = mediaKeyCache.get(resource);
+  if (!p) { p = mediaKey(s.key, resource); mediaKeyCache.set(resource, p); }
+  return p;
+}
+
 self.addEventListener('message', (event) => {
   const data = event.data as { type?: string; base?: string; sid?: string; key?: string } | null;
   // `base` is '' for a same-origin app — check for presence, not truthiness.
   if (data?.type === 'orca-session' && typeof data.base === 'string' && data.sid && data.key) {
     void sessionFromRaw(data.base, data.sid, data.key).then((s) => {
+      if (!session || session.sid !== s.sid) resetMediaCaches();
       session = s;
       waiters.splice(0).forEach((resolve) => resolve(s));
     });
@@ -111,7 +141,7 @@ async function fetchWindow(s: Session, t: Target, start: number, end?: number): 
   const plainLen = Number(res.headers.get('X-Orca-Plain-Len') || '0');
   const i0 = Number(res.headers.get('X-Orca-Chunk-Index') || '0');
   const body = new Uint8Array(await res.arrayBuffer());
-  const key = await mediaKey(s.key, t.resource);
+  const key = await streamKey(s, t.resource);
 
   const out: Uint8Array[] = [];
   let off = 0;
@@ -157,14 +187,27 @@ async function serveVideo(s: Session, t: Target, range: string | null, ct: strin
   });
 }
 
-/// Serve a whole small resource (thumbnail, subtitle) as one decrypted blob.
+/// Serve a whole small resource (thumbnail, subtitle) as one decrypted blob,
+/// from the in-RAM cache when we've already decrypted it this session.
 async function serveBlob(s: Session, t: Target, ct: string): Promise<Response> {
-  const w = await fetchWindow(s, t, 0);
+  let bytes = blobCache.get(t.resource);
+  if (bytes) {
+    // Touch for LRU recency.
+    blobCache.delete(t.resource);
+    blobCache.set(t.resource, bytes);
+  } else {
+    bytes = (await fetchWindow(s, t, 0)).plaintext;
+    if (blobCache.size >= BLOB_CACHE_MAX) {
+      const oldest = blobCache.keys().next().value;
+      if (oldest !== undefined) blobCache.delete(oldest);
+    }
+    blobCache.set(t.resource, bytes);
+  }
   const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
   headers['Content-Type'] = t.resource.startsWith('subs:')
     ? 'text/vtt; charset=utf-8'
-    : (ct || sniffImage(w.plaintext));
-  return new Response(w.plaintext, { status: 200, headers });
+    : (ct || sniffImage(bytes));
+  return new Response(bytes, { status: 200, headers });
 }
 
 /// Serve a full file as a decrypted download, streaming window by window so a

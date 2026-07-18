@@ -13,6 +13,7 @@ in SQLite unless `ORCA_MAX_HEIGHT` pins them.
 | `ORCA_PUBLIC_URL` | unset | Canonical HTTPS base used for public links |
 | `ORCA_CLIENT_TOFU` | `false` | Automatically trust newly registered submit-only clients |
 | `ORCA_ALLOW_PRIVATE_DNS` | `false` | Permit hostname DNS answers in reserved/private ranges for fake-IP proxies |
+| `ORCA_ENCRYPT_MEDIA` | `true` | Encrypt the media plane (video/thumbnails/subtitles) under the forward-secret session key. `false` serves media as cacheable plaintext authenticated by an HttpOnly session cookie — see note below |
 | `ORCA_CONCURRENCY` | `2` | Maximum jobs when polite mode is disabled |
 | `ORCA_POLITE` | `true` | Serialize jobs and add an inter-download delay |
 | `ORCA_SLEEP_MIN` / `ORCA_SLEEP_MAX` | `2` / `7` | Polite delay range in seconds |
@@ -42,3 +43,14 @@ freeing space and pressing resume picks them up from their partial files. Like
 `ORCA_MAX_HEIGHT`, setting it pins the value and makes the Settings field
 read-only.
 The total rate limit is divided among effective concurrent jobs.
+
+`ORCA_ENCRYPT_MEDIA` (default `true`) keeps the full end-to-end profile: media
+bytes are sealed under the forward-secret session key and decrypted in the
+browser's Service Worker, so a tunnel-edge MITM sees only ciphertext. Setting it
+to `false` selects the **selective profile** — the API/secrets plane (token,
+cookies, request bodies) stays fully forward-secret, but media is served as
+cacheable plaintext authenticated by an HttpOnly `orca_sess` session cookie (no
+token on the wire, no per-byte crypto, native `<video>`/`<img>` decoding). That
+trades media-*content* confidentiality at the edge for materially lower CPU/heat.
+Behind an HTTPS tunnel, also front it so the cookie gets the `Secure` attribute.
+The secrets plane is identical either way.

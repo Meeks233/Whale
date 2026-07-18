@@ -76,12 +76,15 @@ fn seal_slab(
     slab: &[u8],
 ) -> AppResult<Vec<u8>> {
     let p = e2ee::MEDIA_CHUNK as u64;
+    // One cipher for the whole window (key schedule once), sealing each chunk in
+    // place into `body` — no per-chunk cipher build and no per-chunk scratch Vec.
+    let cipher = e2ee::media_cipher(stream_key)?;
     let mut body =
         Vec::with_capacity(slab.len() + ((i1 - i0 + 1) as usize) * e2ee::MEDIA_TAG);
     for idx in i0..=i1 {
         let cs = (idx * p - read_start) as usize;
         let ce = (((idx + 1) * p).min(plain_len) - read_start) as usize;
-        body.extend(e2ee::seal_chunk(stream_key, idx, &slab[cs..ce])?);
+        e2ee::seal_into(&cipher, idx, &slab[cs..ce], &mut body)?;
     }
     Ok(body)
 }
@@ -156,9 +159,10 @@ pub fn serve_bytes(session_key: &[u8; 32], resource: &str, bytes: &[u8]) -> AppR
     let stream_key = e2ee::media_stream_key(session_key, resource);
     let plain_len = bytes.len() as u64;
     let p = e2ee::MEDIA_CHUNK;
+    let cipher = e2ee::media_cipher(&stream_key)?;
     let mut body = Vec::with_capacity(bytes.len() + bytes.len().div_ceil(p) * e2ee::MEDIA_TAG);
     for (idx, chunk) in bytes.chunks(p).enumerate() {
-        body.extend(e2ee::seal_chunk(&stream_key, idx as u64, chunk)?);
+        e2ee::seal_into(&cipher, idx as u64, chunk, &mut body)?;
     }
     respond(plain_len, 0, body)
 }

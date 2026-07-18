@@ -11,10 +11,18 @@ COPY web ./web
 # incremental rebuild only recompiles the `orca` crate instead of every
 # dependency (minutes -> seconds in the dev loop). The compiled binary lives in
 # the cache mount, so copy it to a normal path for the runtime stage to pick up.
+#
+# RUSTFLAGS enables inlined AES-NI + PCLMULQDQ (carry-less multiply for GHASH).
+# Without them the RustCrypto AEAD backend uses runtime CPU detection, which
+# blocks inlining and runs the whole E2EE symmetric layer (media sealing, API
+# body encryption, per-request authenticators) at ~1/3 of hardware speed. These
+# three features have shipped on every x86-64 CPU since ~2011 (AES-NI/PCLMULQDQ:
+# Westmere/Bulldozer; SSSE3: 2006), so the binary stays portable to any realistic
+# host — measured ~1.3x on GCM throughput here.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --release --locked \
+    RUSTFLAGS="-C target-feature=+aes,+ssse3,+pclmulqdq" cargo build --release --locked \
     && cp /app/target/release/orca /app/orca
 
 # ---- runtime ----

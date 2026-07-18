@@ -135,6 +135,15 @@ worker decrypts, reassembles, and answers the element with a normal `206`. Cloud
 (not-downloaded) items proxy the upstream through the same chunked window, so
 online playback is end-to-end encrypted and seekable just like a local file.
 
+**Optional selective profile (`ORCA_ENCRYPT_MEDIA=0`).** The media plane above is
+the default. An operator may instead serve media as cacheable plaintext,
+authenticated by an HttpOnly `orca_sess` session cookie (the sid — already a
+public handle), while the API/secrets plane keeps full forward-secret E2EE
+unchanged. This drops the per-byte AEAD and lets the browser cache media natively,
+at the cost of exposing media *content* (and a media-only, session-scoped cookie)
+to an active tunnel-edge MITM — media bytes it can already read in that profile.
+No long-term secret is exposed. See `docs/CONFIGURATION.md`.
+
 ## Threat model & residual risks
 
 - **Passive proxy / eavesdropper (incl. Cloudflare logs):** sees only ephemeral
