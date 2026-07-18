@@ -208,6 +208,38 @@ fn local_files<R: tauri::Runtime>(
     Ok(_items.iter().map(|_| LocalFile::default()).collect())
 }
 
+/// The envelope the `deleteLocal` mobile plugin resolves: how many on-device
+/// copies were actually removed.
+#[cfg(target_os = "android")]
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct DeleteResult {
+    #[serde(default)]
+    deleted: u32,
+}
+
+/// Delete this device's saved copies of the given items and forget them, so the
+/// space is reclaimed while the server records stay put (they still stream). Same
+/// batched, fingerprint-based resolution as `local_files`, so a copy an older
+/// build never recorded is still found and removed. Returns the number deleted.
+#[tauri::command]
+fn delete_local<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    _items: Vec<LocalQuery>,
+) -> Result<u32, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin::<DeleteResult>("deleteLocal", serde_json::json!({ "items": _items }))
+            .map(|r| r.deleted)
+            .map_err(|e| e.to_string());
+    }
+    // No local-save path off Android, so nothing was ever written to delete.
+    #[cfg(not(target_os = "android"))]
+    Ok(0)
+}
+
 /// Move saved downloads between `Downloads/Orca` and the hidden
 /// `Downloads/.Orca`, and pin where future saves land.
 #[tauri::command]
@@ -275,6 +307,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .invoke_handler(tauri::generate_handler![
             save_share_creds,
             android_permission_status,
@@ -283,6 +316,7 @@ pub fn run() {
             request_storage_permission,
             save_media,
             local_files,
+            delete_local,
             set_hide_downloads,
             track_download,
             take_pending_deeplink

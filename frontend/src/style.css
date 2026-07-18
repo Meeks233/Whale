@@ -540,9 +540,31 @@ input:focus { outline: none; border-color: var(--accent); }
    `min-width: 0` on both is load-bearing: a flex item's automatic minimum is its
    content, so without it an <input> refuses to shrink below its intrinsic ~203px
    and the pair adds up to 283 no matter what basis it's given. */
-.storage-ctl { gap: 6px; }
-.storage-ctl .input { flex: 0 1 123px; min-width: 0; }
-.storage-ctl .select { flex: 0 0 74px; min-width: 0; padding-right: 4px; }
+/* Number + unit as ONE value. The unit box is now the SAME width as the number
+   field (a 50/50 split of a fixed 210px track) — the two read as an equal pair
+   rather than a wide field with a cramped menu bolted on. The same shell is reused
+   by the speed-limit row and the download-threads row (whose unit is a static
+   .unit-static chip), so all three throughput controls line up. */
+.storage-ctl { gap: 6px; width: 210px; }
+.storage-ctl .input { flex: 1 1 0; min-width: 0; }
+.storage-ctl .select { flex: 1 1 0; min-width: 0; padding-right: 26px; }
+/* A fixed unit label (e.g. "threads") sized and shelled like the .select beside
+   it, but with no menu affordance — it's a caption, not a control. */
+.unit-static {
+  flex: 1 1 0;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  padding: 10px 8px;
+  background: var(--surface);
+  color: var(--muted);
+  white-space: nowrap;
+  user-select: none;
+}
 /* A switch's own top nudge is for stacked layouts; a row centres it already. */
 .form-row-ctl .site-subs-toggle { margin-top: 0; }
 /* The Server URL field is only meaningful in the native Tauri shell (which
@@ -1027,7 +1049,13 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
   cursor: pointer;
 }
 .sel-act:hover { background: var(--surface); }
-.sel-act svg { display: block; }
+/* Normalise every glyph to one size — the queue pause/resume icons that moved in
+   here are drawn at 18px, the rest at 20px, so pin them together. */
+.sel-act svg { display: block; width: 20px; height: 20px; }
+.sel-act:disabled { opacity: .38; cursor: default; }
+/* A parked queue is a state worth flagging, same accent the global toggle took on
+   the controls row. */
+.sel-act.active { color: var(--accent); }
 /* Delete is the one irreversible verb on the bar, and the only one coloured. */
 .sel-danger { color: var(--err); }
 /* The bar is pinned to the bottom edge, so its overflow opens upward — otherwise
@@ -1047,6 +1075,14 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 .filter-menu .site-menu-item { text-transform: capitalize; }
 /* The chosen row, in the same accent the funnel itself takes while filtering. */
 .filter-menu .filter-on { color: var(--accent); font-weight: 600; }
+/* Device-local filter (Android): the server can't answer "is it on THIS device",
+   so it hides every row the native scan didn't stamp `dev-local`, and every
+   playlist fold left with no on-device child. :has keeps it to one CSS pass with
+   no bookkeeping — the Tauri WebView is modern Chromium, so it's supported. */
+body.filter-device .item:not(.dev-local) { display: none; }
+body.filter-device .group-card:not(:has(.item.dev-local)) { display: none; }
+/* The one destructive entry in the select overflow menu, coloured like Delete. */
+.sel-menu .sel-menu-danger { color: var(--err); }
 /* Pad the bar for icon buttons, which bring their own hit area. */
 .select-bar { padding: 6px 8px; gap: 6px; }
 
@@ -1325,6 +1361,94 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 /* The measured part of a chip stands out from its label/icon. */
 .hits-n { color: var(--text); }
 .res-btn-label { color: var(--text); font-variant-numeric: tabular-nums; }
+
+/* ---- Merged size + resolution capsule (goal 3) ----------------------------
+   The size readout and the resolution picker share ONE rounded frame and read as
+   a single segmented control — the same merge the topbar's Filter + multi-select
+   buttons use. The group owns the outer border/radius; each half drops its own
+   border and full rounding, and a single hairline splits them. Sized to sit in
+   the same visual weight class as the bare .act glyphs to its right. */
+.chip-group {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--r-full);
+  overflow: hidden;
+}
+.chip-group .chip-seg {
+  border: none;
+  border-radius: 0;
+  background: var(--surface-2);
+}
+.chip-group .chip-seg + .chip-seg { border-left: 1px solid var(--border); }
+/* Slightly tighter than a lone chip so the paired control doesn't run wide. */
+.chip-group .chip-seg { padding: 4px 9px; }
+
+/* ---- Size breakdown popover (goal 3) -------------------------------------- */
+.size-pop {
+  position: fixed;
+  z-index: 90;
+  min-width: 150px;
+  max-width: 260px;
+  padding: 8px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .28);
+  font-size: 13px;
+}
+.size-pop-head {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+  margin: 0 2px 6px;
+}
+.size-pop-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 4px 2px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.size-pop-row span:first-child { color: var(--muted); }
+.size-pop-total {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 6px;
+  font-weight: 700;
+}
+
+/* ---- Clipboard auto-detect dialog (goal 4) -------------------------------- */
+.clip-list { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 4px; }
+.clip-loading { color: var(--muted); font-size: 14px; padding: 8px 2px; }
+.clip-item {
+  position: relative;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.clip-item-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.clip-item-sub { margin-top: 3px; font-size: 12px; color: var(--muted); }
+.clip-item-dup {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+}
 
 /* Video/audio pass label next to the status badge. */
 .phase { font-weight: 600; color: var(--run); }
@@ -1708,14 +1832,6 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 
 /* ---- Website management --------------------------------------------------- */
 .modal-card-wide { max-width: 680px; }
-.sites-global { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; margin-bottom: 14px; }
-/* No hairlines between the global defaults. They only ever appeared between
-   Share quality and Video format anyway — the other three rows are each followed
-   by a conditional `*-locked` notice, and `+` doesn't reach across it — so the
-   card showed exactly one rule, in one arbitrary gap, and read as a mistake.
-   Four rows in a small card don't need dividing; the card is the grouping. */
-.sites-global .form-row + .form-row { border-top: none; }
-.sites-global .row { display: flex; gap: 8px; align-items: center; }
 .sites-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 .sites-toolbar #site-search { flex: 1 1 auto; min-width: 0; }
 .sites-toolbar .sel-toggle { flex: 0 0 auto; }

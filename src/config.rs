@@ -83,9 +83,15 @@ pub struct Config {
     pub impersonate: Option<String>,
     /// yt-dlp `--concurrent-fragments` (multi-threaded fragment download).
     pub concurrent_fragments: usize,
+    /// True when `ORCA_CONCURRENT_FRAGMENTS` was set explicitly. It then wins over
+    /// the UI-stored global and the Settings field goes read-only.
+    pub concurrent_fragments_user_set: bool,
     /// Total download-rate cap (e.g. `"10M"`), split across `concurrency` jobs.
     /// `None` disables rate limiting.
     pub limit_rate: Option<String>,
+    /// True when `ORCA_LIMIT_RATE` was set explicitly. It then wins over the
+    /// UI-stored global and the Settings field goes read-only.
+    pub limit_rate_user_set: bool,
     pub container: Container,
     /// True when `ORCA_CONTAINER` was set explicitly by the operator. It then
     /// overrides the stored global setting and every per-site override, and the
@@ -242,11 +248,13 @@ impl Config {
         let sleep_requests = env_opt("ORCA_SLEEP_REQUESTS");
         let impersonate = env_opt("ORCA_IMPERSONATE");
 
+        let concurrent_fragments_user_set = env_opt("ORCA_CONCURRENT_FRAGMENTS").is_some();
         let concurrent_fragments: usize = env_or("ORCA_CONCURRENT_FRAGMENTS", "4")
             .parse()
             .context("ORCA_CONCURRENT_FRAGMENTS must be a positive integer")?;
 
         // Total rate cap across all concurrent jobs; empty/"0"/"none" disables it.
+        let limit_rate_user_set = env_opt("ORCA_LIMIT_RATE").is_some();
         let limit_rate = match env_opt("ORCA_LIMIT_RATE") {
             None => Some("10M".to_string()),
             Some(v) => match v.trim().to_ascii_lowercase().as_str() {
@@ -332,7 +340,9 @@ impl Config {
             sleep_requests,
             impersonate,
             concurrent_fragments,
+            concurrent_fragments_user_set,
             limit_rate,
+            limit_rate_user_set,
             container,
             container_user_set,
             output_template,
@@ -436,7 +446,7 @@ fn rand_below(bound: u64) -> u64 {
 
 /// Parse a human rate string (`"10M"`, `"500K"`, `"1.5MiB"`, `"1048576"`) into
 /// bytes/second. K/M/G are treated as binary (1024) multiples, matching yt-dlp.
-fn parse_rate(s: &str) -> Option<u64> {
+pub fn parse_rate(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
         return None;

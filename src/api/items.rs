@@ -223,6 +223,73 @@ pub async fn submit(
     }
 }
 
+/// POST /api/preview — probe a URL for metadata WITHOUT recording or enqueuing
+/// anything. Powers the clipboard auto-detect confirm dialog: the UI shows what
+/// each detected link actually is (title, uploader, duration, site) so a user
+/// confirms real videos, not bare URLs, before the download starts. A multi-video
+/// post (or playlist) probes into several entries, each returned as its own row.
+pub async fn preview(
+    State(state): State<AppState>,
+    Json(req): Json<SubmitRequest>,
+) -> AppResult<Response> {
+    if req.url.trim().is_empty() {
+        return Err(AppError::BadRequest("missing url".into()));
+    }
+    if req.url.len() > 8192 {
+        return Err(AppError::BadRequest("url is too long".into()));
+    }
+    let url = crate::url_normalize::normalize(&req.url);
+    crate::net_guard::guard(&url, state.cfg.allow_private_dns)
+        .await
+        .map_err(|r| AppError::BadRequest(r.reason().into()))?;
+
+    let sites = state.db.list_websites().await.unwrap_or_default();
+    let site = crate::websites::detect(&sites, &url);
+    if let Some(w) = site {
+        if !w.enabled {
+            return Err(AppError::BadRequest(format!(
+                "downloads from {} are disabled in Website settings",
+                w.name
+            )));
+        }
+    }
+    let site_key = site.map(|w| w.key.clone());
+    let site_name = site.map(|w| w.name.clone());
+    let cookie = crate::cookies::resolve_keyed(
+        &state.cookies,
+        state.cfg.cookies.as_deref(),
+        site_key.as_deref(),
+    );
+    let probes = match crate::ytdlp::probe(&state.cfg, &url, cookie.as_deref()).await {
+        Ok(p) => p,
+        Err(e) => {
+            let raw = e.to_string();
+            let msg = crate::ytdlp::explain_error(&url, &raw);
+            return Err(AppError::ProbeFailed(msg));
+        }
+    };
+    if probes.len() > 500 {
+        return Err(AppError::BadRequest("playlist exceeds 500 items".into()));
+    }
+    // Report whether each entry already exists (dedup), so the dialog can flag a
+    // link the user has downloaded before instead of silently re-fetching it.
+    let mut previews: Vec<serde_json::Value> = Vec::with_capacity(probes.len());
+    for p in &probes {
+        let known = state.db.find_by_archive_key(&p.archive_key()).await?.is_some();
+        previews.push(json!({
+            "title": p.title.clone(),
+            "uploader": p.uploader.clone(),
+            "duration": p.duration,
+            "webpage_url": p.webpage_url.clone(),
+            "extractor": p.extractor.clone(),
+            "site_name": site_name.clone(),
+            "available_heights": p.available_heights.clone(),
+            "duplicate": known,
+        }));
+    }
+    Ok(Json(json!({ "url": url, "previews": previews })).into_response())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ListParams {
     pub status: Option<String>,
@@ -556,12 +623,13 @@ pub async fn resolutions(
 ) -> AppResult<Response> {
     let item = item_by_slug(&state, &slug).await?;
     let id = item.id;
-    let downloaded: Vec<i64> = state
-        .db
-        .list_resolutions(id)
-        .await?
-        .into_iter()
-        .map(|r| r.height)
+    let variant_rows = state.db.list_resolutions(id).await?;
+    let downloaded: Vec<i64> = variant_rows.iter().map(|r| r.height).collect();
+    // Per-variant on-disk sizes, so the card's size capsule can break the total
+    // down into "1080p — 20.4 MB / 720p — 8.1 MB" without a second query.
+    let variants: Vec<serde_json::Value> = variant_rows
+        .iter()
+        .map(|r| json!({ "height": r.height, "filesize": r.filesize }))
         .collect();
 
     // Source heights come from the probe done at submit (or a prior refresh). Use
@@ -590,7 +658,8 @@ pub async fn resolutions(
     }
     let available: Vec<i64> = set.into_iter().rev().collect();
 
-    Ok(Json(json!({ "available": available, "downloaded": downloaded })).into_response())
+    Ok(Json(json!({ "available": available, "downloaded": downloaded, "variants": variants }))
+        .into_response())
 }
 
 /// Probe the source's available heights now and cache them. `None` on any
@@ -800,6 +869,13 @@ pub async fn get_settings(State(state): State<AppState>) -> AppResult<Response> 
         // without the unit choice mattering.
         "max_storage": crate::queue::resolve_max_storage(&state.cfg, &state.db).await,
         "max_storage_locked": state.cfg.max_storage.is_some(),
+        // Throughput knobs. `concurrent_fragments` is the yt-dlp thread count per
+        // download; `limit_rate` is the total rate cap in bytes/s (null = uncapped),
+        // rendered back into a number + unit by the UI just like max_storage.
+        "concurrent_fragments": crate::queue::resolve_concurrent_fragments(&state.cfg, &state.db).await,
+        "concurrent_fragments_locked": state.cfg.concurrent_fragments_user_set,
+        "limit_rate": crate::queue::resolve_limit_rate(&state.cfg, &state.db).await,
+        "limit_rate_locked": state.cfg.limit_rate_user_set,
     }))
     .into_response())
 }
@@ -839,6 +915,15 @@ pub struct SettingsRequest {
     /// requests and must not collapse into each other.
     #[serde(default, deserialize_with = "double_option")]
     pub max_storage: Option<Option<i64>>,
+    /// New yt-dlp thread count per download (`--concurrent-fragments`). Absent =
+    /// leave as-is; clamped to at least 1.
+    #[serde(default)]
+    pub concurrent_fragments: Option<i64>,
+    /// New total download-rate cap in bytes/s; `Some(0)`/`Some(null)` clears it
+    /// (unlimited), absent leaves it as-is. Double-`Option` for the same reason
+    /// `max_storage` is: "set to unlimited" and "field not sent" differ.
+    #[serde(default, deserialize_with = "double_option")]
+    pub limit_rate: Option<Option<i64>>,
 }
 
 /// Distinguish an omitted field (`None`) from an explicit `null` (`Some(None)`).
@@ -932,6 +1017,41 @@ pub async fn put_settings(
             }
             None => state.db.set_setting("max_storage", None).await?,
         }
+    }
+
+    if let Some(n) = req.concurrent_fragments {
+        if state.cfg.concurrent_fragments_user_set {
+            return Err(AppError::BadRequest(
+                "concurrent_fragments is pinned by the ORCA_CONCURRENT_FRAGMENTS environment \
+                 variable"
+                    .into(),
+            ));
+        }
+        if n < 1 {
+            return Err(AppError::BadRequest(
+                "concurrent_fragments must be at least 1".into(),
+            ));
+        }
+        state
+            .db
+            .set_setting("concurrent_fragments", Some(&n.to_string()))
+            .await?;
+    }
+
+    if let Some(bytes) = req.limit_rate {
+        if state.cfg.limit_rate_user_set {
+            return Err(AppError::BadRequest(
+                "limit_rate is pinned by the ORCA_LIMIT_RATE environment variable".into(),
+            ));
+        }
+        // Unlimited stores "0" (not a deleted row): the Config default is a
+        // non-zero cap, so a missing row means "use the default", while an explicit
+        // "0" is the user asking for no cap. resolve_limit_rate reads both.
+        let stored = bytes.filter(|b| *b > 0).unwrap_or(0);
+        state
+            .db
+            .set_setting("limit_rate", Some(&stored.to_string()))
+            .await?;
     }
 
     get_settings(State(state)).await

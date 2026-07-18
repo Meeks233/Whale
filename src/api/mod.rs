@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         // Serving a track itself can't (a <track> sends no headers) — that route
         // self-authorizes via `?token=` and lives in `public` below.
         .route("/api/items/:slug/subs", get(subs::list))
+        .route("/api/preview", post(items::preview))
         .route("/api/stats", get(items::stats))
         .route("/api/logs", get(items::logs))
         .route(

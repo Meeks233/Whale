@@ -35,6 +35,11 @@ tauri-plugin-process = "2"
 # project's own URLs — see capabilities/default.json.
 tauri-plugin-opener = "2"
 
+# Clipboard read: the auto-detect flow reads a copied URL and offers to grab it.
+# The Android WebView restricts the web Clipboard API, so the native plugin is the
+# reliable path (scoped to read-text in capabilities/default.json).
+tauri-plugin-clipboard-manager = "2"
+
 # Android/iOS share-target: receives ACTION_SEND intents into a queue the
 # frontend drains. Mobile-only so desktop builds stay lean.
 [target."cfg(any(target_os = \"android\", target_os = \"ios\"))".dependencies]

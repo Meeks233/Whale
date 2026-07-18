@@ -249,13 +249,20 @@ const els = {
   maxStorage: byId<HTMLInputElement>('max-storage'),
   maxStorageUnit: byId<HTMLSelectElement>('max-storage-unit'),
   maxStorageLocked: byId('max-storage-locked'),
+  rateLimit: byId<HTMLInputElement>('rate-limit'),
+  rateLimitUnit: byId<HTMLSelectElement>('rate-limit-unit'),
+  rateLimitLocked: byId('rate-limit-locked'),
+  concurrency: byId<HTMLInputElement>('concurrency'),
+  concurrencyLocked: byId('concurrency-locked'),
   permissionsPrompt: byId('permissions-prompt'),
   permissionsPromptClose: byId<HTMLButtonElement>('permissions-prompt-close'),
   permissionsPromptLater: byId<HTMLButtonElement>('permissions-prompt-later'),
   permissionsPromptNever: byId<HTMLButtonElement>('permissions-prompt-never'),
   // The four global-default rows are containers now, not controls: JS fills each
-  // with the same markup the site cards use, so the two can't drift apart.
-  sitesGlobal: document.querySelector<HTMLElement>('.sites-global')!,
+  // with the same markup the site cards use, so the two can't drift apart. They
+  // moved into Settings → Downloads, so the pick-is-the-save delegation binds to
+  // that box (#downloads-box) instead of the old .sites-global wrapper.
+  downloadsBox: byId('downloads-box'),
   maxRes: byId('max-res'),
   maxResLocked: byId('max-res-locked'),
   streamQuality: byId('stream-quality'),
@@ -280,6 +287,12 @@ const els = {
   resolutionClose: byId<HTMLButtonElement>('resolution-close'),
   resolutionCancel: byId<HTMLButtonElement>('resolution-cancel'),
   resolutionSave: byId<HTMLButtonElement>('resolution-save'),
+  clipConfirm: byId('clip-confirm'),
+  clipClose: byId<HTMLButtonElement>('clip-close'),
+  clipCancel: byId<HTMLButtonElement>('clip-cancel'),
+  clipConfirmBtn: byId<HTMLButtonElement>('clip-confirm-btn'),
+  clipList: byId('clip-list'),
+  clipSub: byId('clip-sub'),
   submitForm: byId<HTMLFormElement>('submit-form'),
   url: byId<HTMLInputElement>('url'),
   submitBtn: byId<HTMLButtonElement>('submit-btn'),
@@ -308,6 +321,7 @@ const els = {
   selUnshare: byId<HTMLButtonElement>('sel-unshare'),
   selCopy: byId<HTMLButtonElement>('sel-copy'),
   selClean: byId<HTMLButtonElement>('sel-clean'),
+  selDeleteLocal: byId<HTMLButtonElement>('sel-delete-local'),
   selDelete: byId<HTMLButtonElement>('sel-delete'),
   selCancel: byId<HTMLButtonElement>('sel-cancel'),
   selMore: byId<HTMLButtonElement>('sel-more'),
@@ -671,11 +685,11 @@ function hitsHtml(item: Item): string {
   return `<span class="chip" title="External link accesses">${EYE_SVG}<span class="hits-n">${n}</span></span>`;
 }
 
-// A file-size capsule at the LEFT of a card's action row (e.g. "20.4 MB").
-// Shows the COMBINED size of every downloaded resolution version (total_filesize),
-// so a multi-resolution item reflects its full on-disk footprint. Falls back to
-// the primary filesize. Vanishes when the size is unknown. Resolution lives in
-// its own button to the right of this chip (see resButtonHtml).
+// A file-size capsule (e.g. "20.4 MB"). Shows the COMBINED size of every downloaded
+// resolution version (total_filesize), so a multi-resolution item reflects its full
+// on-disk footprint. Falls back to the primary filesize. Vanishes when the size is
+// unknown. Used standalone only during a live upgrade job; otherwise the size is the
+// left half of the merged capsule (see sizeResHtml).
 function metaChipsHtml(item: Item): string {
   // No local file (stream-only "None" mode, or a copy backed away to the cloud)
   // → no on-disk footprint to report, so the size chip vanishes entirely.
@@ -694,23 +708,40 @@ function metaChip(res: string, size: string): string {
 // versions / quality options" (à la a video player's quality selector).
 const LAYERS_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></svg>`;
 
-// Resolution button: sits between the size chip and the delete icon. Shows the
-// item's current resolution and, on tap, opens the multi-select to add/remove
-// resolution versions. Only for completed video items (a known height).
-function resButtonHtml(item: Item): string {
-  // Canceled is here alongside completed because cancelling is not the end of an
-  // item's life — it's the point you most want to change your mind about which
-  // quality to fetch, and the picker is the only place that choice exists. Its
-  // partial is gone, so there is no downloaded set to contradict a new pick.
-  if (item.status !== 'completed' && item.status !== 'canceled') return '';
-  // Label logic: a known height → its label (e.g. "1080p"); a stream-only item
-  // (no local file) → "None"; a downloaded file of unknown height (older/audio
-  // records) → icon only, so we never mislabel a present file as "None".
+// The resolution segment's inner content (layers glyph + optional label). Shared
+// by the standalone button and the merged size+resolution capsule.
+// Label logic: a known height → its label (e.g. "1080p"); a stream-only item
+// (no local file) → "None"; a downloaded file of unknown height (older/audio
+// records) → icon only, so we never mislabel a present file as "None".
+function resSegInner(item: Item): string {
   let label = '';
   if (item.height && item.height > 0) label = resLabel(item.height);
   else if (!item.local_available) label = t('res.noneLabel');
   const labelSpan = label ? `<span class="res-btn-label">${esc(label)}</span>` : '';
-  return `<button class="chip chip-btn" data-act="resolutions" data-id="${item.id}" aria-label="${esc(t('res.pick'))}" title="${esc(t('res.pick'))}">${LAYERS_SVG}${labelSpan}</button>`;
+  return `${LAYERS_SVG}${labelSpan}`;
+}
+
+// Merged size + resolution capsule (goal 3): the file-size chip and the resolution
+// button share one rounded frame and read as a single segmented control — the exact
+// merge the topbar's Filter + multi-select buttons use. The size half is tappable to
+// break the total down per downloaded resolution version (openSizeBreakdown); the
+// resolution half opens the multi-select picker, as the standalone button did. Each
+// half degrades to a lone chip when only one of the two applies.
+//
+// Canceled is included alongside completed because cancelling is the moment you most
+// want to change which quality to fetch, and the picker is the only place to do it.
+function sizeResHtml(item: Item): string {
+  const hasSize = !!item.local_available;
+  const sizeTxt = hasSize ? fmtSize(item.total_filesize || item.filesize) : '';
+  const showRes = item.status === 'completed' || item.status === 'canceled';
+  const sizeSeg = sizeTxt
+    ? `<button class="chip chip-btn chip-seg chip-size" data-act="size-breakdown" data-id="${item.id}" aria-label="${esc(t('size.breakdown'))}" title="${esc(t('size.breakdown'))}">${esc(sizeTxt)}</button>`
+    : '';
+  const resSeg = showRes
+    ? `<button class="chip chip-btn chip-seg chip-res" data-act="resolutions" data-id="${item.id}" aria-label="${esc(t('res.pick'))}" title="${esc(t('res.pick'))}">${resSegInner(item)}</button>`
+    : '';
+  if (sizeSeg && resSeg) return `<div class="chip-group">${sizeSeg}${resSeg}</div>`;
+  return sizeSeg || resSeg;
 }
 
 // The live counterpart of the size + resolution capsules: while a download is in
@@ -727,6 +758,17 @@ function dlChipHtml(item: Item): string {
     ? `<span class="dl-res">${esc(resLabel(item.target_height))}</span>`
     : '';
   return `<span class="chip chip-dl" title="${esc(t('item.downloading'))}"><span class="chip-spin" aria-hidden="true">${SPINNER_SVG}</span>${label}</span>`;
+}
+
+// True when a resolution-upgrade job is in flight against an item whose stored
+// status is already terminal (completed / canceled). Such a job never flips the
+// item's status to running — the only live signal is the SSE progress map — so
+// this is what lets actionsHtml show the animated download chip (spinner + target
+// height) in the resolution slot instead of the frozen static resolution chip.
+function resJobLive(item: Item): boolean {
+  if (item.status !== 'completed' && item.status !== 'canceled') return false;
+  const p = state.progress.get(item.id);
+  return !!p && (p.status === 'running' || p.status === 'queued');
 }
 
 function actionsHtml(item: Item): string {
@@ -775,8 +817,16 @@ function actionsHtml(item: Item): string {
       <button class="act act-share ${pub ? 'act-on' : ''}" data-act="share" data-id="${item.id}" aria-label="${esc(t('aria.share'))}" title="${esc(t('aria.share'))}">${SHARE_SVG}</button>`
       : `<button class="act act-retry" data-act="retry" data-id="${item.id}" aria-label="${esc(t('item.download'))}" title="${esc(t('item.download'))}">${RETRY_SVG}</button>`;
   }
-  // Order: size chip · resolution button · pause/resume · delete · save/share.
-  return `<div class="actions">${metaChipsHtml(item)}${resButtonHtml(item)}${hold}${del}${mediaActions}</div>`;
+  // Order: size+resolution capsule · pause/resume · delete · save/share.
+  // While a resolution-upgrade job runs against this already-completed item its
+  // stored status never flips to running, so the resolution slot would otherwise
+  // freeze on the old number. Swap in the live download chip — the same animated
+  // spinner + target height a first download shows — for the duration of the job,
+  // keeping the size chip beside it (the merge is only for the resting state).
+  const sizeRes = resJobLive(item)
+    ? `${metaChipsHtml(item)}${dlChipHtml(item)}`
+    : sizeResHtml(item);
+  return `<div class="actions">${sizeRes}${hold}${del}${mediaActions}</div>`;
 }
 
 // Play affordance shown on a finished thumbnail (bottom-right). Tapping the
@@ -1225,6 +1275,18 @@ function patchRow(ev: ProgressEv): void {
   const li = state.rows.get(ev.id);
   if (!li) return; // unknown row; will appear on next list load
   const persisted = state.items.get(ev.id);
+  // A resolution-upgrade job runs against an item that is already terminal
+  // (completed / canceled): its stored status never changes, so actionsHtml would
+  // keep painting the frozen static resolution chip. Rebuild the row the moment
+  // the job goes live (the Running-with-no-percent start tick) so the resolution
+  // slot becomes the animated live download chip — resJobLive reads the tick we
+  // just recorded above. Done before the badge/bar patches below so they land on
+  // the fresh DOM; rowSig dedup keeps later ticks from re-rendering, so the
+  // spinner animates continuously until the job reaches a terminal state.
+  if (persisted && ev.status === 'running' && ev.percent == null
+      && (persisted.status === 'completed' || persisted.status === 'canceled')) {
+    upsertRow(persisted, false);
+  }
   li.querySelector('.thumb-wrap')?.classList.toggle(
     'media-pending',
     !!persisted && isMediaPending(persisted, ev.status),
@@ -1298,10 +1360,16 @@ function patchRow(ev: ProgressEv): void {
 // "Downloaded" and "Cloud only" split the completed rows by whether a file
 // actually landed, which is the distinction the cards themselves draw (Save +
 // Share vs a Download button), so it's the one worth filtering on.
-const FILTERS: Array<{ key: string; label: string; status?: string; local?: boolean }> = [
+// `deviceLocal` filters to items whose file is on THIS device — a client-side
+// notion the server can't answer (only the native local-file index knows), so it
+// carries no server param beyond narrowing to completed items and is applied by a
+// CSS pass (see the `filter-device` body class). `androidOnly` hides an entry
+// where there is no on-device concept at all (a browser).
+const FILTERS: Array<{ key: string; label: string; status?: string; local?: boolean; deviceLocal?: boolean; androidOnly?: boolean }> = [
   { key: '', label: 'filter.all' },
   { key: 'downloaded', label: 'filter.downloaded', status: 'completed', local: true },
   { key: 'cloud', label: 'filter.cloud', status: 'completed', local: false },
+  { key: 'device', label: 'filter.device', status: 'completed', deviceLocal: true, androidOnly: true },
   { key: 'running', label: 'status.running', status: 'running' },
   { key: 'queued', label: 'status.queued', status: 'queued' },
   { key: 'paused', label: 'status.paused', status: 'paused' },
@@ -1309,7 +1377,7 @@ const FILTERS: Array<{ key: string; label: string; status?: string; local?: bool
   { key: 'failed', label: 'status.failed', status: 'failed' },
 ];
 
-function activeFilter(): { status?: string; local?: boolean } | null {
+function activeFilter(): { status?: string; local?: boolean; deviceLocal?: boolean } | null {
   return FILTERS.find((f) => f.key === state.filter && f.key !== '') || null;
 }
 
@@ -1323,9 +1391,17 @@ function applyFilterParams(params: URLSearchParams): void {
   if (f.local != null) params.set('local', String(f.local));
 }
 
+// The device-local filter is presentational: the server returns completed items
+// and this CSS class hides every row (and every playlist fold with no surviving
+// child) that isn't on this device — see paintLocalMark, which stamps `dev-local`.
+function applyDeviceFilterClass(): void {
+  document.body.classList.toggle('filter-device', state.filter === 'device');
+}
+
 function renderFilterMenu(): void {
   els.filterMenu.textContent = '';
   for (const f of FILTERS) {
+    if (f.androidOnly && !isAndroidApp()) continue; // no on-device concept in a browser
     const b = document.createElement('button');
     b.className = 'site-menu-item' + (state.filter === f.key ? ' filter-on' : '');
     b.setAttribute('role', 'menuitem');
@@ -1334,6 +1410,7 @@ function renderFilterMenu(): void {
       closeFilterMenu();
       if (state.filter === f.key) return; // already showing this — don't refetch
       state.filter = f.key;
+      applyDeviceFilterClass();
       renderFilterMenu();
       // The funnel fills in as the at-a-glance "you are not seeing everything".
       els.filterBtn.classList.toggle('active', !!state.filter);
@@ -3030,6 +3107,14 @@ async function loadSettings(): Promise<void> {
     storageLoaded = typeof data.max_storage === 'number' ? data.max_storage : null;
     storageLocked = !!data.max_storage_locked;
     renderMaxStorage();
+    // Throughput knobs ride the same payload as the storage cap and save the same
+    // way (the sheet's one Save bar), so they're tracked alongside it.
+    rateLoaded = typeof data.limit_rate === 'number' ? data.limit_rate : null;
+    rateLocked = !!data.limit_rate_locked;
+    renderRateLimit();
+    concurrencyLoaded = typeof data.concurrent_fragments === 'number' ? data.concurrent_fragments : 4;
+    concurrencyLocked = !!data.concurrent_fragments_locked;
+    renderConcurrency();
     renderSaveBar();
   } catch (_) { /* offline / unauthorized — leave the controls as-is */ }
 }
@@ -3361,14 +3446,82 @@ els.resolutionList.addEventListener('keydown', (e) => {
   if (opt) { ev.preventDefault(); toggleResOpt(opt); }
 });
 
+// ---- Size breakdown popover (goal 3) --------------------------------------
+// Tapping the size half of a card's merged capsule opens this: the on-disk size
+// split per downloaded resolution version ("1080p — 20.4 MB"), read from the same
+// /resolutions endpoint the picker uses (its `variants` array). A lightweight
+// anchored popover (not a modal): it's a glance, not a task. One open at a time.
+let sizePopover: HTMLElement | null = null;
+function closeSizePopover(): void {
+  if (!sizePopover) return;
+  sizePopover.remove();
+  sizePopover = null;
+  document.removeEventListener('pointerdown', onOutsideSizePop, true);
+  window.removeEventListener('scroll', closeSizePopover, true);
+  window.removeEventListener('resize', closeSizePopover, true);
+}
+function onOutsideSizePop(e: Event): void {
+  if (sizePopover && !sizePopover.contains(e.target as Node)) closeSizePopover();
+}
+async function openSizeBreakdown(id: number, anchor: HTMLElement): Promise<void> {
+  if (!getToken()) { showTokenField(false); return; }
+  closeSizePopover();
+  let variants: { height: number; filesize: number }[] = [];
+  try {
+    const res = await apiFetch(itemPath(id, '/resolutions'));
+    if (res.ok) {
+      const data = await res.json();
+      variants = Array.isArray(data.variants) ? data.variants : [];
+    }
+  } catch (e) {
+    if (isUnauthorized(e)) return;
+  }
+  const item = state.items.get(id);
+  // No per-variant rows (older / audio-only records): fall back to the item's one total.
+  if (!variants.length && item) {
+    const total = item.total_filesize || item.filesize || 0;
+    if (item.height && total) variants = [{ height: item.height, filesize: total }];
+  }
+  if (!variants.length) { toast(t('size.none'), 'info'); return; }
+  const pop = document.createElement('div');
+  pop.className = 'size-pop';
+  pop.setAttribute('role', 'dialog');
+  const total = variants.reduce((s, v) => s + (v.filesize || 0), 0);
+  const rows = variants
+    .slice()
+    .sort((a, b) => b.height - a.height)
+    .map((v) => `<div class="size-pop-row"><span>${esc(resLabel(v.height) || v.height + 'p')}</span><span>${esc(fmtSize(v.filesize))}</span></div>`)
+    .join('');
+  const totalRow = variants.length > 1
+    ? `<div class="size-pop-row size-pop-total"><span>${esc(t('size.total'))}</span><span>${esc(fmtSize(total))}</span></div>`
+    : '';
+  pop.innerHTML = `<div class="size-pop-head">${esc(t('size.breakdown'))}</div>${rows}${totalRow}`;
+  document.body.appendChild(pop);
+  // Anchor just under the size chip, clamped to the viewport (position: fixed, so
+  // getBoundingClientRect's viewport coords map straight to top/left).
+  const r = anchor.getBoundingClientRect();
+  let left = r.left;
+  const w = pop.offsetWidth;
+  if (left + w > window.innerWidth - 8) left = window.innerWidth - 8 - w;
+  if (left < 8) left = 8;
+  pop.style.top = `${r.bottom + 6}px`;
+  pop.style.left = `${left}px`;
+  sizePopover = pop;
+  setTimeout(() => {
+    document.addEventListener('pointerdown', onOutsideSizePop, true);
+    window.addEventListener('scroll', closeSizePopover, true);
+    window.addEventListener('resize', closeSizePopover, true);
+  }, 0);
+}
+
 // ---- Global site defaults (Website management) ----------------------------
 // Picking a value IS the save — no Save button per control, which is how the
 // per-site dropdowns on the cards below have always behaved. PUT /api/settings
 // is a partial patch, so each control sends only its own field. Delegated,
 // because renderGlobalDefaults rebuilds these controls on every load and echo;
 // a listener bound to the element itself would die with it.
-if (els.sitesGlobal) {
-  els.sitesGlobal.addEventListener('change', (e) => {
+if (els.downloadsBox) {
+  els.downloadsBox.addEventListener('change', (e) => {
     const sel = (e.target as HTMLElement).closest('select[data-act]') as HTMLSelectElement | null;
     if (!sel) return;
     switch (sel.dataset.act) {
@@ -3377,7 +3530,7 @@ if (els.sitesGlobal) {
       case 'g-subs': commitGlobal({ subs: sel.value === 'on' }); break;
     }
   });
-  els.sitesGlobal.addEventListener('multiselect-change', (e) => {
+  els.downloadsBox.addEventListener('multiselect-change', (e) => {
     const detail = (e as CustomEvent).detail;
     if (detail.act !== 'g-res') return;
     // The global has no "follow global" option, so heights is never null here.
@@ -3431,6 +3584,50 @@ function renderMaxStorage(): void {
   els.maxStorageUnit.value = unit;
 }
 
+// ---- Speed limit + download threads ---------------------------------------
+// The speed cap is a number + unit exactly like the storage cap (same .storage-ctl
+// shell), stored/sent as bytes/second. Binary units so "10 MB/s" means the same
+// mebibytes/second yt-dlp's --limit-rate does. Largest first, like STORAGE_UNITS.
+const RATE_UNIT_BYTES = { 'KB/s': 1024, 'MB/s': 1024 ** 2, 'GB/s': 1024 ** 3 } as const;
+type RateUnit = keyof typeof RATE_UNIT_BYTES;
+const RATE_UNITS: RateUnit[] = ['GB/s', 'MB/s', 'KB/s'];
+function rateUnit(v: string): RateUnit {
+  return (RATE_UNITS as string[]).includes(v) ? (v as RateUnit) : 'MB/s';
+}
+let rateLoaded: number | null = null;   // committed cap in bytes/s; null = unlimited
+let rateLocked = false;                 // pinned by ORCA_LIMIT_RATE
+let concurrencyLoaded = 4;              // committed --concurrent-fragments count
+let concurrencyLocked = false;          // pinned by ORCA_CONCURRENT_FRAGMENTS
+
+/** The speed cap the fields currently describe, in bytes/s. Blank / 0 = unlimited. */
+function draftRate(): number | null {
+  const n = parseFloat(els.rateLimit.value);
+  if (!isFinite(n) || n <= 0) return null;
+  return Math.round(n * RATE_UNIT_BYTES[rateUnit(els.rateLimitUnit.value)]);
+}
+function renderRateLimit(): void {
+  const bytes = rateLoaded;
+  els.rateLimitLocked.classList.toggle('hidden', !rateLocked);
+  els.rateLimit.disabled = rateLocked;
+  els.rateLimitUnit.disabled = rateLocked;
+  if (!bytes || bytes <= 0) { els.rateLimit.value = ''; els.rateLimitUnit.value = 'MB/s'; return; }
+  const unit = RATE_UNITS.find((u) => bytes >= RATE_UNIT_BYTES[u]) ?? 'KB/s';
+  els.rateLimit.value = String(parseFloat((bytes / RATE_UNIT_BYTES[unit]).toFixed(2)));
+  els.rateLimitUnit.value = unit;
+}
+
+/** The thread count the field currently describes (≥1), or null when left blank. */
+function draftConcurrency(): number | null {
+  const n = parseInt(els.concurrency.value, 10);
+  if (!isFinite(n) || n < 1) return null;
+  return Math.min(n, 64);
+}
+function renderConcurrency(): void {
+  els.concurrencyLocked.classList.toggle('hidden', !concurrencyLocked);
+  els.concurrency.disabled = concurrencyLocked;
+  els.concurrency.value = String(concurrencyLoaded || 4);
+}
+
 // What each tracked field currently holds vs. what is committed. Compared as
 // strings so "same value retyped" doesn't count as dirty.
 function committedSettings(): Record<string, string> {
@@ -3439,6 +3636,8 @@ function committedSettings(): Record<string, string> {
     token: getToken(),
     archive: [...sealLoaded].sort().join('\n'),
     maxStorage: String(storageLoaded ?? ''),
+    rateLimit: String(rateLoaded ?? ''),
+    concurrency: String(concurrencyLoaded || 4),
   };
 }
 function draftSettings(): Record<string, string> {
@@ -3447,6 +3646,8 @@ function draftSettings(): Record<string, string> {
     token: (els.token.value || '').trim(),
     archive: [...parseArchiveKeys()].sort().join('\n'),
     maxStorage: String(draftMaxStorage() ?? ''),
+    rateLimit: String(draftRate() ?? ''),
+    concurrency: String(draftConcurrency() ?? (concurrencyLoaded || 4)),
   };
 }
 function dirtyFields(): string[] {
@@ -3456,8 +3657,11 @@ function dirtyFields(): string[] {
     // An env-pinned cap can't be saved, so it must never count as dirty: the
     // field is disabled, but a value that doesn't round-trip byte-for-byte (an
     // operator's odd `ORCA_MAX_STORAGE=12345678`) would otherwise strand the save
-    // bar open over a field nobody can edit.
-    .filter((k) => !(k === 'maxStorage' && storageLocked));
+    // bar open over a field nobody can edit. Same reasoning for the two throughput
+    // knobs when their env vars pin them.
+    .filter((k) => !(k === 'maxStorage' && storageLocked))
+    .filter((k) => !(k === 'rateLimit' && rateLocked))
+    .filter((k) => !(k === 'concurrency' && concurrencyLocked));
 }
 
 function renderSaveBar(): void {
@@ -3518,6 +3722,12 @@ async function saveSettings(): Promise<void> {
     if (dirty.includes('maxStorage')) {
       if (!(await applyMaxStorage())) return;
     }
+    if (dirty.includes('rateLimit')) {
+      if (!(await applyRateLimit())) return;
+    }
+    if (dirty.includes('concurrency')) {
+      if (!(await applyConcurrency())) return;
+    }
     toast(t('toast.settingsSaved'), 'ok');
   } finally {
     els.settingsSave.disabled = false;
@@ -3545,6 +3755,53 @@ async function applyMaxStorage(): Promise<boolean> {
     // A new cap changes what the gauge is a percentage OF, and can push the
     // install straight into the amber/red band — repaint it now, not in 30s.
     loadStats();
+    return true;
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    return false;
+  }
+}
+
+// Commit the global speed cap in bytes/s. `null` clears it (unlimited); the
+// backend tells that apart from "field not sent", like max_storage.
+async function applyRateLimit(): Promise<boolean> {
+  const bytes = draftRate();
+  try {
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ limit_rate: bytes }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
+      return false;
+    }
+    rateLoaded = typeof data.limit_rate === 'number' ? data.limit_rate : bytes;
+    renderRateLimit();
+    return true;
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    return false;
+  }
+}
+
+// Commit the per-download thread count (yt-dlp --concurrent-fragments).
+async function applyConcurrency(): Promise<boolean> {
+  const n = draftConcurrency() ?? concurrencyLoaded;
+  try {
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ concurrent_fragments: n }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast((data && (data.message || data.error)) || t('toast.saveFail'), 'error');
+      return false;
+    }
+    concurrencyLoaded = typeof data.concurrent_fragments === 'number' ? data.concurrent_fragments : n;
+    renderConcurrency();
     return true;
   } catch (e) {
     if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
@@ -3623,15 +3880,18 @@ if (els.settingsSave) {
     // Server order (newest first), as loaded — see loadArchive.
     els.sealArchive.value = [...sealLoaded].join('\n');
     renderMaxStorage();
+    renderRateLimit();
+    renderConcurrency();
     renderSaveBar();
   });
   // Track every tracked field. `input` fires on typing AND on paste/undo, which
-  // a `change` listener would miss until blur. The unit <select> is the exception:
-  // it only ever emits `change`.
-  for (const el of [els.server, els.token, els.sealArchive, els.maxStorage]) {
+  // a `change` listener would miss until blur. The unit <select>s are the
+  // exception: they only ever emit `change`.
+  for (const el of [els.server, els.token, els.sealArchive, els.maxStorage, els.rateLimit, els.concurrency]) {
     el.addEventListener('input', renderSaveBar);
   }
   els.maxStorageUnit.addEventListener('change', renderSaveBar);
+  els.rateLimitUnit.addEventListener('change', renderSaveBar);
 }
 
 els.submitForm.addEventListener('submit', (e) => {
@@ -3639,13 +3899,26 @@ els.submitForm.addEventListener('submit', (e) => {
   submitInput();
 });
 
+// Read clipboard text across platforms: the Tauri clipboard-manager plugin in the
+// native app (reliable inside the Android WebView, which restricts the web API),
+// falling back to the async Clipboard API in the browser. Returns '' on any denial.
+async function readClipboardText(): Promise<string> {
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (invoke) {
+    try { return String((await invoke('plugin:clipboard-manager|read_text')) || ''); }
+    catch (_) { /* plugin absent or denied — try the web API below */ }
+  }
+  return navigator.clipboard.readText();
+}
+
 // Paste button: pull the clipboard, keep every link in it, and stage them in the
-// box for review rather than submitting behind the user's back.
+// box for review rather than submitting behind the user's back. Also the gesture
+// that grants clipboard permission in a browser, after which auto-detect can read.
 if (els.pasteBtn) {
   els.pasteBtn.addEventListener('click', async () => {
     let text = '';
     try {
-      text = await navigator.clipboard.readText();
+      text = await readClipboardText();
     } catch (_) {
       // Denied permission, or a browser without the async clipboard read.
       toast(t('toast.pasteFail'), 'error');
@@ -3663,6 +3936,157 @@ if (els.pasteBtn) {
       'ok',
     );
   });
+}
+
+// ---- Clipboard auto-detect (goal 4) ---------------------------------------
+// When the app/page regains focus, read the clipboard and, if it holds link(s)
+// matching an ENABLED website in the registry, probe them for metadata and offer a
+// deliberate yes/no (the "link grabber" pattern download managers use) rather than
+// queueing behind the user's back. Confirm downloads them sequentially; cancel just
+// dismisses. Degrades quietly when clipboard permission or focus is missing — the
+// Paste button stays the manual route (and the gesture that grants permission).
+
+// Last clipboard text we acted on or dismissed, so a re-focus doesn't re-prompt for
+// the same content. Cleared implicitly when the clipboard text changes.
+let lastClipText = '';
+let clipOpen = false;
+let clipReadyLinks: string[] = [];
+
+// Hosts of every ENABLED website, lower-cased — the whitelist a copied link must
+// match before we offer to grab it.
+function linkMatchesWhitelist(url: string): boolean {
+  let host = '';
+  try { host = new URL(url).hostname.toLowerCase(); } catch (_) { return false; }
+  const hosts = websitesLoaded
+    .filter((w) => w.enabled)
+    .flatMap((w) => w.hosts.map((h) => h.toLowerCase()));
+  return hosts.some((h) => !!h && (host === h || host.endsWith('.' + h)));
+}
+
+async function detectClipboard(): Promise<void> {
+  if (clipOpen || !getToken() || document.hidden) return;
+  // Don't fight another open sheet (or re-open our own).
+  if (document.querySelector('.modal-overlay:not(.hidden)')) return;
+  let text = '';
+  try { text = (await readClipboardText()) || ''; } catch (_) { return; }
+  text = text.trim();
+  if (!text || text === lastClipText) return;
+  lastClipText = text;
+  const links = parseLinks(text).filter(linkMatchesWhitelist);
+  if (!links.length) return;
+  // Skip anything already staged in the input, so we don't nag about links the user
+  // is already about to submit.
+  const staged = els.url.value;
+  const fresh = links.filter((l) => staged.indexOf(l) < 0);
+  if (!fresh.length) return;
+  await showClipConfirm(fresh);
+}
+
+interface ClipPreview {
+  title?: string;
+  uploader?: string | null;
+  duration?: number | null;
+  site_name?: string | null;
+  extractor?: string;
+  available_heights?: number[];
+  duplicate?: boolean;
+}
+
+async function showClipConfirm(links: string[]): Promise<void> {
+  clipOpen = true;
+  clipReadyLinks = links;
+  els.clipList.textContent = '';
+  els.clipSub.textContent = t('clip.loading');
+  els.clipConfirmBtn.disabled = true;
+  const loading = document.createElement('div');
+  loading.className = 'clip-loading';
+  loading.textContent = t('clip.loading');
+  els.clipList.appendChild(loading);
+  openModal(els.clipConfirm);
+  // Probe each link for metadata, sequentially (the politeness submit already uses).
+  // A multi-video post probes into several entries — each becomes its own row.
+  const rows: { url: string; meta: ClipPreview | null }[] = [];
+  for (const url of links) {
+    try {
+      const res = await apiFetch('/api/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, options: {} }),
+      });
+      if (!res.ok) { rows.push({ url, meta: null }); continue; }
+      const data = await res.json();
+      const entries: ClipPreview[] = Array.isArray(data.previews) ? data.previews : [];
+      if (!entries.length) rows.push({ url, meta: null });
+      else for (const m of entries) rows.push({ url, meta: m });
+    } catch (e) {
+      if (isUnauthorized(e)) { closeModal(els.clipConfirm); clipOpen = false; return; }
+      rows.push({ url, meta: null });
+    }
+  }
+  // The dialog may have been dismissed while probing — don't repaint a closed sheet.
+  if (!clipOpen) return;
+  renderClipList(rows);
+  els.clipConfirmBtn.disabled = false;
+  els.clipSub.textContent = t(rows.length === 1 ? 'clip.subOne' : 'clip.subN', { n: rows.length });
+}
+
+// One row per probed video. Built with DOM methods (textContent), never innerHTML,
+// because the title/uploader are attacker-influenced strings from the source.
+function renderClipList(rows: { url: string; meta: ClipPreview | null }[]): void {
+  els.clipList.textContent = '';
+  for (const { url, meta } of rows) {
+    const row = document.createElement('div');
+    row.className = 'clip-item';
+    const title = document.createElement('div');
+    title.className = 'clip-item-title';
+    title.textContent = meta?.title || url;
+    row.appendChild(title);
+    const sub = document.createElement('div');
+    sub.className = 'clip-item-sub';
+    const bits: string[] = [];
+    if (meta?.site_name) bits.push(meta.site_name);
+    else if (meta?.extractor) bits.push(meta.extractor);
+    if (meta?.uploader) bits.push(meta.uploader);
+    if (meta?.duration) bits.push(fmtDuration(meta.duration));
+    if (meta?.available_heights && meta.available_heights[0]) bits.push(resLabel(meta.available_heights[0]));
+    sub.textContent = bits.join('  ·  ');
+    row.appendChild(sub);
+    if (meta?.duplicate) {
+      const dup = document.createElement('span');
+      dup.className = 'clip-item-dup';
+      dup.textContent = t('clip.duplicate');
+      row.appendChild(dup);
+    }
+    els.clipList.appendChild(row);
+  }
+}
+
+function dismissClip(): void {
+  closeModal(els.clipConfirm);
+  clipOpen = false;
+}
+if (els.clipConfirmBtn) {
+  els.clipConfirmBtn.addEventListener('click', async () => {
+    const links = clipReadyLinks.slice();
+    dismissClip();
+    for (const url of links) await submitUrl(url);
+  });
+  els.clipCancel.addEventListener('click', dismissClip);
+  els.clipClose.addEventListener('click', dismissClip);
+  els.clipConfirm.addEventListener('click', (e) => { if (e.target === els.clipConfirm) dismissClip(); });
+}
+
+// Detect on focus / visibility regain, plus once shortly after boot (the initial
+// focus can precede our listener). The native app also re-checks on Tauri resume.
+function setupClipboardWatch(): void {
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void detectClipboard(); });
+  window.addEventListener('focus', () => void detectClipboard());
+  const T = window.__TAURI__;
+  if (T?.event?.listen) {
+    T.event.listen('tauri://focus', () => void detectClipboard());
+    T.event.listen('tauri://resume', () => void detectClipboard());
+  }
+  setTimeout(() => void detectClipboard(), 900);
 }
 
 // ---- Back to top ----------------------------------------------------------
@@ -3826,6 +4250,7 @@ els.history.addEventListener('click', (e) => {
   const id = Number(btn.dataset.id);
   if (btn.dataset.act === 'share') openShare(id);
   else if (btn.dataset.act === 'delete') openDeleteConfirm([id]);
+  else if (btn.dataset.act === 'size-breakdown') openSizeBreakdown(id, btn);
   else if (btn.dataset.act === 'resolutions') openResolutions(id);
   else if (btn.dataset.act === 'pause') holdItem(id, true);
   else if (btn.dataset.act === 'resume') holdItem(id, false);
@@ -3910,6 +4335,7 @@ function enterSelectMode(): void {
   document.body.classList.add('selecting');
   els.selectToggle.classList.add('active');
   updateSelBar();
+  renderQueueToggle(); // the pause/cancel-all controls now live in this bar
 }
 function exitSelectMode(): void {
   state.selectMode = false;
@@ -3961,12 +4387,16 @@ function updateSelBar(): void {
 
   // Overflow. "Select all" flips to "Clear" once everything loaded is selected —
   // one entry covering both, the standard file-manager move.
+  // On-device copies the selection holds (Android only): what "Delete from device"
+  // can reclaim. Distinct from `local` above, which is the SERVER's file.
+  const onDevice = isAndroidApp() ? picked.filter((it) => localFileFor(it.slug)) : [];
   const inMenu = [
     show(els.selAll, loaded > 0),
     show(els.selInvert, loaded > 0),
     show(els.selCopy, done.length > 0),               // needs a finished item to link to
     show(els.selUnshare, picked.some((it) => it.public)), // needs a LIVE share
     show(els.selClean, local.length > 0),             // needs a file to erase
+    show(els.selDeleteLocal, onDevice.length > 0),    // needs an on-device copy to remove
   ];
   els.selAll.textContent = loaded > 0 && n >= loaded ? t('sel.clear') : t('sel.all');
   // An empty menu is worse than no menu: a ⋮ that opens onto nothing reads as a
@@ -4474,8 +4904,50 @@ async function batchClean(): Promise<void> {
   }
 }
 
+// Delete the on-device copies of the selected items (Android only), freeing space
+// on the phone while the server records stay put — they still stream and can be
+// re-downloaded. This is the device-side counterpart of batchClean, which erases
+// the SERVER copy. The native side finds each file by slug/fingerprint, deletes
+// it and forgets it; here we optimistically drop them from the local index so the
+// green Save mark clears and the device filter (if on) hides the now-gone rows.
+async function batchDeleteLocal(): Promise<void> {
+  const items = selectedItems().filter((it) => localFileFor(it.slug));
+  if (!items.length) { toast(t('toast.noLocalFiles'), 'info'); return; }
+  const confirmed = await askConfirm({
+    title: t('deleteLocalConfirm.title'),
+    sub: t('deleteLocalConfirm.sub', { n: items.length }),
+    confirm: t('sel.deleteLocal'),
+    danger: true,
+  });
+  if (!confirmed) return;
+  els.selDeleteLocal.disabled = true;
+  try {
+    const T = window.__TAURI__;
+    let deleted = 0;
+    if (T?.core?.invoke) {
+      deleted = await T.core.invoke('delete_local', {
+        items: items.map((it) => ({
+          slug: it.slug, name: it.filename || '', size: it.filesize || 0, height: it.height || 0,
+        })),
+      }) as number;
+    }
+    items.forEach((it) => {
+      localIndex.set(it.slug, null);
+      localFp.delete(it.slug);
+      paintLocalMark(it);
+    });
+    toast(deleted ? t('sel.deletedLocalN', { n: deleted }) : t('toast.deleteFail'), deleted ? 'ok' : 'error');
+  } catch (e) {
+    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+  } finally {
+    els.selDeleteLocal.disabled = false;
+    updateSelBar();
+  }
+}
+
 els.selDownload.addEventListener('click', () => batchDownload());
 els.selUpgrade.addEventListener('click', () => batchUpgrade());
+els.selDeleteLocal.addEventListener('click', batchDeleteLocal);
 els.selShare.addEventListener('click', () => openBatchShare());
 els.selUnshare.addEventListener('click', batchUnshare);
 els.selCopy.addEventListener('click', batchCopyLinks);
@@ -4666,6 +5138,9 @@ async function scanLocal(batch: Item[]): Promise<void> {
     localFp.set(it.slug, fingerprint(it));
     paintLocalMark(it);
   });
+  // A scan that just learned which selected items are on-device changes what the
+  // "Delete from device" action can act on — refresh the bar if it's open.
+  if (state.selectMode) updateSelBar();
 }
 
 // True when this device holds a copy shorter than the tallest version the server
@@ -4686,7 +5161,12 @@ function localUpgradeAvailable(item: Item): boolean {
 // slot becomes the Upgrade affordance (different glyph + label); a tap re-saves
 // over the local file (see the save-click intercept).
 function paintLocalMark(item: Item): void {
-  const save = state.rows.get(item.id)?.querySelector('.act-save') as HTMLElement | null;
+  const li = state.rows.get(item.id);
+  // Stamp the row itself so the device-local filter (a CSS pass) can hide the
+  // ones that aren't on this device. Set even when the Save icon is absent (a
+  // cloud-only card can still hold an older on-device save).
+  li?.classList.toggle('dev-local', !!localIndex.get(item.slug));
+  const save = li?.querySelector('.act-save') as HTMLElement | null;
   if (!save) return;
   save.classList.toggle('act-local', !!localIndex.get(item.slug));
   const upgrade = localUpgradeAvailable(item);
@@ -5370,3 +5850,4 @@ setupNativeShare();
 // would be the same question twice, in two windows.
 if (!welcoming) setupAppPermissionRefresh();
 setupDeepLinks();
+setupClipboardWatch();

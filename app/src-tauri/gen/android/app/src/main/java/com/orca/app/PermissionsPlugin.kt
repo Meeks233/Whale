@@ -266,6 +266,32 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   /**
+   * Delete this device's saved copies of the given items and forget them, so the
+   * user can reclaim the space while the server records stay put (they still
+   * stream). Batched and off the main thread, like [localFiles]: one directory
+   * listing resolves the lot. Resolves `{ deleted: n }` — the number of real
+   * files actually removed.
+   */
+  @Command
+  fun deleteLocal(invoke: Invoke) {
+    val items = invoke.parseArgs(LocalFilesArgs::class.java).items
+    Thread {
+      try {
+        val index = MediaSaver.folderIndex(activity)
+        var deleted = 0
+        for (q in items) {
+          val slug = q.slug.orEmpty()
+          if (slug.isEmpty()) continue
+          if (MediaSaver.deleteLocal(activity, slug, q.name.orEmpty(), q.size, q.height, index)) deleted++
+        }
+        invoke.resolve(JSObject().apply { put("deleted", deleted) })
+      } catch (e: Exception) {
+        invoke.reject(e.message ?: "could not delete local files")
+      }
+    }.start()
+  }
+
+  /**
    * Flip the hidden-folder setting, migrating everything already saved. The move
    * is filesystem work, so it runs off the main thread; the frontend awaits the
    * resolve to report how many files moved.

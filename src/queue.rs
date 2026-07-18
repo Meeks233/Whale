@@ -373,6 +373,44 @@ async fn resolve_subs(cfg: &Config, db: &Db, sites: &[crate::types::Website], ur
         .unwrap_or(cfg.subs)
 }
 
+/// Effective multi-threaded fragment count: `ORCA_CONCURRENT_FRAGMENTS` if the
+/// operator pinned it (always wins), else the UI-stored global, else the Config
+/// default. Clamped to at least 1.
+pub async fn resolve_concurrent_fragments(cfg: &Config, db: &Db) -> usize {
+    if cfg.concurrent_fragments_user_set {
+        return cfg.concurrent_fragments;
+    }
+    db.get_setting("concurrent_fragments")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(cfg.concurrent_fragments)
+}
+
+/// Effective total download-rate cap in bytes/s, or `None` for unlimited:
+/// `ORCA_LIMIT_RATE` if the operator pinned it (always wins), else the UI-stored
+/// global (a plain byte count, or `""`/`"0"` = unlimited), else the Config
+/// default. Mirrors `resolve_max_storage`.
+pub async fn resolve_limit_rate(cfg: &Config, db: &Db) -> Option<i64> {
+    if cfg.limit_rate_user_set {
+        return cfg
+            .limit_rate
+            .as_deref()
+            .and_then(crate::config::parse_rate)
+            .map(|b| b as i64);
+    }
+    match db.get_setting("limit_rate").await.ok().flatten() {
+        Some(v) => v.parse::<i64>().ok().filter(|b| *b > 0),
+        None => cfg
+            .limit_rate
+            .as_deref()
+            .and_then(crate::config::parse_rate)
+            .map(|b| b as i64),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_job(
     cfg: &Config,
@@ -481,6 +519,13 @@ async fn run_job(
     // the same subtitles, as the original.
     job_cfg.container = resolve_container(cfg, db, &sites, &item.webpage_url).await;
     job_cfg.subs = resolve_subs(cfg, db, &sites, &item.webpage_url).await;
+    // Global throughput knobs: thread count and total rate cap, both UI-adjustable
+    // unless env-pinned. The rate is stored/resolved as bytes/s; per_job_limit_rate
+    // then divides it across the concurrent jobs.
+    job_cfg.concurrent_fragments = resolve_concurrent_fragments(cfg, db).await;
+    job_cfg.limit_rate = resolve_limit_rate(cfg, db)
+        .await
+        .map(|bytes| bytes.to_string());
 
     // Register a cancel handle (keyed per item+variant) so a delete / deselect can
     // kill this download's yt-dlp child mid-flight instead of leaving it running.

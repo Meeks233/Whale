@@ -80,9 +80,35 @@ object OrcaApi {
     return String(cipher.doFinal(ciphertext), Charsets.UTF_8)
   }
 
-  private fun configureE2ee(conn: HttpURLConnection, credential: Credential, hasBody: Boolean) {
+  /**
+   * Prove possession of the derived key for exactly this request. The key id is
+   * public and replayable, so it only names the key — this seal is the credential.
+   * Bound to the method and target, stamped, and nonced, so it cannot be lifted
+   * onto another route or replayed. Mirrors `authenticator` in frontend/src/e2ee.ts
+   * and `verify_authenticator` in src/e2ee.rs; the server rejects any E2EE request
+   * without it (HTTP 401).
+   */
+  private fun authenticator(credential: Credential, method: String, path: String): String {
+    val nonce = ByteArray(16).also { SecureRandom().nextBytes(it) }
+      .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    val payload = JSONObject()
+      .put("t", System.currentTimeMillis() / 1000)
+      .put("n", nonce)
+      .toString()
+    val envelope = seal(credential, payload.toByteArray(Charsets.UTF_8), "orca-auth-v1\n$method\n$path")
+    return Base64.encodeToString(envelope.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+  }
+
+  private fun configureE2ee(
+    conn: HttpURLConnection,
+    credential: Credential,
+    method: String,
+    path: String,
+    hasBody: Boolean,
+  ) {
     conn.setRequestProperty("X-Orca-E2EE", "1")
     conn.setRequestProperty("X-Orca-Key-Id", credential.keyId)
+    conn.setRequestProperty("X-Orca-Auth", authenticator(credential, method, path))
     if (hasBody) {
       conn.setRequestProperty("X-Orca-Encrypted-Body", "1")
       conn.setRequestProperty("Content-Type", "text/plain")
@@ -111,7 +137,7 @@ object OrcaApi {
       requestMethod = "GET"
       connectTimeout = 15000
       readTimeout = 20000
-      configureE2ee(this, credential, false)
+      configureE2ee(this, credential, "GET", path, false)
     }
     return try {
       readResponse(conn, credential, path)
@@ -132,7 +158,7 @@ object OrcaApi {
       connectTimeout = 15000
       readTimeout = 30000
       doOutput = true
-      configureE2ee(this, credential, true)
+      configureE2ee(this, credential, "POST", path, true)
     }
     return try {
       conn.outputStream.use {

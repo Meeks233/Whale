@@ -87,25 +87,6 @@
       </div>
       <button id="select-toggle" class="icon-btn sel-toggle" aria-label="Select multiple" title="Select multiple" data-i18n-aria="aria.selectMultiple" data-i18n-title="aria.selectMultiple"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
     </div>
-    <!-- Global pause / resume, in the same icon-btn style as the select toggle
-         beside it. One signal to the backend, which decides what it covers: pause
-         parks everything queued or running, resume releases every paused item in
-         the order it was submitted. Which of the two it shows is driven by the
-         server-wide paused count from /api/stats — NOT by the page of items the
-         client happens to be holding — so it still offers Resume when the paused
-         work is further down the list than you've scrolled. Permanent, like the
-         select toggle: with an idle queue it disables rather than disappearing
-         (see renderQueueToggle). Starts hidden only until that first render, so
-         it can't flash the wrong icon. -->
-    <button id="queue-toggle" class="icon-btn hidden" type="button"></button>
-    <!-- Global cancel: the stop that keeps nothing. Pause beside it defers the
-         queue; this abandons it — every outstanding download (running, waiting,
-         or paused) gives up and throws its partial away, leaving the records
-         behind. Same server-driven rule as the pause toggle: it's permanent and
-         disables itself when there's nothing outstanding, rather than vanishing
-         (see renderQueueToggle). Always behind the confirm dialog — there is no
-         undo but re-downloading. -->
-    <button id="queue-cancel" class="icon-btn hidden" type="button" aria-label="Cancel all downloads" title="Cancel all downloads" data-i18n-aria="queue.cancelAll" data-i18n-title="queue.cancelAll"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     <div class="field">
       <input id="search" type="search"
              placeholder="Search…  failed  twitter  user:rick  title:&quot;never gonna&quot;  -title:live"
@@ -152,6 +133,15 @@
     <button id="sel-cancel" class="sel-act" aria-label="Done" title="Done" data-i18n-aria="sel.done" data-i18n-title="sel.done"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     <span id="select-count" class="select-count" data-i18n="sel.count0">Select items</span>
     <div class="select-actions">
+      <!-- Global queue controls, moved off the top controls row into the select
+           bar. Pause / resume parks or releases the whole queue; cancel abandons
+           every outstanding download (running, waiting or paused) and throws its
+           partial away. Both are server-driven and permanent — with an idle queue
+           they disable rather than vanish (see renderQueueToggle) — and are styled
+           as .sel-act icons so they match the rest of the bar. queue-toggle's
+           glyph (pause vs resume) is filled in by renderQueueToggle. -->
+      <button id="queue-toggle" class="sel-act hidden" type="button"></button>
+      <button id="queue-cancel" class="sel-act hidden" type="button" aria-label="Cancel all downloads" title="Cancel all downloads" data-i18n-aria="queue.cancelAll" data-i18n-title="queue.cancelAll"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <button id="sel-download" class="sel-act hidden" aria-label="Download" title="Download" data-i18n-aria="sel.download" data-i18n-title="sel.download"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></button>
       <!-- Upgrade: appears only when the selection holds items whose on-device copy
            is shorter than the taller version the server now has. A tap re-saves
@@ -169,6 +159,10 @@
           <button id="sel-copy" class="site-menu-item hidden" role="menuitem" data-i18n="sel.copy">Copy links</button>
           <button id="sel-unshare" class="site-menu-item hidden" role="menuitem" data-i18n="sel.unshare">Unshare</button>
           <button id="sel-clean" class="site-menu-item hidden" role="menuitem" data-i18n="sel.clean">Clean downloads</button>
+          <!-- Delete the on-device copies of the selection (Android only): frees
+               space on the phone while the server records stay and can re-stream.
+               Distinct from "Clean downloads", which erases the SERVER copy. -->
+          <button id="sel-delete-local" class="site-menu-item sel-menu-danger hidden" role="menuitem" data-i18n="sel.deleteLocal">Delete from device</button>
         </div>
       </div>
     </div>
@@ -302,7 +296,7 @@
        Android back button pops it (see app.js) instead of exiting the app. -->
   <div id="player" class="player-overlay hidden" aria-hidden="true">
     <button id="player-close" class="player-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
-    <video id="player-video" class="player-video" controls playsinline autoplay></video>
+    <video id="player-video" class="player-video" crossorigin="anonymous" controls playsinline autoplay></video>
   </div>
 
   <!-- Share dialog (Baidu-netdisk style). Opened by the share icon on a
@@ -459,7 +453,10 @@
            copy that explains them. -->
       <section class="set-group">
         <label data-i18n="settings.downloads">Downloads</label>
-        <div class="form-box">
+        <!-- id="downloads-box" so the pick-is-the-save delegation (formerly bound to
+             the websites sheet's .sites-global) reaches the four global-default
+             controls now living here. -->
+        <div id="downloads-box" class="form-box">
           <!-- Storage cap. A number + unit pair rather than a free-text size:
                "500 GB" typed by hand invites "500g", "0.5T" and typos that a
                parser then has to guess at. The unit defaults to GB, which is the
@@ -476,6 +473,49 @@
               </select>
             </div>
           </div>
+          <!-- Global speed cap. Same number + unit shape as the storage cap above
+               (reusing .storage-ctl), so the two throughput knobs read as one family.
+               Total across all concurrent jobs; blank = unlimited. -->
+          <div id="rate-limit-row" class="form-row">
+            <label class="form-row-label" for="rate-limit" data-i18n="settings.rateLimit">Speed limit</label>
+            <div class="form-row-ctl storage-ctl">
+              <input id="rate-limit" class="input" type="number" min="0" step="0.1" inputmode="decimal" autocomplete="off" placeholder="0" data-i18n-ph="ph.rateLimit">
+              <select id="rate-limit-unit" class="select">
+                <option value="KB/s">KB/s</option>
+                <option value="MB/s" selected>MB/s</option>
+                <option value="GB/s">GB/s</option>
+              </select>
+            </div>
+          </div>
+          <!-- Multi-threaded fragment count per download (yt-dlp --concurrent-fragments).
+               A number + a fixed "threads" unit chip, mirroring the pair above. -->
+          <div id="concurrency-row" class="form-row">
+            <label class="form-row-label" for="concurrency" data-i18n="settings.concurrency">Download threads</label>
+            <div class="form-row-ctl storage-ctl">
+              <input id="concurrency" class="input" type="number" min="1" max="64" step="1" inputmode="numeric" autocomplete="off" placeholder="4">
+              <span class="unit-static" data-i18n="settings.concurrencyUnit">threads</span>
+            </div>
+          </div>
+          <!-- Global download defaults, moved here from the Website management sheet:
+               the fallback any site uses unless it pins its own. Every field is built
+               by JS (renderGlobalDefaults) so it shares one code path with the site
+               cards. Picking a value IS the save (no Save button), like the cards. -->
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.maxRes">Maximum resolution</span>
+            <div class="form-row-ctl" id="max-res"></div>
+          </div>
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.streamQuality">Share quality</span>
+            <div class="form-row-ctl" id="stream-quality"></div>
+          </div>
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.format">Video format</span>
+            <div class="form-row-ctl" id="format"></div>
+          </div>
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.subs">Subtitles</span>
+            <div class="form-row-ctl" id="subs"></div>
+          </div>
           <!-- App-only: where "Save" puts files, and whether that folder is hidden. -->
           <div id="hide-dl-row" class="form-row hidden">
             <span class="form-row-label" data-i18n="settings.hideDl">Hide my downloads</span>
@@ -486,6 +526,11 @@
         </div>
         <p class="hint-muted" data-i18n="settings.maxStorageHint">Blank or 0 means unlimited. Once free space drops under 5%, new links are still recorded and still play online — they just wait to download until there's room.</p>
         <p id="max-storage-locked" class="hint-muted hidden" data-i18n="settings.maxStorageLocked">Pinned by the ORCA_MAX_STORAGE environment variable.</p>
+        <p id="rate-limit-locked" class="hint-muted hidden" data-i18n="settings.rateLimitLocked">Pinned by the ORCA_LIMIT_RATE environment variable.</p>
+        <p id="concurrency-locked" class="hint-muted hidden" data-i18n="settings.concurrencyLocked">Pinned by the ORCA_CONCURRENT_FRAGMENTS environment variable.</p>
+        <p id="max-res-locked" class="hint hidden" data-i18n="settings.maxResLocked">Pinned by the ORCA_MAX_HEIGHT environment variable.</p>
+        <p id="format-locked" class="hint hidden" data-i18n="settings.formatLocked">Pinned by the ORCA_CONTAINER environment variable.</p>
+        <p id="subs-locked" class="hint hidden" data-i18n="settings.subsLocked">Pinned by the ORCA_SUBS environment variable.</p>
         <p id="hide-dl-hint" class="hint-muted hidden" data-i18n="settings.hideDlHint">Saves to Downloads/.Orca instead of Downloads/Orca, out of the gallery. Existing files move too.</p>
         <p id="hide-dl-needs-perm" class="hint hidden" data-i18n="settings.hideDlNeedsPerm">Allow storage access first.</p>
 
@@ -552,43 +597,9 @@
       <button id="websites-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
       <h2 id="websites-title" class="modal-heading" data-i18n="sites.title">Website management</h2>
 
-      <!-- Global defaults: the fallback for any site that doesn't pin its own.
-           None of these carry a Save button — picking a value IS the save, which
-           is how the per-site controls on the cards below have always worked, so
-           the whole sheet now behaves the same way.
-           Deliberately no explainer text under these rows: they are the same four
-           controls each site card repeats below, and a hint here that the cards
-           don't have made the two read as different features. The `*-locked`
-           notices stay — those are conditional, and a disabled control with no
-           stated reason is worse than no control. Every field is built by JS
-           (renderGlobalDefaults) so it shares one code path with the cards. -->
-      <div class="sites-global">
-        <label data-i18n="sites.defaults">Defaults</label>
-        <div class="form-row">
-          <span class="form-row-label" data-i18n="settings.maxRes">Maximum resolution</span>
-          <div class="form-row-ctl" id="max-res"></div>
-        </div>
-        <p id="max-res-locked" class="hint hidden" data-i18n="settings.maxResLocked">Pinned by the ORCA_MAX_HEIGHT environment variable.</p>
-
-        <div class="form-row">
-          <span class="form-row-label" data-i18n="settings.streamQuality">Share quality</span>
-          <div class="form-row-ctl" id="stream-quality"></div>
-        </div>
-
-        <div class="form-row">
-          <span class="form-row-label" data-i18n="settings.format">Video format</span>
-          <div class="form-row-ctl" id="format"></div>
-        </div>
-        <p id="format-locked" class="hint hidden" data-i18n="settings.formatLocked">Pinned by the ORCA_CONTAINER environment variable.</p>
-
-        <!-- Each site can still opt out of subtitles on its own card. -->
-        <div class="form-row">
-          <span class="form-row-label" data-i18n="settings.subs">Subtitles</span>
-          <div class="form-row-ctl" id="subs"></div>
-        </div>
-        <p id="subs-locked" class="hint hidden" data-i18n="settings.subsLocked">Pinned by the ORCA_SUBS environment variable.</p>
-      </div>
-
+      <!-- Site-level defaults (max resolution, share quality, format, subtitles)
+           moved to Settings → Downloads. This sheet is now purely per-site: cookies,
+           enable/disable, alternate domains, and merges. -->
       <div class="sites-toolbar">
         <button id="site-sel-toggle" class="icon-btn sel-toggle" type="button" aria-label="Select" data-i18n-aria="sites.select" title="Select">
           <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg>
@@ -648,6 +659,23 @@
       <div class="share-actions">
         <button id="resolution-cancel" class="btn btn-ghost" data-i18n="res.cancel">Cancel</button>
         <button id="resolution-save" class="btn" data-i18n="res.apply">Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Clipboard auto-detect confirm. When the app/page regains focus and the
+       clipboard holds link(s) that match an enabled website, they are probed for
+       metadata and shown here for a deliberate yes/no — the "link grabber" pattern
+       download managers use — rather than being queued behind the user's back. -->
+  <div id="clip-confirm" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="clip-title">
+    <div class="modal-card">
+      <button id="clip-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="clip-title" class="modal-heading" data-i18n="clip.title">Download detected link?</h2>
+      <p id="clip-sub" class="hint-muted" data-i18n="clip.sub">Found in your clipboard.</p>
+      <div id="clip-list" class="clip-list" role="group" aria-labelledby="clip-title"></div>
+      <div class="share-actions">
+        <button id="clip-cancel" class="btn btn-ghost" data-i18n="clip.cancel">Not now</button>
+        <button id="clip-confirm-btn" class="btn" data-i18n="clip.confirm">Download</button>
       </div>
     </div>
   </div>

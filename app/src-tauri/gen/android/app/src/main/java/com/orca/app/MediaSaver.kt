@@ -158,6 +158,23 @@ object MediaSaver {
     return Local(found.absolutePath, height)
   }
 
+  /**
+   * Delete this device's saved copy of [slug], if there is one, and forget it.
+   * Resolves the file the same way playback does — registry first, then a
+   * fingerprint match in [index] — so a copy an older build never recorded is
+   * still found and removed. The registry entry is dropped regardless (it is
+   * stale either way), and the media scanner is told the path is gone. Returns
+   * true only when a real file was removed, so a caller can count deletions.
+   */
+  fun deleteLocal(ctx: Context, slug: String, name: String, size: Long, height: Int, index: FolderIndex): Boolean {
+    val local = resolve(ctx, slug, name, size, height, index) ?: return false
+    val f = File(local.path)
+    val deleted = f.isFile && f.delete()
+    forget(ctx, slug)
+    if (deleted) rescan(ctx, f)
+    return deleted
+  }
+
   /** A folder index for the active save folder, pre-claiming every registered path. */
   fun folderIndex(ctx: Context): FolderIndex {
     val claimed = filesPrefs(ctx).all.values.mapNotNull { raw ->
