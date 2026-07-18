@@ -9,17 +9,25 @@
 //! Serving is delegated to `tower_http::services::ServeFile`, which handles
 //! Range/HEAD/Content-Type.
 
-use super::AppState;
+use super::{emedia, AppState};
 use crate::error::AppError;
 use crate::types::{Item, Status};
 use axum::body::Body;
-use axum::extract::{Path, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::header;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use std::net::SocketAddr;
 use std::path::Path as FsPath;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
+
+/// Peer IP from the connect-info extension, for the loopback plaintext fallback.
+fn peer_ip(req: &Request) -> Option<std::net::IpAddr> {
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip())
+}
 
 /// Browser-like UA for proxied upstream fetches. Some CDNs (X's `video.twimg.com`)
 /// serve differently to a default library UA; matching a real browser keeps the
@@ -38,19 +46,28 @@ pub async fn file(
     req: Request,
 ) -> Result<Response, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
-    let token = super::auth::extract_token(req.headers(), &query);
-    if !token
-        .as_deref()
-        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
-    {
-        return Err(AppError::Unauthorized);
-    }
+    let path = req.uri().path().to_string();
+    let session_key =
+        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
     let item = state
         .db
         .find_by_slug(&slug)
         .await?
         .ok_or(AppError::NotFound)?;
-    serve_item(&state.cfg.download_dir, item, req).await
+    match session_key {
+        // Secure channel: seal the file's bytes for the Service Worker to decrypt.
+        Some(key) => {
+            ensure_media_ready(item.status)?;
+            let file_path = resolve_local_file(&state.cfg.download_dir, &item)?;
+            let range = req
+                .headers()
+                .get(crate::e2ee::HEADER_RANGE_REQ)
+                .and_then(|v| v.to_str().ok());
+            emedia::serve_file(&key, &format!("file:{slug}"), &file_path, range).await
+        }
+        // Loopback plaintext fallback (local curl/download): serve the file directly.
+        None => serve_item(&state.cfg.download_dir, item, req).await,
+    }
 }
 
 /// GET /api/p/:slug — tokenless public stream, keyed by the item's random slug.
@@ -154,31 +171,102 @@ pub async fn stream(
     req: Request,
 ) -> Result<Response, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
-    let token = super::auth::extract_token(req.headers(), &query);
-    if !token
-        .as_deref()
-        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
-    {
-        return Err(AppError::Unauthorized);
-    }
+    let path = req.uri().path().to_string();
+    let session_key =
+        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
     let (item, upstream, cookie) = resolve_stream_target(&state, &slug).await?;
     let cookie_header = cookie_header_for(cookie.as_deref(), &upstream);
-    let range = req
-        .headers()
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
 
-    // `proxy_upstream` guards the CDN URL and every redirect hop, so a poisoned
-    // row can't make the *server* fetch an internal address (SSRF).
-    proxy_upstream(
-        &upstream,
-        &item.webpage_url,
+    match session_key {
+        // Secure channel: proxy the upstream window and seal it for the SW.
+        Some(key) => {
+            let range = req
+                .headers()
+                .get(crate::e2ee::HEADER_RANGE_REQ)
+                .and_then(|v| v.to_str().ok());
+            stream_encrypted(
+                &key,
+                &slug,
+                &upstream,
+                &item.webpage_url,
+                cookie_header,
+                range,
+                state.cfg.allow_private_dns,
+            )
+            .await
+        }
+        // Loopback plaintext fallback: stream the bytes through directly.
+        None => {
+            let range = req
+                .headers()
+                .get(header::RANGE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            // `proxy_upstream` guards the CDN URL and every redirect hop, so a
+            // poisoned row can't make the *server* fetch an internal address.
+            proxy_upstream(
+                &upstream,
+                &item.webpage_url,
+                cookie_header,
+                range,
+                state.cfg.allow_private_dns,
+            )
+            .await
+        }
+    }
+}
+
+/// Proxy one plaintext window of an upstream stream and seal it under the media
+/// stream key. A single ranged upstream fetch buffers the window (≤ ~1 MiB) and
+/// its `Content-Range` reveals the total length, which lets the Service Worker
+/// bound seeks — so cloud playback stays seekable end-to-end encrypted, the same
+/// as a downloaded file.
+async fn stream_encrypted(
+    session_key: &[u8; 32],
+    slug: &str,
+    upstream: &str,
+    referer: &str,
+    cookie_header: Option<String>,
+    range: Option<&str>,
+    allow_private_dns: bool,
+) -> Result<Response, AppError> {
+    let p = crate::e2ee::MEDIA_CHUNK as u64;
+    let (start, end) = range.and_then(emedia::parse_range).unwrap_or((0, None));
+    let i0 = start / p;
+    let read_start = i0 * p;
+    // Fetch a full window from the chunk-aligned start; the upstream caps it at EOF.
+    let window_bytes = super::emedia::WINDOW_MAX_BYTES;
+    let fetch_range = format!("bytes={}-{}", read_start, read_start + window_bytes as u64 - 1);
+    let (slab, total) = fetch_upstream_window(
+        upstream,
+        referer,
         cookie_header,
-        range,
-        state.cfg.allow_private_dns,
+        &fetch_range,
+        allow_private_dns,
+        window_bytes,
     )
-    .await
+    .await?;
+    let plain_len = total.unwrap_or(read_start + slab.len() as u64);
+    let resource = format!("stream:{slug}");
+    let Some(w) = emedia::plan(plain_len, start, end) else {
+        return emedia::serve_window(
+            session_key,
+            &resource,
+            plain_len,
+            &emedia::Window {
+                i0,
+                i1: i0,
+                read_start,
+                read_end: read_start,
+            },
+            &[],
+        );
+    };
+    let needed = (w.read_end - w.read_start) as usize;
+    if slab.len() < needed {
+        return Err(AppError::Internal("upstream returned a short window".into()));
+    }
+    emedia::serve_window(session_key, &resource, plain_len, &w, &slab[..needed])
 }
 
 /// Resolve and cache an online stream URL without fetching media bytes. The UI
@@ -190,13 +278,9 @@ pub async fn prepare_stream(
     req: Request,
 ) -> Result<StatusCode, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
-    let token = super::auth::extract_token(req.headers(), &query);
-    if !token
-        .as_deref()
-        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
-    {
-        return Err(AppError::Unauthorized);
-    }
+    let path = req.uri().path().to_string();
+    // Auth only — no body is returned, so nothing to encrypt.
+    super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
     let _ = resolve_stream_target(&state, &slug).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -337,8 +421,88 @@ async fn proxy_client() -> Result<&'static reqwest::Client, AppError> {
         .map_err(|e| AppError::Internal(format!("http client build failed: {e}")))
 }
 
-/// GET /api/items/:slug/thumb — **thumbnail proxy + cache** (token-required via
-/// `?token=`, because an `<img>` can't send an Authorization header).
+/// Fetch one ranged window of an upstream stream fully into memory, guarding
+/// every redirect hop for SSRF like `proxy_upstream`. Returns the buffered bytes
+/// and the resource's total length parsed from `Content-Range` (`None` if the
+/// upstream didn't report it). `cap` bounds the buffer so a hostile row can't
+/// stream an unbounded body into memory.
+async fn fetch_upstream_window(
+    upstream: &str,
+    referer: &str,
+    cookie_header: Option<String>,
+    range: &str,
+    allow_private_dns: bool,
+    cap: usize,
+) -> Result<(Vec<u8>, Option<u64>), AppError> {
+    let client = proxy_client().await?;
+    let mut url = upstream.to_string();
+    let mut redirects = 0;
+    let resp = loop {
+        crate::net_guard::guard(&url, allow_private_dns)
+            .await
+            .map_err(|r| AppError::BadRequest(r.reason().into()))?;
+        let mut rb = client
+            .get(&url)
+            .header(reqwest::header::USER_AGENT, PROXY_UA)
+            .header(reqwest::header::REFERER, referer)
+            .header(reqwest::header::RANGE, range);
+        if let Some(c) = &cookie_header {
+            rb = rb.header(reqwest::header::COOKIE, c.clone());
+        }
+        let resp = rb
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("upstream fetch failed: {e}")))?;
+        if !resp.status().is_redirection() {
+            break resp;
+        }
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| AppError::Internal("upstream redirect without location".into()))?;
+        let next = reqwest::Url::parse(&url)
+            .and_then(|base| base.join(location))
+            .map_err(|_| AppError::BadRequest("upstream redirect is not a valid url".into()))?;
+        if !matches!(next.scheme(), "http" | "https") {
+            return Err(AppError::BadRequest("upstream redirect scheme".into()));
+        }
+        url = next.into();
+        redirects += 1;
+        if redirects > MAX_REDIRECTS {
+            return Err(AppError::BadRequest("too many upstream redirects".into()));
+        }
+    };
+    if !resp.status().is_success() {
+        return Err(AppError::BadRequest("upstream stream error".into()));
+    }
+    // Total length lives after the slash in `Content-Range: bytes a-b/total`;
+    // fall back to `Content-Length` for a non-ranged 200.
+    let total = resp
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.rsplit('/').next())
+        .and_then(|t| t.trim().parse::<u64>().ok())
+        .or_else(|| {
+            resp.headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        });
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| AppError::Internal(format!("upstream read failed: {e}")))?;
+    if bytes.len() > cap {
+        return Err(AppError::BadRequest("upstream window too large".into()));
+    }
+    Ok((bytes.to_vec(), total))
+}
+
+/// GET /api/items/:slug/thumb — **thumbnail proxy + cache**. Authenticates via the
+/// secure channel (Service Worker headers) or the loopback `?token=` fallback,
+/// because an `<img>` can't send an Authorization header.
 ///
 /// The frontend used to point `<img src>` straight at the upstream thumbnail URL
 /// (e.g. `pbs.twimg.com`), which broke the moment a browser or an ad/tracker
@@ -353,13 +517,9 @@ pub async fn thumb(
     req: Request,
 ) -> Result<Response, AppError> {
     let query = req.uri().query().unwrap_or("").to_string();
-    let token = super::auth::extract_token(req.headers(), &query);
-    if !token
-        .as_deref()
-        .is_some_and(|t| super::auth::ct_eq(t, &state.cfg.token))
-    {
-        return Err(AppError::Unauthorized);
-    }
+    let path = req.uri().path().to_string();
+    let session_key =
+        super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
     let item = state
         .db
         .find_by_slug(&slug)
@@ -386,15 +546,18 @@ pub async fn thumb(
         }
     };
 
-    let content_type = sniff_image_type(&bytes);
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, content_type)
-        // The bytes never change for a given slug, so let the browser keep them.
-        .header(header::CACHE_CONTROL, "private, max-age=604800, immutable")
-        .body(Body::from(bytes))
-        .map(IntoResponse::into_response)
-        .map_err(|e| AppError::Internal(format!("thumb response build failed: {e}")))
+    match session_key {
+        // Secure channel: seal the image; the Service Worker decrypts it to a blob.
+        Some(key) => emedia::serve_bytes(&key, &format!("thumb:{slug}"), &bytes),
+        // Loopback plaintext fallback.
+        None => Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, sniff_image_type(&bytes))
+            .header(header::CACHE_CONTROL, "private, max-age=604800, immutable")
+            .body(Body::from(bytes))
+            .map(IntoResponse::into_response)
+            .map_err(|e| AppError::Internal(format!("thumb response build failed: {e}"))),
+    }
 }
 
 /// Fetch an upstream thumbnail into memory, guarding every redirect hop for SSRF
@@ -613,13 +776,7 @@ pub(super) fn cookie_header_for(cookie_file: Option<&FsPath>, upstream: &str) ->
 async fn serve_item(root: &FsPath, item: Item, req: Request) -> Result<Response, AppError> {
     ensure_media_ready(item.status)?;
     let query = req.uri().query().unwrap_or("").to_string();
-    let stored = match item.filepath.as_deref() {
-        Some(p) if !p.is_empty() => p,
-        _ => return Err(AppError::BadRequest("item has no downloaded file".into())),
-    };
-    // Confine to the download root: rejects `..`, absolute paths elsewhere, and
-    // symlinks escaping the root (e.g. an imported Seal `videoPath` of /etc/passwd).
-    let path = crate::safepath::confined_file(root, stored).ok_or(AppError::NotFound)?;
+    let path = resolve_local_file(root, &item)?;
 
     let download = query.split('&').any(|p| p == "download=1");
 
@@ -644,6 +801,17 @@ async fn serve_item(root: &FsPath, item: Item, req: Request) -> Result<Response,
         .headers
         .insert(header::REFERRER_POLICY, "no-referrer".parse().unwrap());
     Ok(Response::from_parts(parts, Body::new(body)).into_response())
+}
+
+/// Confine an item's stored path to the download root, rejecting `..`, absolute
+/// paths elsewhere, and symlinks escaping the root (e.g. an imported Seal
+/// `videoPath` of /etc/passwd). Shared by the encrypted and plaintext file paths.
+fn resolve_local_file(root: &FsPath, item: &Item) -> Result<std::path::PathBuf, AppError> {
+    let stored = match item.filepath.as_deref() {
+        Some(p) if !p.is_empty() => p,
+        _ => return Err(AppError::BadRequest("item has no downloaded file".into())),
+    };
+    crate::safepath::confined_file(root, stored).ok_or(AppError::NotFound)
 }
 
 /// Gate for the routes that serve a LOCAL file (`/file`, public shares): there

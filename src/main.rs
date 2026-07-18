@@ -19,6 +19,7 @@ mod queue;
 mod resolution;
 mod safepath;
 mod seal_import;
+mod session;
 mod types;
 mod url_normalize;
 mod web;
@@ -147,15 +148,21 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         errlog,
         stream_urls: Default::default(),
         subtitle_urls: Default::default(),
+        sessions: Default::default(),
     };
 
     let bind = cfg.bind;
     let router = api::router(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("orca listening on {bind}");
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    // Connect-info is needed so the auth layer can tell a loopback peer (which may
+    // use the plaintext bearer fallback) from a remote one (which must not).
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

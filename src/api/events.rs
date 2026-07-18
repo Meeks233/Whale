@@ -2,42 +2,44 @@
 
 use super::AppState;
 use crate::error::AppError;
-use axum::extract::{RawQuery, State};
+use axum::extract::{ConnectInfo, RawQuery, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::stream::Stream;
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-/// GET /api/events — one shared SSE stream of ProgressEvents. Browser SSE cannot
-/// set headers, so encrypted clients send the key id in the query. The key id is
-/// public — it names the key but proves nothing — so the client must also present
-/// a sealed authenticator it could only have produced by holding that key.
-pub async fn events(State(state): State<AppState>, RawQuery(query): RawQuery) -> Response {
+/// GET /api/events — one shared SSE stream of ProgressEvents. Browser `EventSource`
+/// cannot set headers, so a secure-channel client carries its opaque session id and
+/// a sealed authenticator in the query (`?sid=..&auth=..`). The sid names a session
+/// but proves nothing on its own; the authenticator — which only a holder of the
+/// session key could seal — is what authenticates and picks the encryption key.
+/// The events are then sealed under that session key, so Cloudflare sees only
+/// ciphertext. A loopback peer may instead pass a plaintext `?token=` for local
+/// debugging.
+pub async fn events(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    RawQuery(query): RawQuery,
+) -> Response {
     let q = query.unwrap_or_default();
-    let encryption_key = if let Some(requested_id) = super::auth::query_param(&q, "key_id") {
-        let hash = crate::e2ee::auth_hash(&state.cfg.token);
-        if !super::auth::ct_eq(&requested_id, &crate::e2ee::key_id(&hash)) {
-            return AppError::Unauthorized.into_response();
-        }
+    let encryption_key = if let Some(sid) = super::auth::query_param(&q, "sid") {
         let Some(auth) = super::auth::query_param(&q, "auth") else {
             return AppError::Unauthorized.into_response();
         };
-        let key = crate::e2ee::encryption_key(&hash);
-        // The target is the fixed route, not the real one: the live query string
-        // contains this authenticator, so it cannot also be bound by it.
-        if let Err(e) = crate::e2ee::verify_authenticator(
-            &key,
-            &auth,
-            "GET",
-            "/api/events",
-            crate::types::now_unix(),
-        ) {
-            return e.into_response();
+        // The authenticator's target is the fixed route, not the live URL, whose
+        // query string contains the authenticator itself and so can't bind it.
+        match super::auth::resolve_session(&state, &sid, &auth, "GET", "/api/events", false).await {
+            Ok((_client_id, key)) => Some(key),
+            Err(e) => return e.into_response(),
         }
-        Some(key)
     } else {
+        // Loopback plaintext fallback (`?token=`) for local debugging only.
+        if !peer.ip().is_loopback() {
+            return AppError::Unauthorized.into_response();
+        }
         let token = super::auth::extract_token(&axum::http::HeaderMap::new(), &q);
         if !token
             .as_deref()

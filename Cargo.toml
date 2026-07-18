@@ -32,6 +32,12 @@ sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 aes-gcm = "0.10"
 base64 = "0.22"
+# Forward-secret secure channel (see docs/SECURITY.md): ephemeral P-256 ECDH +
+# HKDF-SHA256 session keys, so the token is never derivable from anything on the
+# wire and past traffic stays secret if it later leaks.
+p256 = { version = "0.13", features = ["ecdh"] }
+hkdf = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
 tempfile = "3"
