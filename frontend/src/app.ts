@@ -920,15 +920,6 @@ const PLAY_BADGE = `<span class="play-badge" aria-hidden="true">${PLAY_ICON}</sp
 const SPINNER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
 const MEDIA_LOADER = `<span class="media-loader" aria-hidden="true">${SPINNER_SVG}</span>`;
 
-// Privacy scrim layered on top of an already-blurred thumbnail. A 9px blur still
-// leaks a source's colours and rough shapes; this translucent frosted panel (with
-// an eye-off glyph, the universal "hidden content" cue) sits over it so a blurred
-// card reads as deliberately concealed rather than just fuzzy. Inert unless the
-// card carries `.blurred`, and fades away the moment the card peeks — see the
-// `.blur-scrim` rules in style.css. Emitted on every thumbnail (cheap, gated by
-// CSS) so toggling a site's blur on later needs no re-render.
-const BLUR_SCRIM = `<span class="blur-scrim" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg></span>`;
-
 function isMediaPending(item: Item, status = item.status): boolean {
   // Resolution jobs emit running events for an already-completed item. Its old
   // file remains valid, so only the first download receives the pending mask.
@@ -983,7 +974,7 @@ function sourceLogoHtml(extractor: string | undefined): string {
 // the title (see rowHtml), not on the thumbnail.
 function thumbHtml(item: Item, thumb: string, dur: string): string {
   const pending = isMediaPending(item) ? ' media-pending' : '';
-  const overlays = `${thumb}${dur}${MEDIA_LOADER}${BLUR_SCRIM}`;
+  const overlays = `${thumb}${dur}${MEDIA_LOADER}`;
   if (isPlayable(item)) {
     const cloudOnly = !item.local_available ? '1' : '';
     return `<div class="thumb-wrap thumb-play${pending}" role="button" tabindex="0" aria-label="Play"
@@ -2024,9 +2015,27 @@ interface Website {
 let websitesLoaded: Website[] = [];
 // Host suffixes belonging to sites with privacy-blur on, recomputed whenever the
 // registry loads/changes. Home-list rows whose source host matches are blurred.
-let blurredHosts: string[] = [];
+//
+// Seeded synchronously from localStorage at module load (before the first paint)
+// so a cached/cold home list is blurred from the very first frame — otherwise the
+// registry fetch lands ~0.5s later and the thumbnails flash clear in the gap
+// (content leak). The list refreshes for real once loadWebsites() answers.
+const BLUR_HOSTS_KEY = 'orca_blur_hosts';
+function loadBlurHostsCache(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(BLUR_HOSTS_KEY) || 'null');
+    return Array.isArray(v) ? v.filter((h) => typeof h === 'string') : [];
+  } catch (_) { return []; }
+}
+let blurredHosts: string[] = loadBlurHostsCache();
 function recomputeBlurredHosts(): void {
   blurredHosts = websitesLoaded.filter((w) => w.blur).flatMap((w) => w.hosts);
+  try {
+    localStorage.setItem(BLUR_HOSTS_KEY, JSON.stringify(blurredHosts));
+  } catch (_) {
+    // Quota or private mode — the cache is a first-paint optimisation with a
+    // working fallback (the registry fetch), so a store failure is harmless.
+  }
 }
 // Lowercased host of a URL (scheme/userinfo/port tolerant, leading www. stripped).
 function hostOfUrl(url?: string | null): string {
