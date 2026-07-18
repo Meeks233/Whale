@@ -870,9 +870,11 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 
 /* ---- Per-site privacy blur ----
    Cards from a site with blur enabled hide their thumbnail + title behind a soft
-   blur (industry "sensitive content" pattern). Web reveals on hover; the native
-   app reveals on tap (JS adds .revealed for a few seconds). Only the visual
-   content is blurred — status/actions stay usable so downloads still work. */
+   blur plus a frosted scrim (industry "sensitive content" pattern). Desktop
+   reveals only when the pointer dwells on the THUMBNAIL (.peek, added by a
+   hover-intent timer in JS — a bare :hover was too twitchy); the native app
+   reveals on tap (.revealed). Only the visual content is blurred — status/actions
+   stay usable so downloads still work. */
 .item.blurred .thumb,
 .item.blurred .title span,
 .item.blurred .uploader {
@@ -881,14 +883,38 @@ body.selecting .thumb-play, body.selecting .thumb-wrap, body.selecting .actions 
 }
 .item.blurred .title span,
 .item.blurred .uploader { user-select: none; }
-.item.blurred:hover .thumb,
-.item.blurred:hover .title span,
-.item.blurred:hover .uploader,
+.item.blurred.peek .thumb,
+.item.blurred.peek .title span,
+.item.blurred.peek .uploader,
 .item.blurred.revealed .thumb,
 .item.blurred.revealed .title span,
 .item.blurred.revealed .uploader {
   filter: none;
 }
+
+/* The extra mask layer: a frosted scrim with an eye-off glyph over the blurred
+   thumbnail. No z-index — placed after .thumb/.dur but before .play-badge and
+   .media-loader in the DOM, so it covers the image (and hides the duration) while
+   the play badge stays tappable above it. Inert until the card is .blurred, and
+   dissolves the moment it peeks/reveals. pointer-events:none so a tap falls
+   through to the thumbnail's peek/play handling. */
+.blur-scrim {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, .78);
+  background: rgba(16, 18, 24, .44);
+  border-radius: var(--r-sm);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .18s ease;
+}
+.blur-scrim svg { filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .7)); }
+.item.blurred .blur-scrim { opacity: 1; }
+.item.blurred.peek .blur-scrim,
+.item.blurred.revealed .blur-scrim { opacity: 0; }
 
 /* ---- Playlist folds (multi-video posts) ----
    A link with several videos collapses into one card: a header showing the first
@@ -1996,6 +2022,11 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 }
 .site-menu-item:hover { background: var(--surface); }
 .site-menu-item.danger { color: var(--err); }
+/* Per-site menu rows carry a leading icon — scoped to .site-menu-wrap so the
+   shared filter/sort popovers (also .site-menu-item) keep their plain layout. */
+.site-menu-wrap .site-menu-item { display: flex; align-items: center; gap: 9px; }
+.site-menu-wrap .site-menu-item svg { flex-shrink: 0; opacity: .85; }
+.site-menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 
 .site-settings { display: flex; flex-direction: column; }
 .form-row-ctl .site-res-select { flex: 0 0 auto; min-width: 150px; max-width: 220px; }

@@ -3,6 +3,7 @@ package com.orca.app
 import android.content.Intent
 import android.content.res.Configuration
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -12,6 +13,13 @@ class MainActivity : TauriActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
+    // Privacy: FLAG_SECURE blanks the app's thumbnail in the recent-apps switcher
+    // (and blocks screenshots), so a shoulder-surfer flipping through recents can't
+    // see downloaded titles/thumbnails. Set for the whole activity lifetime.
+    window.setFlags(
+      WindowManager.LayoutParams.FLAG_SECURE,
+      WindowManager.LayoutParams.FLAG_SECURE,
+    )
     consumeDeepLink(intent)
     applyImmersive(isLandscape(resources.configuration))
   }

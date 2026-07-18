@@ -521,6 +521,14 @@ const RETRY_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18
 const CANCEL_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>`;
 // Vertical kebab (⋮) for the website-card overflow menu.
 const MORE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>`;
+// Leading glyphs (lucide, 15px) for the per-site overflow menu. An icon per row
+// makes each action self-evident and — crucially — lets the two destructive rows
+// read as distinct at a glance (a cookie being forgotten vs. the whole site being
+// deleted) instead of two near-identical "Delete" words.
+const SVG_LOGIN = `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></svg>`;
+const SVG_EDIT = `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg>`;
+const SVG_COOKIE = `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a10 10 0 1 0 10 10 4 4 0 0 1-5-5 4 4 0 0 1-5-5"/><path d="M8.5 8.5v.01"/><path d="M16 15.5v.01"/><path d="M12 12v.01"/><path d="M11 17v.01"/><path d="M7 14v.01"/></svg>`;
+const SVG_TRASH = `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>`;
 interface Stats {
   count: number;
   total_bytes: number;
@@ -912,6 +920,15 @@ const PLAY_BADGE = `<span class="play-badge" aria-hidden="true">${PLAY_ICON}</sp
 const SPINNER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>`;
 const MEDIA_LOADER = `<span class="media-loader" aria-hidden="true">${SPINNER_SVG}</span>`;
 
+// Privacy scrim layered on top of an already-blurred thumbnail. A 9px blur still
+// leaks a source's colours and rough shapes; this translucent frosted panel (with
+// an eye-off glyph, the universal "hidden content" cue) sits over it so a blurred
+// card reads as deliberately concealed rather than just fuzzy. Inert unless the
+// card carries `.blurred`, and fades away the moment the card peeks — see the
+// `.blur-scrim` rules in style.css. Emitted on every thumbnail (cheap, gated by
+// CSS) so toggling a site's blur on later needs no re-render.
+const BLUR_SCRIM = `<span class="blur-scrim" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"/><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"/><path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"/><line x1="2" x2="22" y1="2" y2="22"/></svg></span>`;
+
 function isMediaPending(item: Item, status = item.status): boolean {
   // Resolution jobs emit running events for an already-completed item. Its old
   // file remains valid, so only the first download receives the pending mask.
@@ -966,7 +983,7 @@ function sourceLogoHtml(extractor: string | undefined): string {
 // the title (see rowHtml), not on the thumbnail.
 function thumbHtml(item: Item, thumb: string, dur: string): string {
   const pending = isMediaPending(item) ? ' media-pending' : '';
-  const overlays = `${thumb}${dur}${MEDIA_LOADER}`;
+  const overlays = `${thumb}${dur}${MEDIA_LOADER}${BLUR_SCRIM}`;
   if (isPlayable(item)) {
     const cloudOnly = !item.local_available ? '1' : '';
     return `<div class="thumb-wrap thumb-play${pending}" role="button" tabindex="0" aria-label="Play"
@@ -2288,22 +2305,24 @@ function cookieDot(w: Website): { cls: CookieDotClass; label: string } {
   return { cls: 'ok', label: t('cookie.active', { size: fmtBytes(c.bytes) }) };
 }
 
-// Kebab overflow menu: everything that isn't an everyday control (login, domain
-// edit, validate, cookie delete, delete site) collapses here so the card front
-// shows only the toggle, cookie status, one cookie button and the cap.
+// Kebab overflow menu: the per-site actions that aren't everyday controls. Two
+// groups, split by a divider — the safe ones (open the site's login page, edit its
+// domains) above, the destructive ones (forget the cookie jar, delete the site)
+// below — each row an icon + label. The old ad-hoc "Test" ping lived here too but
+// was semantic noise (it just re-fetched a sample URL), so it's gone.
 function siteMenuHtml(w: Website): string {
   const present = !!(w.cookie && w.cookie.present);
+  const item = (icon: string, label: string, act: string, danger = false): string =>
+    `<button class="site-menu-item${danger ? ' danger' : ''}" data-act="${act}">${icon}<span>${esc(label)}</span></button>`;
   const items: string[] = [];
   if (w.login_url)
-    items.push(`<a class="site-menu-item" href="${esc(w.login_url)}" target="_blank" rel="noopener">${esc(t('cookie.login'))}</a>`);
-  items.push(`<button class="site-menu-item" data-act="edit">${esc(t('sites.editDomains'))}</button>`);
-  items.push(`<button class="site-menu-item" data-act="validate">${esc(t('sites.validate'))}</button>`);
-  if (present) {
-    // Enable/disable now lives on the card's cookie switch; the menu keeps only
-    // the destructive "forget this jar" action.
-    items.push(`<button class="site-menu-item danger" data-act="ck-delete">${esc(t('cookie.delete'))}</button>`);
-  }
-  items.push(`<button class="site-menu-item danger" data-act="site-delete">${esc(t('sites.delete'))}</button>`);
+    items.push(`<a class="site-menu-item" href="${esc(w.login_url)}" target="_blank" rel="noopener">${SVG_LOGIN}<span>${esc(t('cookie.login'))}</span></a>`);
+  items.push(item(SVG_EDIT, t('sites.editDomains'), 'edit'));
+  items.push('<div class="site-menu-sep" role="separator"></div>');
+  // Enable/disable now lives on the card's cookie switch; the menu keeps only the
+  // destructive "forget this jar" action — labelled distinctly from "Delete site".
+  if (present) items.push(item(SVG_COOKIE, t('cookie.forget'), 'ck-delete', true));
+  items.push(item(SVG_TRASH, t('sites.delete'), 'site-delete', true));
   return `<div class="site-menu-wrap">
       <button class="site-menu-btn" data-act="menu" aria-label="${esc(t('sites.more'))}" aria-haspopup="true">${MORE_SVG}</button>
       <div class="site-menu-pop hidden" role="menu">${items.join('')}</div>
@@ -2438,6 +2457,7 @@ function renderWebsites(): void {
   }
   els.websites.classList.toggle('sites-selecting', siteSelectMode);
   updateSiteSelBar();
+  syncShareQualityDisabled();
 }
 
 // PUT a partial update to a website and refresh its card in place.
@@ -2528,19 +2548,6 @@ async function websiteAction(key: string, act: string, el: HTMLElement): Promise
         if (res.ok) { siteSelected.delete(key); websitesLoaded = websitesLoaded.filter((x) => x.key !== key); renderWebsites(); }
       } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
       return;
-    case 'validate': {
-      const sample = prompt(t('sites.validatePrompt', { name: w.name }), w.hosts[0] ? 'https://' + w.hosts[0] + '/' : '');
-      if (!sample) return;
-      toast(t('sites.validating'), 'info');
-      try {
-        const res = await apiFetch('/api/websites/validate', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: sample }),
-        });
-        const data = await res.json().catch(() => ({}));
-        toast(data.ok ? t('sites.validateOk', { title: data.title || '' }) : t('sites.validateFail', { err: data.error || '' }), data.ok ? 'ok' : 'error');
-      } catch (e) { if (!isUnauthorized(e)) toast('Network error', 'error'); }
-      return;
-    }
     case 'ck-import':
       paste.classList.remove('hidden'); pasteActions.classList.remove('hidden'); paste.focus();
       return;
@@ -2873,6 +2880,18 @@ function shareBehavior(): ShareBehavior {
 }
 function setShareBehavior(v: ShareBehavior): void {
   try { localStorage.setItem(SHARE_BEHAVIOR_KEY, v); } catch (_) { /* quota */ }
+}
+
+// When On-Share is "Original" (upstream), the share-quality picker is moot: the
+// shared link is the source's own, not a transcode served through this
+// downloader, so its tier changes nothing. Grey the control out — both the global
+// one in Settings and the per-site ones in Website management — without touching
+// the stored value (a disabled <select> keeps its selection; we never commit it).
+function syncShareQualityDisabled(): void {
+  const off = shareBehavior() === 'upstream';
+  document
+    .querySelectorAll<HTMLSelectElement>('#stream-quality select, select.site-res-select[data-act="stream"]')
+    .forEach((sel) => { sel.disabled = off; });
 }
 
 // The share target for this action: the stored preference, or — when it's "ask" —
@@ -3401,6 +3420,7 @@ function renderGlobalDefaults(d: GlobalSettings): void {
     `<select class="select site-res-select" data-act="g-stream" aria-label="${esc(t('settings.streamQuality'))}">${
       STREAM_QUALITIES.map(([v, k]) => opt(v, t(k), d.stream_quality === v)).join('')
     }</select>`;
+  syncShareQualityDisabled();
 
   els.format.innerHTML =
     `<select class="select site-res-select" data-act="g-fmt" aria-label="${esc(t('settings.format'))}"${d.container_locked ? ' disabled' : ''}>${
@@ -4711,9 +4731,13 @@ loaderObserver.observe(els.loader);
 // Every interactive control a card can carry: the thumbnail's play target, the
 // bottom-right action row (delete / save / share, plus the size + resolution
 // chips), and anything else that declares an action. Save is an <a download>
-// with no data-act, and the play target's class is .thumb-play, so neither is
-// covered by [data-act] alone — hence all three.
-const CARD_CONTROLS = '[data-act], .thumb-play, .act';
+// with no data-act, and the action row's Save is an <a download> with no data-act
+// either, so neither is covered by [data-act] alone. The play affordance is named
+// as the small .play-badge, NOT the whole .thumb-play wrap: on a blurred card the
+// first tap on the thumbnail image should PEEK (reveal), while a deliberate tap on
+// the badge plays immediately — so the big blurred image is a peek target, not a
+// control. A second tap (card now revealed) falls through to .thumb-play and plays.
+const CARD_CONTROLS = '[data-act], .play-badge, .act';
 
 // Native "tap-to-peek" for privacy-blurred cards. Industry spoiler pattern:
 // a tap reveals briefly, but re-blurs the instant the user's attention moves on
@@ -4742,6 +4766,44 @@ function revealBlurred(el: HTMLElement): void {
   window.addEventListener('scroll', reblurNow, true);
 }
 
+// ---- Desktop hover-intent reveal (privacy blur) --------------------------------
+// Revealing a blurred card on a bare CSS :hover was too eager — the thumbnail
+// flashed clear whenever the cursor merely swept across the card on the way
+// elsewhere. Instead the pointer must DWELL on the thumbnail itself for a short
+// beat before the card peeks (adds `.peek`). ~0.45s is the sensitive-media reveal
+// sweet spot: long enough to filter out incidental fly-overs, short enough to feel
+// immediate when you mean it. Hovering anything else on the card (title, actions)
+// never reveals — only the thumbnail does. Touch devices skip this and tap-to-peek.
+const canHover = !!window.matchMedia && window.matchMedia('(hover: hover)').matches;
+const BLUR_PEEK_INTENT_MS = 450;
+let hoverPeek: { item: HTMLElement; timer: number } | null = null;
+function clearHoverPeek(): void {
+  if (!hoverPeek) return;
+  clearTimeout(hoverPeek.timer);
+  hoverPeek.item.classList.remove('peek');
+  hoverPeek = null;
+}
+function armHoverPeek(item: HTMLElement): void {
+  if (hoverPeek?.item === item) return; // already dwelling on this card
+  clearHoverPeek();
+  const timer = window.setTimeout(() => { item.classList.add('peek'); }, BLUR_PEEK_INTENT_MS);
+  hoverPeek = { item, timer };
+}
+if (canHover) {
+  els.history.addEventListener('mouseover', (e) => {
+    const wrap = (e.target as HTMLElement).closest('.item.blurred .thumb-wrap') as HTMLElement | null;
+    if (!wrap) { clearHoverPeek(); return; }
+    armHoverPeek(wrap.closest('.item') as HTMLElement);
+  });
+  els.history.addEventListener('mouseout', (e) => {
+    const wrap = (e.target as HTMLElement).closest('.item.blurred .thumb-wrap') as HTMLElement | null;
+    if (!wrap) return;
+    const to = e.relatedTarget as Node | null;
+    if (to && wrap.contains(to)) return; // still inside the thumbnail — keep peeking
+    clearHoverPeek();
+  });
+}
+
 // Delegated actions on cards: in select mode a tap toggles the row; otherwise
 // thumbnail play / share dialog as before.
 els.history.addEventListener('click', (e) => {
@@ -4755,10 +4817,11 @@ els.history.addEventListener('click', (e) => {
     if (li) { e.preventDefault(); toggleSelect(Number(li.dataset.id)); }
     return;
   }
-  // Native app: the first tap on a blurred (privacy) card reveals it temporarily
-  // instead of activating whatever was under the finger. On the web the card
-  // reveals on :hover (CSS), so this only matters for touch.
-  if (isNativeApp) {
+  // Touch (native app or mobile web): the first tap on a blurred (privacy) card
+  // reveals it temporarily instead of activating whatever was under the finger.
+  // Pointer devices reveal by dwelling on the thumbnail (hover-intent, above), so
+  // this tap path is only for devices without real hover.
+  if (!canHover) {
     const bl = target.closest('.item.blurred:not(.revealed)') as HTMLElement | null;
     if (bl) {
       // Only the blurred visual area (thumbnail / title / uploader) reveals-then-
@@ -6273,7 +6336,7 @@ function renderShareBehaviorPicker(): void {
 }
 document.querySelectorAll<HTMLInputElement>('input[name="share-behavior"]').forEach((radio) => {
   radio.addEventListener('change', () => {
-    if (radio.checked) setShareBehavior(radio.value as ShareBehavior);
+    if (radio.checked) { setShareBehavior(radio.value as ShareBehavior); syncShareQualityDisabled(); }
   });
 });
 
