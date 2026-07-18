@@ -196,6 +196,23 @@
     </div>
   </div>
 
+  <!-- Share-target chooser: shown when the share behaviour is "Ask every time".
+       Splits a share into the de-tracked upstream (original source) link vs this
+       downloader's own public link. Picking Download link continues into the
+       normal share flow (duration picker / public link); Original link copies the
+       source URL straight away. -->
+  <div id="share-choice" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="share-choice-title">
+    <div class="modal-card modal-card-narrow">
+      <button id="share-choice-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <h2 id="share-choice-title" class="modal-heading" data-i18n="shareChoice.title">Share which link?</h2>
+      <p id="share-choice-sub" class="hint-muted" data-i18n="shareChoice.sub">Share the original source link, or this downloader's own link.</p>
+      <div class="share-actions">
+        <button id="share-choice-upstream" class="btn btn-ghost" data-i18n="shareChoice.upstream">Original link</button>
+        <button id="share-choice-local" class="btn" data-i18n="shareChoice.local">Download link</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Batch share dialog: the same duration picker as the single-item share,
        applied to every selected item at once (7 / 30 days / permanent). -->
   <div id="batch-share" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="batch-share-title">
@@ -398,6 +415,26 @@
               <!-- A <select>, not a segmented control: the language list grows with
                    every locale added and would burst a segmented track. -->
               <select id="lang-select" class="select"></select>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sharing behaviour. A client-side preference (like Theme / Language
+           above), applied on the spot with no Save: when you tap Share, do you
+           want the ORIGINAL de-tracked source link, this downloader's own link, or
+           to be asked each time. Default is Ask. -->
+      <section class="set-group">
+        <label data-i18n="settings.sharing">Sharing</label>
+        <div class="form-box">
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.shareBehavior">On Share</span>
+            <div class="form-row-ctl">
+              <div class="segmented" role="radiogroup" aria-label="Share behaviour" data-i18n-aria="settings.shareBehavior">
+                <label class="segment"><input type="radio" name="share-behavior" value="ask" checked><span data-i18n="share.behavior.ask">Ask</span></label>
+                <label class="segment"><input type="radio" name="share-behavior" value="upstream"><span data-i18n="share.behavior.upstream">Original</span></label>
+                <label class="segment"><input type="radio" name="share-behavior" value="local"><span data-i18n="share.behavior.local">Download</span></label>
+              </div>
             </div>
           </div>
         </div>

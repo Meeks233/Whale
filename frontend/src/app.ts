@@ -358,6 +358,10 @@ const els = {
   shareCancel: byId('share-cancel-confirm'),
   shareCancelBack: byId<HTMLButtonElement>('share-cancel-back'),
   shareCancelYes: byId<HTMLButtonElement>('share-cancel-yes'),
+  shareChoice: byId('share-choice'),
+  shareChoiceClose: byId<HTMLButtonElement>('share-choice-close'),
+  shareChoiceUpstream: byId<HTMLButtonElement>('share-choice-upstream'),
+  shareChoiceLocal: byId<HTMLButtonElement>('share-choice-local'),
   langSelect: byId<HTMLSelectElement>('lang-select'),
   themeColorMeta: byId<HTMLMetaElement>('theme-color-meta'),
   serverStatus: byId('server-status'),
@@ -2574,10 +2578,19 @@ function fmtExpiry(untilSec: number | null | undefined): string {
   return t('expiry.in', { n: hours, unit: t(hours === 1 ? 'unit.hour' : 'unit.hours') });
 }
 
-function openShare(id: number): void {
+// A single-card share: consult the behaviour preference (Settings ▸ Sharing) and
+// either copy the de-tracked upstream link, open the public-link dialog, or ask.
+async function openShare(id: number): Promise<void> {
   const item = state.items.get(id);
   if (!item) return;
-  share.id = id;
+  const mode = await resolveShareMode();
+  if (mode === 'upstream') { await shareUpstreamLinks([item]); return; }
+  if (mode === 'local') openLocalShare(item);
+}
+
+// Open the public-link (this-downloader) share dialog for one item.
+function openLocalShare(item: Item): void {
+  share.id = item.id;
   els.shareOverlay.classList.remove('hidden');
   els.shareOverlay.setAttribute('aria-hidden', 'false');
   showCancelConfirm(false); // always start on the main view
@@ -2659,6 +2672,61 @@ function copyShareLink(): void {
     els.shareLink.select();
     toast(link, 'info');
   }
+}
+
+// ---- Share target: upstream (source) link vs this downloader's link ---------
+// A client-side preference (Settings ▸ Sharing), like theme/language: when the
+// user shares, do they want the ORIGINAL de-tracked source link, this
+// downloader's own public link, or to be asked each time (the default).
+type ShareBehavior = 'ask' | 'upstream' | 'local';
+const SHARE_BEHAVIOR_KEY = 'orca.shareBehavior';
+function shareBehavior(): ShareBehavior {
+  const v = localStorage.getItem(SHARE_BEHAVIOR_KEY);
+  return v === 'upstream' || v === 'local' ? v : 'ask';
+}
+function setShareBehavior(v: ShareBehavior): void {
+  try { localStorage.setItem(SHARE_BEHAVIOR_KEY, v); } catch (_) { /* quota */ }
+}
+
+// The share target for this action: the stored preference, or — when it's "ask" —
+// whatever the chooser returns (null if the user dismisses it).
+async function resolveShareMode(): Promise<'upstream' | 'local' | null> {
+  const b = shareBehavior();
+  return b === 'ask' ? chooseShareTarget() : b;
+}
+
+// Promise-based chooser shown when the behaviour is "ask". Resolves 'upstream' or
+// 'local', or null on cancel / backdrop / ✕. Mirrors askConfirm's settle pattern.
+let shareChoiceResolve: ((v: 'upstream' | 'local' | null) => void) | null = null;
+function chooseShareTarget(): Promise<'upstream' | 'local' | null> {
+  settleShareChoice(null); // a second ask supersedes any chooser still open
+  openModal(els.shareChoice);
+  return new Promise((resolve) => { shareChoiceResolve = resolve; });
+}
+function settleShareChoice(v: 'upstream' | 'local' | null): void {
+  if (!shareChoiceResolve) return;
+  const resolve = shareChoiceResolve;
+  shareChoiceResolve = null;
+  closeModal(els.shareChoice);
+  resolve(v);
+}
+els.shareChoiceUpstream.addEventListener('click', () => settleShareChoice('upstream'));
+els.shareChoiceLocal.addEventListener('click', () => settleShareChoice('local'));
+els.shareChoiceClose.addEventListener('click', () => settleShareChoice(null));
+els.shareChoice.addEventListener('click', (e) => { if (e.target === els.shareChoice) settleShareChoice(null); });
+
+// Share the de-tracked upstream (original source) link(s). webpage_url is the
+// canonical URL yt-dlp resolved at probe time — already free of tracking/share
+// params (see url_normalize) — so it's shared verbatim. Uses the native share
+// sheet for a single link where available, else copies to the clipboard.
+async function shareUpstreamLinks(items: Item[]): Promise<void> {
+  const urls = Array.from(new Set(items.map((it) => it.webpage_url).filter((u): u is string => !!u)));
+  if (!urls.length) { toast(t('toast.noUpstream'), 'info'); return; }
+  if (urls.length === 1 && navigator.share) {
+    try { await navigator.share({ url: urls[0] }); return; }
+    catch (_) { /* dismissed or unsupported — fall through to clipboard copy */ }
+  }
+  copyText(urls.join('\n'), t(urls.length === 1 ? 'toast.upstreamCopied' : 'toast.upstreamCopiedN', { n: urls.length }));
 }
 
 // ---- Debounce -------------------------------------------------------------
@@ -4261,33 +4329,48 @@ async function submitPrepEntries(entries: PrepEntry[]): Promise<void> {
 // ---- Clipboard confirm modal (built on prepare cards) ---------------------
 let clipEntries: PrepEntry[] = [];
 
+// True when the backend's dedup check says this link is a single video already
+// in the history (probed into one entry, that entry already downloaded). Such a
+// link must not raise the auto-detect sheet at all (req 3). A multi-video post is
+// left alone — its `duplicate` flag reflects only the first entry, so some of its
+// siblings may still be new.
+function isDownloadedDup(entry: PrepEntry): boolean {
+  return !!entry.meta?.duplicate && entry.extra === 0;
+}
+
 async function showClipConfirm(links: string[]): Promise<void> {
   clipOpen = true;
   clipEntries = [];
   const total = links.length;
   const shown = links.slice(0, CLIP_MAX_LINKS);
-  els.clipList.textContent = '';
-  els.clipConfirmBtn.disabled = true;
-  const loading = document.createElement('div');
-  loading.className = 'clip-loading';
-  loading.textContent = t('clip.loading');
-  els.clipList.appendChild(loading);
-  els.clipSub.textContent = t('clip.loading');
-  openModal(els.clipConfirm);
+  // Probe BEFORE anything is shown: the backend dedup check (/api/preview marks
+  // each entry `duplicate`) is what decides whether there is any reason to prompt.
+  // A link already downloaded must never pop the sheet (req 3), so we run the probe
+  // silently, drop the already-downloaded links here, and only open the modal if
+  // genuinely new links remain. This is a background gesture — no spinner sheet.
   let entries: PrepEntry[];
   try {
     entries = await probePrepEntries(shown);
   } catch (e) {
-    if (isUnauthorized(e)) { closeModal(els.clipConfirm); clipOpen = false; return; }
+    if (isUnauthorized(e)) { clipOpen = false; return; }
     entries = [];
   }
-  // The dialog may have been dismissed while probing — don't repaint a closed sheet.
+  // Dismissed (or a probe error emptied it) while we were probing.
   if (!clipOpen) return;
-  clipEntries = entries;
+  // Cool down the already-downloaded links so a re-focus doesn't keep re-probing
+  // them, then keep only what's new.
+  const dupes = entries.filter(isDownloadedDup);
+  if (dupes.length) markClipCooldown(dupes.map((e) => e.url));
+  const fresh = entries.filter((e) => !isDownloadedDup(e));
+  if (!fresh.length) { clipOpen = false; return; }
+  // A different sheet may have opened during the probe — don't cover it.
+  if (document.querySelector('.modal-overlay:not(.hidden)')) { clipOpen = false; return; }
+  clipEntries = fresh;
   els.clipList.textContent = '';
-  for (const entry of entries) els.clipList.appendChild(prepCardEl(entry));
+  for (const entry of fresh) els.clipList.appendChild(prepCardEl(entry));
   els.clipConfirmBtn.disabled = false;
-  const base = t(entries.length === 1 ? 'clip.subOne' : 'clip.subN', { n: entries.length });
+  openModal(els.clipConfirm);
+  const base = t(fresh.length === 1 ? 'clip.subOne' : 'clip.subN', { n: fresh.length });
   els.clipSub.textContent = total > shown.length
     ? base + ' ' + t('clip.capped', { n: total - shown.length })
     : base;
@@ -4486,7 +4569,7 @@ els.history.addEventListener('click', (e) => {
   const btn = target.closest('[data-act]') as HTMLElement | null;
   if (!btn) return;
   const id = Number(btn.dataset.id);
-  if (btn.dataset.act === 'share') openShare(id);
+  if (btn.dataset.act === 'share') void openShare(id);
   else if (btn.dataset.act === 'delete') openDeleteConfirm([id]);
   else if (btn.dataset.act === 'size-breakdown') openSizeBreakdown(id, btn);
   else if (btn.dataset.act === 'resolutions') openResolutions(id);
@@ -4939,9 +5022,17 @@ function batchUpgrade(): void {
 // the single-item share, applied to every completed item in the selection — or
 // an explicit list (a whole fold), stashed so the deferred confirm targets it.
 let batchShareSource: Item[] | null = null;
-function openBatchShare(source?: Item[]): void {
+async function openBatchShare(source?: Item[]): Promise<void> {
+  const all = source ?? selectedItems();
+  const mode = await resolveShareMode();
+  if (mode == null) return; // chooser dismissed
+  // Upstream links don't need a local file — share every selected item's source
+  // URL, whatever its download state.
+  if (mode === 'upstream') { await shareUpstreamLinks(all); return; }
+  // Local (this-downloader) links: only completed items with a file can be made
+  // public, so filter to those for the duration-picker flow.
   batchShareSource = source ?? null;
-  const items = (source ?? selectedItems()).filter((it) => it.status === 'completed' && it.local_available);
+  const items = all.filter((it) => it.status === 'completed' && it.local_available);
   if (!items.length) { toast(t('toast.noShareable'), 'info'); return; }
   els.batchShareSub.textContent = t('batchShare.sub', { n: items.length });
   const def = els.batchShare.querySelector('input[value="7"]') as HTMLInputElement | null;
@@ -4987,7 +5078,7 @@ async function applyBatchShare(): Promise<void> {
 
 // Whole-fold helpers wired to the header's play/share/download actions.
 function shareGroup(gkey: string): void {
-  openBatchShare(groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[]);
+  void openBatchShare(groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[]);
 }
 function downloadGroup(gkey: string): void {
   batchDownload(groupChildIds(gkey).map((id) => state.items.get(id)).filter(Boolean) as Item[]);
@@ -5195,7 +5286,7 @@ async function batchDeleteLocal(): Promise<void> {
 els.selDownload.addEventListener('click', () => batchDownload());
 els.selUpgrade.addEventListener('click', () => batchUpgrade());
 els.selDeleteLocal.addEventListener('click', batchDeleteLocal);
-els.selShare.addEventListener('click', () => openBatchShare());
+els.selShare.addEventListener('click', () => void openBatchShare());
 els.selUnshare.addEventListener('click', batchUnshare);
 els.selCopy.addEventListener('click', batchCopyLinks);
 els.selClean.addEventListener('click', batchClean);
@@ -5571,6 +5662,7 @@ function dismissTopLayer(): boolean {
   if (!els.player.classList.contains('hidden')) { closePlayer(false); return true; }
   if (!els.permissionsPrompt.classList.contains('hidden')) { closeModal(els.permissionsPrompt); return true; }
   if (!els.confirmBox.classList.contains('hidden')) { settleConfirm(false); return true; }
+  if (!els.shareChoice.classList.contains('hidden')) { settleShareChoice(null); return true; }
   if (!els.batchShare.classList.contains('hidden')) { closeModal(els.batchShare); return true; }
   if (!els.shareOverlay.classList.contains('hidden')) { closeShare(); return true; }
   if (!els.siteEdit.classList.contains('hidden')) { closeModal(els.siteEdit); return true; }
@@ -5882,6 +5974,20 @@ document.querySelectorAll<HTMLInputElement>('input[name="theme-pref"]').forEach(
   });
 });
 
+// Share-behaviour segmented control (Settings ▸ Sharing): reflects and writes the
+// client-side preference, applied on the spot with no Save (like Theme above).
+function renderShareBehaviorPicker(): void {
+  const pref = shareBehavior();
+  document.querySelectorAll<HTMLInputElement>('input[name="share-behavior"]').forEach((r) => {
+    r.checked = r.value === pref;
+  });
+}
+document.querySelectorAll<HTMLInputElement>('input[name="share-behavior"]').forEach((radio) => {
+  radio.addEventListener('change', () => {
+    if (radio.checked) setShareBehavior(radio.value as ShareBehavior);
+  });
+});
+
 // Re-resolve when the system theme flips while we're following it. Without this
 // the WebView repaints its own colours but our theme-color meta goes stale.
 if (window.matchMedia) {
@@ -6086,6 +6192,7 @@ function startApp(): void {
 applyTheme();                // resolve theme before first paint work
 window.i18n.apply(document); // localize the static markup before anything shows
 renderThemePicker();
+renderShareBehaviorPicker();
 renderLangSelect();
 renderFilterMenu();
 setServerStatus(false);      // start red; SSE onopen flips it green when live
