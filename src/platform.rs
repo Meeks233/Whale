@@ -101,6 +101,90 @@ pub static CATALOG: &[Platform] = &[
         hosts: &["dailymotion.com", "dai.ly"],
         login_url: "https://www.dailymotion.com/signin",
     },
+    Platform {
+        key: "rumble",
+        name: "Rumble",
+        hosts: &["rumble.com"],
+        login_url: "",
+    },
+    Platform {
+        key: "kick",
+        name: "Kick",
+        hosts: &["kick.com"],
+        login_url: "",
+    },
+    Platform {
+        key: "vk",
+        name: "VK",
+        hosts: &["vk.com", "vkvideo.ru", "vk.ru", "vk.cc", "vkontakte.ru"],
+        login_url: "https://vk.com/login",
+    },
+    Platform {
+        key: "odysee",
+        name: "Odysee",
+        hosts: &["odysee.com"],
+        login_url: "https://odysee.com/$/signin",
+    },
+    Platform {
+        key: "streamable",
+        name: "Streamable",
+        hosts: &["streamable.com"],
+        login_url: "",
+    },
+    Platform {
+        key: "bitchute",
+        name: "BitChute",
+        hosts: &["bitchute.com"],
+        login_url: "",
+    },
+    Platform {
+        key: "pinterest",
+        name: "Pinterest",
+        hosts: &["pinterest.com", "pin.it"],
+        login_url: "https://www.pinterest.com/login/",
+    },
+    Platform {
+        key: "tumblr",
+        name: "Tumblr",
+        hosts: &["tumblr.com"],
+        login_url: "https://www.tumblr.com/login",
+    },
+    Platform {
+        key: "bluesky",
+        name: "Bluesky",
+        hosts: &["bsky.app"],
+        login_url: "https://bsky.app/",
+    },
+    Platform {
+        key: "threads",
+        name: "Threads",
+        hosts: &["threads.net", "threads.com"],
+        login_url: "https://www.threads.net/login",
+    },
+    Platform {
+        key: "douyin",
+        name: "Douyin",
+        hosts: &["douyin.com", "iesdouyin.com"],
+        login_url: "",
+    },
+    Platform {
+        key: "xiaohongshu",
+        name: "Xiaohongshu",
+        hosts: &["xiaohongshu.com", "xhslink.com"],
+        login_url: "",
+    },
+    Platform {
+        key: "youku",
+        name: "Youku",
+        hosts: &["youku.com"],
+        login_url: "https://passport.youku.com/",
+    },
+    Platform {
+        key: "tencent",
+        name: "Tencent Video",
+        hosts: &["v.qq.com"],
+        login_url: "https://v.qq.com/",
+    },
 ];
 
 /// Look up a platform by its canonical key. Case-insensitive so a stray

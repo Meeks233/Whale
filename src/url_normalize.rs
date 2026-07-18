@@ -91,6 +91,7 @@ pub fn normalize(url: &str) -> String {
     // does at probe time; here we just clear their query so the resolver gets a
     // clean short link.
     if host.contains("tiktok.com")
+        || host.contains("douyin.com")
         || host.contains("xiaohongshu.com")
         || host.contains("instagram.com")
         || host.contains("threads.net")
@@ -354,6 +355,15 @@ mod tests {
         assert_eq!(
             normalize("https://www.tiktok.com/@u/video/72?is_copy_url=1&is_from_webapp=v1"),
             "https://www.tiktok.com/@u/video/72"
+        );
+    }
+
+    #[test]
+    fn douyin_strips_query() {
+        // Douyin share links are path + pure tracking, like TikTok.
+        assert_eq!(
+            normalize("https://www.douyin.com/video/7300000000000000000?previous_page=app_code_link"),
+            "https://www.douyin.com/video/7300000000000000000"
         );
     }
 
