@@ -74,6 +74,13 @@ function streamKey(s: Session, resource: string): Promise<CryptoKey> {
 
 self.addEventListener('message', (event) => {
   const data = event.data as { type?: string; base?: string; sid?: string; key?: string } | null;
+  // Take control of an already-open, uncontrolled client on demand. `activate`
+  // (where we call clients.claim()) runs only once per worker, so a page reloaded
+  // while this worker is already active can end up uncontrolled — and then its
+  // media plane is dead (`/__m/...` has no server route, the `?token=` fallback is
+  // loopback-only). The app posts this when it boots uncontrolled; claiming fires
+  // `controllerchange`, which re-renders the media URLs through the worker.
+  if (data?.type === 'orca-claim') { void self.clients.claim(); return; }
   // `base` is '' for a same-origin app — check for presence, not truthiness.
   if (data?.type === 'orca-session' && typeof data.base === 'string' && data.sid && data.key) {
     void sessionFromRaw(data.base, data.sid, data.key).then((s) => {
