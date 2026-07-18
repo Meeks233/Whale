@@ -175,8 +175,16 @@ function isPublicIpHost(host: string): boolean {
 }
 
 // A remote base that would leak the bearer token in cleartext. HTTPS is always
-// accepted. HTTP is limited to private IPs, localhost/mDNS, and single-label LAN
+// accepted. HTTP is limited to private IPs, localhost/mDNS, and LAN-only
 // hostnames; public IPs and public-looking DNS names are rejected.
+//
+// The media plane (`/file`, `/thumb`, `/stream`, `/subs`) still carries the raw
+// token in its URL query, so plain HTTP to anything the public internet can
+// route stays refused. Only names that resolve *inside* a LAN are allowed: the
+// single-label case, plus the reserved/private-use suffixes below — `.local`
+// (mDNS), `.home.arpa` (RFC 8375), `.internal` (ICANN private-use), and the
+// de-facto router TLDs `.lan`/`.home`, none of which are delegated in the public
+// DNS root, so they cannot leave the LAN.
 function isInsecurePublicBase(raw: string): boolean {
   const s = (raw || '').trim();
   if (!s) return false;
@@ -184,9 +192,9 @@ function isInsecurePublicBase(raw: string): boolean {
   try { u = new URL(s.includes('://') ? s : 'http://' + s); } catch (_) { return false; }
   if (u.protocol !== 'http:') return false;
   const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const LAN_SUFFIXES = ['.localhost', '.local', '.lan', '.home', '.internal', '.home.arpa'];
   const localName = host === 'localhost'
-    || host.endsWith('.localhost')
-    || host.endsWith('.local')
+    || LAN_SUFFIXES.some((suffix) => host.endsWith(suffix))
     || (!host.includes('.') && !host.includes(':'));
   if (localName) return false;
   const ipv4 = host.split('.');
@@ -263,6 +271,9 @@ const els = {
   // moved into Settings → Downloads, so the pick-is-the-save delegation binds to
   // that box (#downloads-box) instead of the old .sites-global wrapper.
   downloadsBox: byId('downloads-box'),
+  // Share-quality moved to Settings → Sharing; its pick-is-the-save delegation
+  // binds to this box, separate from #downloads-box which holds the rest.
+  sharingBox: byId('sharing-box'),
   maxRes: byId('max-res'),
   maxResLocked: byId('max-res-locked'),
   streamQuality: byId('stream-quality'),
@@ -313,6 +324,8 @@ const els = {
   selectToggle: byId<HTMLButtonElement>('select-toggle'),
   filterBtn: byId<HTMLButtonElement>('filter-btn'),
   filterMenu: byId('filter-menu'),
+  sortBtn: byId<HTMLButtonElement>('sort-btn'),
+  sortMenu: byId('sort-menu'),
   queueToggle: byId<HTMLButtonElement>('queue-toggle'),
   queueCancel: byId<HTMLButtonElement>('queue-cancel'),
   selBar: byId('select-bar'),
@@ -373,6 +386,8 @@ const PAGE_SIZE = 10; // lazy-load 10 at a time so a huge history never over-fet
 const state = {
   q: '' as string,        // search query (status now folds into the query syntax)
   filter: '' as string,   // active status-filter key ('' = everything); see FILTERS
+  sort: 'time' as string, // active sort key; see SORTS
+  sortReverse: false,     // flip the sort's default descending order to ascending
   cursor: null as number | null, // next before_id
   loading: false,
   rows: new Map<number, HTMLLIElement>(),  // id -> <li> element
@@ -1459,6 +1474,91 @@ document.addEventListener('click', (e) => {
       && !(e.target as HTMLElement).closest('#filter-btn, #filter-menu')) closeFilterMenu();
 });
 
+// ---- Sort ------------------------------------------------------------------
+// The middle capsule segment. Keyset pagination happens server-side, so the sort
+// key is a query param (applySortParams) and changing it refetches from page one
+// rather than re-ordering the loaded rows client-side — a client sort would only
+// order what's already scrolled in, not the whole history.
+const SORTS: Array<{ key: string; label: string }> = [
+  { key: 'time', label: 'sort.time' },
+  { key: 'size', label: 'sort.size' },
+  { key: 'duration', label: 'sort.duration' },
+  { key: 'resolution', label: 'sort.resolution' },
+];
+
+// The two list-sort glyphs (inner SVG only): descending is the resting state,
+// ascending shows while `reverse` is on. Kept in sync between the capsule button
+// and the menu's reverse row so both always point the same way.
+const SORT_ICON_DESC = '<path d="M15 12H3"/><path d="M3 5h18"/><path d="M9 19H3"/>';
+const SORT_ICON_ASC = '<path d="M3 19h18"/><path d="M15 12H3"/><path d="M9 5H3"/>';
+const sortIconSvg = (reverse: boolean): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${reverse ? SORT_ICON_ASC : SORT_ICON_DESC}</svg>`;
+
+// Stamp the active sort onto an /api/items query. The default (newest first)
+// sends nothing, which keeps the default view's URL — and its first-page cache —
+// untouched.
+function applySortParams(params: URLSearchParams): void {
+  if (state.sort && state.sort !== 'time') params.set('sort', state.sort);
+  if (state.sortReverse) params.set('reverse', 'true');
+}
+
+// The button's icon flips with the direction, and it lights up (like the funnel)
+// whenever the order isn't the default newest-first — the at-a-glance "this list
+// isn't in its usual order".
+function setSortIcon(): void {
+  els.sortBtn.innerHTML = sortIconSvg(state.sortReverse);
+  els.sortBtn.classList.toggle('active', state.sort !== 'time' || state.sortReverse);
+}
+
+function renderSortMenu(): void {
+  els.sortMenu.textContent = '';
+  for (const s of SORTS) {
+    const b = document.createElement('button');
+    b.className = 'site-menu-item' + (state.sort === s.key ? ' sort-on' : '');
+    b.setAttribute('role', 'menuitem');
+    b.textContent = t(s.label);
+    b.addEventListener('click', () => {
+      closeSortMenu();
+      if (state.sort === s.key) return; // already sorted this way — don't refetch
+      state.sort = s.key;
+      renderSortMenu();
+      setSortIcon();
+      loadItems(true);
+    });
+    els.sortMenu.appendChild(b);
+  }
+  // Reverse toggle: a direction switch, not another key, so it sits below a rule
+  // and carries the live direction glyph.
+  const rev = document.createElement('button');
+  rev.className = 'site-menu-item sort-reverse' + (state.sortReverse ? ' sort-on' : '');
+  rev.setAttribute('role', 'menuitemcheckbox');
+  rev.setAttribute('aria-checked', state.sortReverse ? 'true' : 'false');
+  rev.innerHTML = sortIconSvg(state.sortReverse) + `<span>${esc(t('sort.reverse'))}</span>`;
+  rev.addEventListener('click', () => {
+    closeSortMenu();
+    state.sortReverse = !state.sortReverse;
+    renderSortMenu();
+    setSortIcon();
+    loadItems(true);
+  });
+  els.sortMenu.appendChild(rev);
+}
+
+function closeSortMenu(): void {
+  els.sortMenu.classList.add('hidden');
+  els.sortBtn.setAttribute('aria-expanded', 'false');
+}
+
+els.sortBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const hidden = els.sortMenu.classList.toggle('hidden');
+  els.sortBtn.setAttribute('aria-expanded', hidden ? 'false' : 'true');
+});
+document.addEventListener('click', (e) => {
+  if (!els.sortMenu.classList.contains('hidden')
+      && !(e.target as HTMLElement).closest('#sort-btn, #sort-menu')) closeSortMenu();
+});
+
 // ---- First-paint cache ----------------------------------------------------
 // A reload used to cost a blank list plus a full round trip before the first card
 // existed, and then built every row from scratch. This is the stale-while-
@@ -1478,7 +1578,7 @@ const CACHE_KEY = 'orca_items_cache';
 const CACHE_VER = 1;
 
 function isDefaultView(): boolean {
-  return !state.q && !state.filter;
+  return !state.q && !state.filter && state.sort === 'time' && !state.sortReverse;
 }
 
 function cacheFirstPage(items: Item[]): void {
@@ -1533,6 +1633,7 @@ async function loadItems(reset?: boolean): Promise<void> {
   const params = new URLSearchParams();
   if (state.q) params.set('q', state.q);
   applyFilterParams(params);
+  applySortParams(params);
   params.set('limit', String(PAGE_SIZE));
   if (state.cursor != null) params.set('before_id', String(state.cursor));
   try {
@@ -1807,7 +1908,21 @@ function ensureEventsConnected(): void {
   if (!getToken()) return;
   if (!es || es.readyState !== EventSource.OPEN) connectEvents();
 }
-document.addEventListener('visibilitychange', () => { if (!document.hidden) ensureEventsConnected(); });
+// Backgrounded tabs release their SSE connection. Browsers cap ~6 concurrent
+// connections per origin over HTTP/1.1, and each open tab pinned one forever —
+// so a handful of Orca tabs exhausted the pool and starved every other tab's
+// fetches (the "one tab goes laggy" symptom). Hidden tabs poll nothing already
+// (autoRefresh bails on document.hidden), so there's nothing to keep the stream
+// open for; the visibility handler re-opens it the moment the tab is shown.
+function disconnectEvents(): void {
+  eventGeneration++; // invalidate any connectEvents still awaiting its URL
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (es) { es.close(); es = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) disconnectEvents();
+  else ensureEventsConnected();
+});
 window.addEventListener('focus', ensureEventsConnected);
 
 // ---- Website management ---------------------------------------------------
@@ -3706,7 +3821,6 @@ if (els.downloadsBox) {
     const sel = (e.target as HTMLElement).closest('select[data-act]') as HTMLSelectElement | null;
     if (!sel) return;
     switch (sel.dataset.act) {
-      case 'g-stream': commitGlobal({ stream_quality: sel.value }); break;
       case 'g-fmt': commitGlobal({ container: sel.value }); break;
       case 'g-subs': commitGlobal({ subs: sel.value === 'on' }); break;
     }
@@ -3716,6 +3830,16 @@ if (els.downloadsBox) {
     if (detail.act !== 'g-res') return;
     // The global has no "follow global" option, so heights is never null here.
     commitGlobal({ max_heights: detail.heights ?? [] });
+  });
+}
+
+// Share quality lives in the Sharing box, so its pick-is-the-save change event
+// bubbles there, not to #downloads-box. renderGlobalDefaults still fills the
+// #stream-quality control the same way regardless of where it sits.
+if (els.sharingBox) {
+  els.sharingBox.addEventListener('change', (e) => {
+    const sel = (e.target as HTMLElement).closest('select[data-act]') as HTMLSelectElement | null;
+    if (sel?.dataset.act === 'g-stream') commitGlobal({ stream_quality: sel.value });
   });
 }
 
@@ -6093,6 +6217,7 @@ if (window.matchMedia) {
 document.addEventListener('i18n:changed', () => {
   renderLangSelect();
   renderFilterMenu(); // its rows are built from t(), not [data-i18n] markup
+  renderSortMenu();   // ditto — labels come from t()
   renderArchiveRestore();
   renderAppPermissions();
   setServerStatus(serverUp);
@@ -6149,8 +6274,10 @@ async function softRefresh(establishPaging = false): Promise<void> {
   try {
     const params = new URLSearchParams();
     // The poll asks the same question the visible list was built from — without
-    // the filter it would prepend rows the filter excludes, quietly undoing it.
+    // the filter (or the sort) it would prepend rows in the wrong order, quietly
+    // undoing the active view.
     applyFilterParams(params);
+    applySortParams(params);
     params.set('limit', String(PAGE_SIZE));
     const res = await apiFetch('/api/items?' + params.toString());
     if (!res.ok) return;
@@ -6286,6 +6413,8 @@ renderThemePicker();
 renderShareBehaviorPicker();
 renderLangSelect();
 renderFilterMenu();
+renderSortMenu();
+setSortIcon();
 setServerStatus(false);      // start red; SSE onopen flips it green when live
 const welcoming = needsWelcome();
 if (welcoming) openWelcome(); else startApp();

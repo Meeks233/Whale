@@ -821,11 +821,14 @@ html:not(.app-native) .permission-item[data-permission="storage"] { display: non
   border-radius: var(--r-md);
 }
 .filter-group .sel-toggle { border: none; border-radius: 0; }
-.filter-group .site-menu-wrap + .sel-toggle { border-left: 1px solid var(--border); }
-/* Round the outer corners so the frame's radius isn't squared off by the button
-   fill when a control is active. */
-.filter-group .site-menu-wrap .sel-toggle { border-radius: var(--r-md) 0 0 var(--r-md); }
-.filter-group > .sel-toggle:last-child { border-radius: 0 var(--r-md) var(--r-md) 0; }
+/* A hairline before every segment but the first splits the three buttons
+   (filter · sort · multi-select) down their shared frame. */
+.filter-group > * + * { border-left: 1px solid var(--border); }
+/* Round only the two outer corners so the frame's radius isn't squared off by a
+   button fill when a control is active; the middle segment stays flush. */
+.filter-group > :first-child .sel-toggle { border-radius: var(--r-md) 0 0 var(--r-md); }
+.filter-group > .sel-toggle:last-child,
+.filter-group > :last-child .sel-toggle { border-radius: 0 var(--r-md) var(--r-md) 0; }
 
 .history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 
@@ -1075,6 +1078,19 @@ body:has(.select-bar:not(.hidden)) .to-top { bottom: calc(80px + env(safe-area-i
 .filter-menu .site-menu-item { text-transform: capitalize; }
 /* The chosen row, in the same accent the funnel itself takes while filtering. */
 .filter-menu .filter-on { color: var(--accent); font-weight: 600; }
+
+/* Sort menu. Opens down-left like the filter one — the capsule sits at the start
+   of the controls row, so a right-anchored pop would spill off the left edge. */
+.site-menu-pop.sort-menu { left: 0; right: auto; }
+/* The active sort key, accented like the filter menu's chosen row. */
+.sort-menu .sort-on { color: var(--accent); font-weight: 600; }
+/* Hairline before the reverse row so it reads as a distinct control, not another
+   sort key. */
+.sort-menu .sort-reverse { margin-top: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
+/* The reverse row pairs a direction glyph with its label. */
+.sort-menu .sort-reverse { display: flex; align-items: center; gap: 8px; }
+.sort-menu .sort-reverse svg { flex: 0 0 auto; }
+.sort-menu .sort-reverse.sort-on svg { color: var(--accent); }
 /* Device-local filter (Android): the server can't answer "is it on THIS device",
    so it hides every row the native scan didn't stamp `dev-local`, and every
    playlist fold left with no on-device child. :has keeps it to one CSS pass with

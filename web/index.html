@@ -98,6 +98,16 @@
                 data-i18n-aria="aria.filter" data-i18n-title="aria.filter"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 20a1 1 0 0 0 .553.895l2 1A1 1 0 0 0 14 21v-7a2 2 0 0 1 .517-1.341L21.74 4.67A1 1 0 0 0 21 3H3a1 1 0 0 0-.742 1.67l7.225 7.989A2 2 0 0 1 10 14z"/></svg></button>
         <div id="filter-menu" class="site-menu-pop filter-menu hidden" role="menu"></div>
       </div>
+      <!-- Sort: the middle segment of the capsule. Its icon is the descending
+           list-sort glyph, and swaps to the ascending one while the reverse
+           option is on (see setSortIcon). The menu carries the sort keys plus a
+           reverse toggle. -->
+      <div class="site-menu-wrap">
+        <button id="sort-btn" class="icon-btn sel-toggle" type="button" aria-label="Sort" title="Sort"
+                aria-haspopup="true" aria-expanded="false"
+                data-i18n-aria="aria.sort" data-i18n-title="aria.sort"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 12H3"/><path d="M3 5h18"/><path d="M9 19H3"/></svg></button>
+        <div id="sort-menu" class="site-menu-pop sort-menu hidden" role="menu"></div>
+      </div>
       <button id="select-toggle" class="icon-btn sel-toggle" aria-label="Select multiple" title="Select multiple" data-i18n-aria="aria.selectMultiple" data-i18n-title="aria.selectMultiple"><svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
     </div>
     <div class="field">
@@ -426,7 +436,10 @@
            to be asked each time. Default is Ask. -->
       <section class="set-group">
         <label data-i18n="settings.sharing">Sharing</label>
-        <div class="form-box">
+        <!-- id="sharing-box" so the pick-is-the-save delegation reaches the
+             global Share-quality control that lives here (its change handler is
+             bound to this box, mirroring #downloads-box for the other globals). -->
+        <div id="sharing-box" class="form-box">
           <div class="form-row">
             <span class="form-row-label" data-i18n="settings.shareBehavior">On Share</span>
             <div class="form-row-ctl">
@@ -436,6 +449,14 @@
                 <label class="segment"><input type="radio" name="share-behavior" value="local"><span data-i18n="share.behavior.local">Download</span></label>
               </div>
             </div>
+          </div>
+          <!-- Global share-resolution cap (the tier a public share link serves),
+               built by renderGlobalDefaults into #stream-quality. A per-site value
+               always overrides this global (resolve_stream_quality, queue.rs).
+               Lives beside "On Share" because both are sharing policy. -->
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.streamQuality">Share quality</span>
+            <div class="form-row-ctl" id="stream-quality"></div>
           </div>
         </div>
       </section>
@@ -554,10 +575,6 @@
           <div class="form-row">
             <span class="form-row-label" data-i18n="settings.maxRes">Maximum resolution</span>
             <div class="form-row-ctl" id="max-res"></div>
-          </div>
-          <div class="form-row">
-            <span class="form-row-label" data-i18n="settings.streamQuality">Share quality</span>
-            <div class="form-row-ctl" id="stream-quality"></div>
           </div>
           <div class="form-row">
             <span class="form-row-label" data-i18n="settings.format">Video format</span>

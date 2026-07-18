@@ -6,6 +6,34 @@ use crate::seal_import::{ImportOutcome, SealRecord};
 use crate::types::{Client, Item, ItemResolution, ProbeResult, Source, Status, Website};
 use std::path::Path;
 
+/// How the history list is ordered. Every variant maps to a numeric SQL
+/// expression (see `queries::sort_expr`) so keyset pagination can carry a single
+/// integer boundary regardless of which column is driving the sort.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SortKey {
+    /// Download/submission time (`created_at`). The historic default.
+    #[default]
+    Time,
+    /// Total bytes across every downloaded resolution variant.
+    Size,
+    /// Media duration in seconds.
+    Duration,
+    /// Downloaded pixel height.
+    Resolution,
+}
+
+impl SortKey {
+    /// Parse the wire value used by `?sort=`. Unknown values fall back to `Time`.
+    pub fn parse(s: &str) -> SortKey {
+        match s {
+            "size" => SortKey::Size,
+            "duration" => SortKey::Duration,
+            "resolution" => SortKey::Resolution,
+            _ => SortKey::Time,
+        }
+    }
+}
+
 /// Query parameters for listing items (keyset pagination).
 #[derive(Debug, Clone, Default)]
 pub struct ListQuery {
@@ -16,6 +44,10 @@ pub struct ListQuery {
     /// Restrict to items that do (`Some(true)`) or don't (`Some(false)`) hold a
     /// downloaded file. See the `filepath` clause in `queries::list`.
     pub local: Option<bool>,
+    /// Column the page is ordered by. Defaults to `Time` (newest first).
+    pub sort: SortKey,
+    /// Flip the sort direction (ascending instead of the default descending).
+    pub reverse: bool,
 }
 
 /// One page of items plus the next keyset cursor.
