@@ -30,11 +30,11 @@ val hasReleaseSigning = listOf(
 
 android {
     compileSdk = 36
-    namespace = "com.orca.app"
+    namespace = "com.meeks233.orca"
     defaultConfig {
         // Allow http:// so the app can reach a self-hosted Orca server on a LAN.
         manifestPlaceholders["usesCleartextTraffic"] = "true"
-        applicationId = "com.orca.app"
+        applicationId = "com.meeks233.orca"
         // Raised from 24 → 28: the share-target plugin requires Android 9+.
         minSdk = 28
         // Google Play requires API 36 for new apps and updates from 2026-08-31.
@@ -89,8 +89,17 @@ android {
             )
         }
     }
+    // JDK 21 (this machine's build JDK) has *deprecated* compiling to Java 8
+    // bytecode and prints an obsolete-source/target warning on every build.
+    // compileSdk 36 / minSdk 28 fully support Java 17 language + bytecode
+    // levels, so target 17 to silence the noise at its root rather than
+    // suppressing the message.
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
     buildFeatures {
         buildConfig = true

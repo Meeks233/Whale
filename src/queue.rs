@@ -570,24 +570,21 @@ async fn run_job(
         // now would race that caller and clobber it; exit quietly instead.
         Err(crate::ytdlp::YtdlpError::Cancelled) => {
             tracing::info!(job_id = id, variant = ?variant, "download cancelled");
-            // A cancelled PRIMARY exits quietly: its pause/cancel handler already
-            // wrote the item's new status, and a tick now would race that. A
-            // cancelled VARIANT is different — it runs against an item whose status
-            // never changed, so nothing else tells the clients the live chip is
-            // done. Emit a terminal tick carrying the item's unchanged status. This
-            // runs AFTER `forwarder.abort()`, so it is guaranteed to be the last
-            // event for this job — no in-flight running tick can re-arm the row.
-            if variant.is_some() {
-                let status = db
-                    .get(id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|it| it.status)
-                    .unwrap_or(Status::Completed);
+            // Broadcast the item's SETTLED status as the terminal tick so the live
+            // chip clears on EVERY connected client — not just the caller that made
+            // the HTTP request. The cancel/pause handler has already written the new
+            // status (Canceled / Paused) before killing the child, so reading it back
+            // here reports the truth without racing anyone; a running tick can't
+            // re-arm the row because this runs AFTER `forwarder.abort()` and is thus
+            // the last event for this job. Without this, a cancel/pause fired from one
+            // client left every OTHER client frozen on the last running frame (the
+            // "dead progress" bug). If the row is gone (a delete), db.get is None and
+            // we stay quiet — the delete path notifies clients itself, and reporting a
+            // fabricated Completed would be worse than silence.
+            if let Some(it) = db.get(id).await.ok().flatten() {
                 let _ = events.send(ProgressEvent {
                     id,
-                    status,
+                    status: it.status,
                     percent: None,
                     speed: None,
                     eta: None,

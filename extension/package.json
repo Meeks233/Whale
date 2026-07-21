@@ -1,0 +1,26 @@
+{
+  "name": "orca-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Orca browser extension (Firefox first, Chrome-portable): submit videos to your self-hosted Orca over the same E2EE secure channel as the web UI, and download them straight from any video page.",
+  "type": "module",
+  "engines": {
+    "node": ">=20 <23"
+  },
+  "scripts": {
+    "build": "tsx build.ts",
+    "typecheck": "tsc --noEmit",
+    "dev": "npm run build && librewolf 'about:debugging#/runtime/this-firefox' && echo '\n>> 点 Load Temporary Add-on，选择: dist-ext/manifest.json  （改代码后重跑 npm run dev 并在该页点 Reload）'",
+    "lint": "web-ext lint --source-dir dist-ext",
+    "package": "web-ext build --source-dir dist-ext --artifacts-dir web-ext-artifacts --overwrite-dest",
+    "dist": "npm run typecheck && npm run build && npm run package",
+    "verify:ext": "node scripts/mcp-verify.mjs"
+  },
+  "devDependencies": {
+    "@types/firefox-webext-browser": "^120.0.4",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "web-ext": "^8.10.0"
+  }
+}

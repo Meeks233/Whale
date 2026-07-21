@@ -2,7 +2,8 @@
 // ../web/app.js by build.ts. Importing i18n for its side effect installs
 // window.i18n before any app code runs.
 import './i18n';
-import { decryptEvent, encryptedEventSourceUrl, encryptedFetch, pushSessionToWorker } from './e2ee';
+import { decryptEvent, encryptedEventSourceUrl, encryptedFetch, fetchMediaBytes, pushSessionToWorker } from './e2ee';
+import { getCachedThumb, putCachedThumb } from './thumbcache';
 
 type Params = Record<string, string | number>;
 
@@ -100,6 +101,24 @@ function setToken(tok: string): void {
   else localStorage.removeItem(TOKEN_KEY);
   mirrorShareCreds();
 }
+
+// Deep-link from the browser extension to play a finished download in the real
+// web player: it opens this page as `<base>/#orca-play=<slug>`. The slug is an
+// item identifier (the same unguessable value share links use), never a secret —
+// the extension seeds the token straight into this origin's storage, so nothing
+// sensitive ever rides the URL. We capture the slug here (before the hash is
+// stripped) and open the player once the item has loaded; see maybeOpenPendingPlay.
+function consumePlaySlug(): string | null {
+  const m = /(?:^|[#&])orca-play=([^&]+)/.exec(location.hash);
+  if (!m) return null;
+  history.replaceState(null, '', location.pathname + location.search);
+  try {
+    return decodeURIComponent(m[1]!);
+  } catch {
+    return null;
+  }
+}
+let pendingPlaySlug: string | null = consumePlaySlug();
 
 // Push the server base + token to native storage so the headless "Quick
 // Download" ShareActivity can POST to the backend in the background without
@@ -220,6 +239,10 @@ function loadServerConfig(): Promise<void> {
     .then((j) => {
       serverPublicUrl = ((j && j.public_url) || '').replace(/\/+$/, '');
       if (j && typeof j.encrypt_media === 'boolean') encryptMedia = j.encrypt_media;
+      // The default On-Share behaviour depends on serverPublicUrl (see
+      // shareBehavior). It was painted at boot before this answered, so refresh the
+      // Settings picker now that the real public-domain state is known.
+      renderShareBehaviorPicker();
     })
     .catch(() => { /* offline / unreachable — keep the origin fallback */ });
 }
@@ -384,6 +407,8 @@ const els = {
   shareChoiceUpstream: byId<HTMLButtonElement>('share-choice-upstream'),
   shareChoiceLocal: byId<HTMLButtonElement>('share-choice-local'),
   langSelect: byId<HTMLSelectElement>('lang-select'),
+  subLang: byId<HTMLSelectElement>('sub-lang'),
+  streamMaxRes: byId<HTMLSelectElement>('stream-max-res'),
   themeColorMeta: byId<HTMLMetaElement>('theme-color-meta'),
   serverStatus: byId('server-status'),
   dlStats: byId('dl-stats'),
@@ -424,7 +449,17 @@ function groupKeyOf(item: Item): string | null {
 }
 
 // ---- Toast ----------------------------------------------------------------
+// Suppress a repeat of the *same* message while one is still on screen. A dropped
+// connection used to fan out hundreds of identical "Network error" toasts (every
+// retrying loader firing its own) — a notification storm. Distinct messages are
+// never throttled, so real, different feedback always gets through.
+const lastToastAt = new Map<string, number>();
+const TOAST_DEDUPE_MS = 3600; // one message's full lifetime on screen
 function toast(msg: string, kind?: string): void {
+  const now = Date.now();
+  const prev = lastToastAt.get(msg);
+  if (prev != null && now - prev < TOAST_DEDUPE_MS) return;
+  lastToastAt.set(msg, now);
   const el = document.createElement('div');
   el.className = 'toast' + (kind ? ' toast-' + kind : '');
   el.textContent = msg;
@@ -447,32 +482,66 @@ async function apiFetch(path: string, opts?: RequestInit): Promise<Response> {
     showTokenField(true);
     throw new UnauthorizedError('Unauthorized');
   }
+  // A successful authenticated response confirms the server is reachable now —
+  // flip the status light green immediately instead of waiting for the SSE stream to
+  // finish its handshake and open (which lags the first data load by a noticeable
+  // beat, especially right after the extension hands off a fresh token). The SSE
+  // lifecycle still governs the light thereafter (red on drop, green on reconnect).
+  if (res.ok && !serverUp) setServerStatus(true);
   return res;
 }
 
+// A bad or missing token is exactly what the welcome window is for — a focused
+// "point me at the server + token" box — not the entire Settings sheet with every
+// advanced control at once. Re-raise it (pre-filled with the current token so a
+// typo is easy to fix), showing the invalid-token line when the server rejected us.
 function showTokenField(invalid: boolean): void {
-  els.settings.classList.remove('hidden');
-  els.settings.setAttribute('aria-hidden', 'false');
-  els.tokenHint.classList.toggle('hidden', !invalid);
-  els.token.value = getToken();
-  els.token.focus();
+  // Single re-auth prompt (the standard pattern): a bad token makes a whole burst
+  // of requests 401 at once — items, stats, websites, archive, the SSE stream —
+  // and then the heartbeat keeps 401ing every few seconds while it stays bad. If
+  // each one re-ran openWelcome the sheet flickered and, worse, every re-open reset
+  // the token box and stole focus mid-type. So when the welcome is already up, just
+  // keep the invalid-token line current and return — one prompt, deduped triggers.
+  if (!els.welcome.classList.contains('hidden')) {
+    if (invalid) welcomeError('settings.tokenInvalid');
+    return;
+  }
+  // Close the Settings sheet if the bad token came from there, so the welcome is
+  // the sole surface — the point is to ask for the token, not to leave the whole
+  // sheet stacked underneath.
+  if (!els.settings.classList.contains('hidden')) closeModal(els.settings);
+  els.welcomeToken.value = getToken();
+  openWelcome();
+  if (invalid) welcomeError('settings.tokenInvalid');
 }
 
-// ---- Server status light (SSE-driven heartbeat) ---------------------------
-// A breathing dot beside the brand: green + pulsing while the SSE stream is
-// live (open or delivering events), red when it drops or before a token is set.
-// Mirrors the common "connection heartbeat" indicator — driven purely off the
-// EventSource lifecycle so it tracks real server reachability, not a poll.
+// ---- Server status light (SSE-driven) -------------------------------------
+// A steady dot beside the brand: solid green while the server is reachable, red
+// when it drops or before a token is set (no breathing pulse — just a fixed glow).
+// Turns green the moment the first authenticated request succeeds (see apiFetch)
+// and on SSE open/events, and red when the SSE stream drops — so it tracks real
+// reachability without lagging the first data load behind the stream's handshake.
 let serverUp = false;
 function setServerStatus(up: boolean): void {
+  const recovered = up && !serverUp; // false/undefined → up: the link just came back
   serverUp = up;
   const el = els.serverStatus;
-  if (!el) return;
-  el.classList.toggle('up', up);
-  el.classList.toggle('down', !up);
-  const label = up ? t('status.up') : t('status.down');
-  el.setAttribute('aria-label', label);
-  el.setAttribute('title', label);
+  if (el) {
+    el.classList.toggle('up', up);
+    el.classList.toggle('down', !up);
+    const label = up ? t('status.up') : t('status.down');
+    el.setAttribute('aria-label', label);
+    el.setAttribute('title', label);
+  }
+  // The storage readout beside the light (and the list) otherwise waited out the
+  // 30s poll before catching up after a reconnect — a visible lag. Pull them now,
+  // and let any pagination that was parked on a failed load pick back up.
+  if (recovered) {
+    pageRetryBlockedUntil = 0;
+    void loadStats();
+    void softRefresh();
+    requestAnimationFrame(topUpIfNeeded);
+  }
 }
 
 // ---- Storage readout (beside the heartbeat) -------------------------------
@@ -576,7 +645,17 @@ async function loadStats(): Promise<void> {
     // Same payload carries the server-wide paused count, so the global
     // pause/resume button re-renders from the same fetch rather than its own.
     renderQueueToggle();
-  } catch (_) { /* offline / unauthorized — leave the last-known readout */ }
+    // A good /api/stats is also the most reliable liveness signal we have — far
+    // more so than the SSE, whose dropped socket can take ~25s to error on the
+    // Android WebView. Driving the status light (and the recovery refresh) from
+    // the heartbeat is what makes the top-bar readout snap back promptly after
+    // the server returns instead of waiting out that socket timeout.
+    setServerStatus(true);
+  } catch (e) {
+    // A network failure here means the server is unreachable; reflect it so the
+    // light goes red and the heartbeat speeds up (see startHeartbeat).
+    if (!isUnauthorized(e)) setServerStatus(false);
+  }
 }
 
 // ---- Rendering ------------------------------------------------------------
@@ -624,7 +703,12 @@ function resLabel(height: number | null | undefined): string {
   return height + 'p';
 }
 
-const TERMINAL: Record<string, number> = { completed: 1, failed: 1, duplicate: 1 };
+// Statuses that end a live download chip: the progress bar is hidden and the
+// live fields cleared. `canceled` belongs here alongside `failed` — a cancel
+// (from any client) stops the transfer and discards its partials, so leaving it
+// out kept the progress bar frozen at its last width ("dead progress") on a
+// cancel fired elsewhere, even though the badge had already flipped to canceled.
+const TERMINAL: Record<string, number> = { completed: 1, failed: 1, canceled: 1, duplicate: 1 };
 
 // Direct media link. `download` forces a browser save; otherwise it streams
 // (used as the <video> source). Token rides in the query since <video>/<a>
@@ -690,13 +774,25 @@ function thumbUrl(item: Item): string {
   return withQuery(itemPath(item, '/thumb'), mediaTokenParam());
 }
 
+// Preferred maximum streaming resolution (device-local; 0 = highest/no cap). The
+// server caps the upstream format it resolves for /api/stream by this height —
+// see media::height_param + resolve_stream_url. Set in Settings › Streaming.
+const STREAM_MAXH_KEY = 'orca_stream_max_h';
+function maxStreamHeight(): number { return parseInt(localStorage.getItem(STREAM_MAXH_KEY) || '0', 10) || 0; }
+function setMaxStreamHeight(h: number): void {
+  if (h > 0) localStorage.setItem(STREAM_MAXH_KEY, String(h)); else localStorage.removeItem(STREAM_MAXH_KEY);
+}
+function streamHeightParam(): string { const h = maxStreamHeight(); return h ? 'h=' + h : ''; }
+
 // Online-playback proxy: the backend resolves the upstream URL (with cookies) and
 // streams the bytes back, so the browser plays through us instead of hitting a
 // stale, IP-bound CDN URL directly. Keyed by the item's unguessable slug (like
-// share links), never its sequential id.
+// share links), never its sequential id. A `?h=` cap rides along (honoured over
+// the query, never the authenticator path) so the resolution preference applies.
 function streamUrl(slug: string): string {
-  if (swControls()) return mediaUrl('stream', slug);
-  return withQuery('/api/stream/' + encodeURIComponent(slug), mediaTokenParam());
+  const hq = streamHeightParam();
+  if (swControls()) return hq ? mediaUrl('stream', slug) + '?' + hq : mediaUrl('stream', slug);
+  return withQuery('/api/stream/' + encodeURIComponent(slug), mediaTokenParam(), hq);
 }
 
 const streamPrewarmed = new Set<string>();
@@ -715,6 +811,98 @@ const streamPrewarmObserver = new IntersectionObserver((entries) => {
     });
   }
 }, { rootMargin: '160px' });
+
+// ---- Native-app media plane (no service worker) ---------------------------
+// The Android WebView runs no controlling service worker, so <img>/<video> can't
+// use the /__m/ E2EE plane and the ?token= fallback is loopback-only (the server
+// rejects it off the local machine — see src/api/auth.rs). Fetch media over the
+// secure channel in JS instead and hand the element a decrypted object URL. This
+// is the SW's job in a browser (see sw.ts); here the page does it directly.
+function nativeMediaFallback(): boolean {
+  return isNativeApp && encryptMedia
+    && !(typeof navigator !== 'undefined' && !!navigator.serviceWorker?.controller);
+}
+
+// Decrypted thumbnails, cached by slug so a re-render/scroll is a zero-cost hit and
+// the object URL stays stable (mirrors the worker's blobCache).
+const thumbObjectUrls = new Map<string, string>();
+const thumbFetches = new Set<string>();
+
+async function loadThumb(slug: string): Promise<string | null> {
+  const existing = thumbObjectUrls.get(slug);
+  if (existing) return existing;
+  if (thumbFetches.has(slug)) return null;
+  thumbFetches.add(slug);
+  try {
+    // Disk cache first: a cold launch (or an offline one) paints thumbnails from
+    // the persistent store instead of re-downloading every one over the link.
+    let bytes = await getCachedThumb(slug);
+    if (!bytes || !bytes.length) {
+      bytes = await fetchMediaBytes(
+        apiBase(), getToken(),
+        '/api/items/' + encodeURIComponent(slug) + '/thumb', 'thumb:' + slug,
+      );
+      if (bytes.length) void putCachedThumb(slug, bytes);
+    }
+    if (!bytes.length) return null;
+    const url = URL.createObjectURL(new Blob([bytes]));
+    thumbObjectUrls.set(slug, url);
+    return url;
+  } catch {
+    return null;
+  } finally {
+    thumbFetches.delete(slug);
+  }
+}
+
+// Thumbnail markup for a row/group header. Native without a worker ships a
+// src-less <img data-thumb-slug> that hydrateThumbs() fills in after insertion;
+// everywhere else keeps the direct (SW or ?token=) URL.
+function thumbMarkup(item: Item): string {
+  if (nativeMediaFallback() && item.thumbnail_url && item.slug) {
+    const cached = thumbObjectUrls.get(item.slug);
+    const src = cached ? ` src="${esc(cached)}"` : '';
+    return `<img class="thumb" data-thumb-slug="${esc(item.slug)}"${src} alt="" loading="lazy">`;
+  }
+  const s = thumbUrl(item);
+  return s
+    ? `<img class="thumb" src="${esc(s)}" alt="" loading="lazy">`
+    : '<div class="thumb thumb-empty"></div>';
+}
+
+// Fill in any placeholder thumbnails inside `root` (no-op off the native fallback).
+function hydrateThumbs(root: ParentNode): void {
+  if (!nativeMediaFallback()) return;
+  root.querySelectorAll<HTMLImageElement>('img.thumb[data-thumb-slug]:not([src])').forEach((img) => {
+    const slug = img.dataset.thumbSlug;
+    if (!slug) return;
+    void loadThumb(slug).then((url) => { if (url) img.src = url; });
+  });
+}
+
+// Player playback for the native app. The WebView's <video> can't attach E2EE
+// headers and there's no service worker, so it can't hit the /__m/ plane or the
+// loopback-only ?token= route. Instead the native side runs an on-device E2EE
+// loopback proxy (RemoteMediaProxy.kt) that range-streams the decrypted bytes; we
+// just ask it for the loopback URL and hand that to <video>. This streams
+// progressively (playback starts on the first window) instead of buffering the
+// whole file — so there's no click-to-play delay — while keeping the E2EE model.
+// `kind` is 'stream' (cloud) or 'file' (a file the server holds).
+function playNativeProxy(v: HTMLVideoElement, slug: string, kind: 'stream' | 'file', play: () => void): void {
+  const invoke = window.__TAURI__?.core?.invoke;
+  if (!invoke) { toast(t('toast.streamFail'), 'error'); return; }
+  // The resolution cap only applies to a cloud 'stream' (a 'file' is already at a
+  // fixed resolution on the server). 0 means "no cap".
+  const height = kind === 'stream' ? maxStreamHeight() : 0;
+  void (invoke('stream_url', { slug, kind, height }) as Promise<string>)
+    .then((url) => {
+      if (!url) throw new Error('no proxy url');
+      v.src = url;
+      v.load();
+      play();
+    })
+    .catch(() => { toast(t('toast.streamFail'), 'error'); });
+}
 
 // Tokenless public link, keyed by the item's random slug (not its id, so it
 // can't be guessed by enumeration). Prefers the operator-declared public
@@ -749,6 +937,28 @@ const TRASH_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18
 
 // Eye glyph (Lucide "eye") for the external-access counter capsule.
 const EYE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>`;
+// Eye-off glyph (Lucide "eye-off") — the reveal toggle's "hide again" state for the
+// token field, so a token can be viewed temporarily then masked back.
+const EYE_OFF_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></svg>`;
+const EYE_ON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>`;
+
+// Wire every token field's reveal (eye) button: toggle the input between masked
+// and plaintext so the saved token can be viewed temporarily, then hidden again.
+function wireTokenReveals(): void {
+  for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>('.reveal-btn'))) {
+    const input = document.getElementById(btn.dataset.reveal || '') as HTMLInputElement | null;
+    if (!input) continue;
+    btn.innerHTML = EYE_ON_SVG;
+    btn.addEventListener('click', () => {
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.innerHTML = show ? EYE_OFF_SVG : EYE_ON_SVG;
+      const label = show ? t('settings.hideToken') : t('settings.showToken');
+      btn.setAttribute('aria-label', label);
+      btn.setAttribute('title', label);
+    });
+  }
+}
 
 // Access-count capsule shown after the status badge once a live share has been
 // hit externally. Scoped to the current share window: the backend zeroes the
@@ -984,10 +1194,7 @@ function thumbHtml(item: Item, thumb: string, dur: string): string {
 }
 
 function rowHtml(item: Item): string {
-  const thumbSrc = thumbUrl(item);
-  const thumb = thumbSrc
-    ? `<img class="thumb" src="${esc(thumbSrc)}" alt="" loading="lazy">`
-    : `<div class="thumb thumb-empty"></div>`;
+  const thumb = thumbMarkup(item);
   // Clips under a minute are tagged so CSS can drop the pill on portrait thumbs,
   // where it would crowd the play button and where "0:20" on a Reel is just
   // noise. Landscape keeps every duration (see .dur in style.css).
@@ -1067,6 +1274,9 @@ function upsertRow(item: Item, prepend?: boolean): HTMLLIElement {
   if (rowSig.get(li) !== html) {
     li.innerHTML = html;
     rowSig.set(li, html);
+    // Native app: fill the src-less thumbnail placeholder by decrypting it over
+    // the secure channel (no-op elsewhere).
+    hydrateThumbs(li);
     // The fresh markup ships the statusline's live spans empty, so anything the
     // SSE tick had painted there is gone. Put it back from the last tick.
     restoreLiveFields(li, item.id);
@@ -1149,10 +1359,7 @@ function updateGroupHeader(gkey: string): void {
   const items = itemsFromIds(groupChildIds(gkey));
   if (!items.length) return;
   const first = items[0]!;
-  const firstThumb = thumbUrl(first);
-  const thumb = firstThumb
-    ? `<img class="thumb" src="${esc(firstThumb)}" alt="" loading="lazy">`
-    : `<div class="thumb thumb-empty"></div>`;
+  const thumb = thumbMarkup(first);
   const base = (first.title || '').replace(/\s*#\d+\s*$/, '');
   // Raw (not HTML-escaped): it's applied via textContent in updateGroupProgress,
   // which does its own escaping — pre-escaping here would double-encode it.
@@ -1193,6 +1400,7 @@ function updateGroupHeader(gkey: string): void {
       <svg class="group-chevron" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
       ${listActions}
     </div>`;
+  hydrateThumbs(head);
   // The uploader prefix is a static lead-in; the status/speed/progress are filled
   // (and kept live) by updateGroupProgress so a progress tick needn't rebuild the
   // whole header.
@@ -1397,24 +1605,28 @@ function patchRow(ev: ProgressEv): void {
     if (bar) bar.classList.add('hidden');
     paintLiveFields(li, '', '', '');
     chipRefetched.delete(ev.id); // a retry starts a new job, which may pick a new height
-    // A just-completed item gains a file: refetch to render play/save/share.
-    // Flash the green Completed badge for 30s (markFreshCompleted) — this is a
-    // fresh success, unlike the old completed rows whose badge stays hidden.
+    // Flash the green Completed badge for 30s (markFreshCompleted) — a fresh
+    // success, unlike old completed rows whose badge stays hidden.
     if (ev.status === 'completed') {
       markFreshCompleted(ev.id);
       badge?.classList.add('flash');
-      apiFetch(itemPath(ev.id))
-        .then((r) => (r.ok ? r.json() : null))
-        .then((it) => {
-          if (!it) return;
-          upsertRow(it, false);
-          // The server now holds the taller file this item was upgraded for —
-          // pull it down to replace the local copy (see pendingLocalUpgrade).
-          runPendingLocalUpgrade(it);
-        })
-        .catch(() => { /* ignore */ });
-      loadStats(); // a fresh file changes the total-downloaded readout
     }
+    // Rebuild the row from the server so its ACTIONS reconcile to the settled
+    // state — a cross-client cancel/fail must swap the live Cancel/Pause controls
+    // for Retry/Delete, not merely flip the badge and leave the running controls
+    // behind (the "still shows a running row after it was canceled elsewhere"
+    // bug). Completed additionally pulls the fresh file for play/save/share.
+    apiFetch(itemPath(ev.id))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((it) => {
+        if (!it) return;
+        upsertRow(it, false);
+        // The server now holds the taller file this item was upgraded for —
+        // pull it down to replace the local copy (see pendingLocalUpgrade).
+        if (ev.status === 'completed') runPendingLocalUpgrade(it);
+      })
+      .catch(() => { /* ignore */ });
+    if (ev.status === 'completed') loadStats(); // a fresh file changes the total-downloaded readout
   } else if (bar && fill) {
     bar.classList.remove('hidden');
     fill.style.width = shown + '%';
@@ -1671,29 +1883,45 @@ function hydrateFromCache(): boolean {
 }
 
 // ---- List loading ---------------------------------------------------------
+// After a failed page load we hold off auto-pagination for a beat. Without this,
+// a scroll-to-bottom while offline spun a tight loop: the fetch failed, `finally`
+// re-armed topUpIfNeeded, the loader was still on-screen (cursor never advanced),
+// so it fired again immediately — hundreds of requests (and toasts) a second. The
+// IntersectionObserver and the top-up backstop both honour this cooldown, so an
+// unreachable server is retried at most once per interval instead of flooded.
+const PAGE_RETRY_COOLDOWN_MS = 8000;
+let pageRetryBlockedUntil = 0;
+function pagingOnCooldown(): boolean {
+  return Date.now() < pageRetryBlockedUntil;
+}
+
 async function loadItems(reset?: boolean): Promise<void> {
   if (state.loading) return;
   state.loading = true;
-  if (reset) {
-    state.cursor = null;
-    state.rows.clear();
-    state.items.clear();
-    state.groups.clear();
-    state.progress.clear();
-    els.history.innerHTML = '';
-    els.loader.classList.add('hidden'); // hide until we know there's a next page
-  }
-  const firstPage = state.cursor == null; // scroll-loaded pages must not overwrite the cache
+  // A `reset` used to wipe #history (and the row caches) up-front, before the
+  // fetch — so a failed request on a dropped connection left the whole list
+  // blank and flickering. We now hold the old view untouched until the new page
+  // actually arrives, then swap it in; a failure keeps the existing cards.
+  const firstPage = reset || state.cursor == null; // scroll-loaded pages must not overwrite the cache
   const params = new URLSearchParams();
   if (state.q) params.set('q', state.q);
   applyFilterParams(params);
   applySortParams(params);
   params.set('limit', String(PAGE_SIZE));
-  if (state.cursor != null) params.set('before_id', String(state.cursor));
+  if (!reset && state.cursor != null) params.set('before_id', String(state.cursor));
   try {
     const res = await apiFetch('/api/items?' + params.toString());
     if (!res.ok) { toast(t('toast.loadHistoryFail'), 'error'); return; }
     const data = await res.json();
+    if (reset) {
+      // Fetch succeeded — now it's safe to tear down and rebuild.
+      state.cursor = null;
+      state.rows.clear();
+      state.items.clear();
+      state.groups.clear();
+      state.progress.clear();
+      els.history.innerHTML = '';
+    }
     if (firstPage) cacheFirstPage(data.items || []);
     (data.items || []).forEach((it: Item) => upsertRow(it, false));
     state.cursor = data.next_cursor;
@@ -1702,8 +1930,13 @@ async function loadItems(reset?: boolean): Promise<void> {
     els.loader.classList.toggle('hidden', data.next_cursor == null);
     const isEmpty = state.rows.size === 0;
     els.empty.classList.toggle('hidden', !isEmpty);
+    pageRetryBlockedUntil = 0; // a good page clears any pagination backoff
+    if (reset) maybeOpenPendingPlay();
   } catch (e) {
-    if (!isUnauthorized(e)) toast(t('toast.network'), 'error');
+    if (!isUnauthorized(e)) {
+      toast(t('toast.network'), 'error');
+      pageRetryBlockedUntil = Date.now() + PAGE_RETRY_COOLDOWN_MS;
+    }
   } finally {
     state.loading = false;
     // If the loader is still within reach (content shorter than the viewport,
@@ -1720,6 +1953,7 @@ async function loadItems(reset?: boolean): Promise<void> {
 // wouldn't have asked for.
 function topUpIfNeeded(): void {
   if (state.loading || state.cursor == null || els.loader.classList.contains('hidden')) return;
+  if (pagingOnCooldown()) return; // don't hammer an unreachable server
   const r = els.loader.getBoundingClientRect();
   if (r.top < window.innerHeight) loadItems(false);
 }
@@ -1928,10 +2162,11 @@ async function connectEvents(): Promise<void> {
   const encrypted = await encryptedEventSourceUrl(apiUrl('/api/events'), '/api/events', token);
   if (generation !== eventGeneration) return;
   es = new EventSource(encrypted.url);
-  // Stream established → server is reachable (green breathing light).
-  es.onopen = () => setServerStatus(true);
+  // Stream established → server is reachable (green status light).
+  es.onopen = () => { setServerStatus(true); reconnectDelay = RECONNECT_MIN_MS; };
   es.addEventListener('progress', async (e) => {
     setServerStatus(true); // any delivered event also confirms liveness
+    reconnectDelay = RECONNECT_MIN_MS; // a live event proves the link is back
     try { patchRow(JSON.parse(await decryptEvent(encrypted.session, (e as MessageEvent).data))); } catch (_) { /* ignore */ }
   });
   // Stream dropped → red. EventSource retries a merely-stalled stream itself,
@@ -1941,25 +2176,44 @@ async function connectEvents(): Promise<void> {
   // updates) heal without a manual reload; the re-check skips it if it recovered.
   es.onerror = () => {
     setServerStatus(false);
+    // Close the stream so the browser's own ~3s retry loop stops — otherwise a
+    // persistently-unreachable server gets hit every 3s regardless of our timer.
+    // Our backed-off scheduleReconnect becomes the sole driver of reconnection,
+    // so offline request volume actually tapers instead of flooding the LAN.
+    if (es) { es.close(); es = null; }
     scheduleReconnect();
   };
 }
 
 // One pending reconnect at a time; recreates the stream unless it came back on
-// its own in the meantime.
+// its own in the meantime. The delay backs off (3s→15s) while the server stays
+// unreachable so a persistently-offline client doesn't re-hit /api/events every
+// beat and flood the local network; onopen/a live event reset it. This stream now
+// only carries live progress events — the status light and storage readout ride
+// the faster /api/stats heartbeat (see loadStats / runHeartbeat), which is what
+// makes recovery prompt — so a wider cap here is fine and keeps down-time chatter
+// low; the heartbeat's softRefresh already reconciles the list within ~4s anyway.
+const RECONNECT_MIN_MS = 3000;
+const RECONNECT_MAX_MS = 15000;
+let reconnectDelay = RECONNECT_MIN_MS;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 function scheduleReconnect(): void {
   if (reconnectTimer || !getToken()) return;
+  const delay = reconnectDelay;
+  reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     if (!es || es.readyState !== EventSource.OPEN) connectEvents();
-  }, 3000);
+  }, delay);
 }
 
 // Regaining visibility/focus (mobile suspends sockets) re-opens the stream if it
 // isn't already live, so the light turns green again on resume.
 function ensureEventsConnected(): void {
   if (!getToken()) return;
+  // A user-driven resume should retry right away, not wait out the backed-off
+  // reconnect delay — reset it so returning to a foregrounded app is snappy.
+  reconnectDelay = RECONNECT_MIN_MS;
   if (!es || es.readyState !== EventSource.OPEN) connectEvents();
 }
 // Backgrounded tabs release their SSE connection. Browsers cap ~6 concurrent
@@ -2885,7 +3139,13 @@ type ShareBehavior = 'ask' | 'upstream' | 'local';
 const SHARE_BEHAVIOR_KEY = 'orca.shareBehavior';
 function shareBehavior(): ShareBehavior {
   const v = localStorage.getItem(SHARE_BEHAVIOR_KEY);
-  return v === 'upstream' || v === 'local' ? v : 'ask';
+  if (v === 'upstream' || v === 'local' || v === 'ask') return v;
+  // No explicit preference yet. When the operator hasn't declared a public domain
+  // (ORCA_PUBLIC_URL unset → serverPublicUrl empty), a server-hosted public link
+  // just points at whatever origin the UI happened to load from — brittle to hand
+  // out — so default to sharing the ORIGINAL source link instead. Once a public
+  // domain is declared, fall back to asking each time as before.
+  return serverPublicUrl ? 'ask' : 'upstream';
 }
 function setShareBehavior(v: ShareBehavior): void {
   try { localStorage.setItem(SHARE_BEHAVIOR_KEY, v); } catch (_) { /* quota */ }
@@ -2967,6 +3227,29 @@ function closeModal(el: HTMLElement): void {
   el.classList.add('hidden');
   el.setAttribute('aria-hidden', 'true');
 }
+
+// Give every modal card the nested scroller its rounded corners need. The card is a
+// clipping frame (overflow:hidden + border-radius) and an inner .modal-scroll does the
+// scrolling, so Firefox — which won't round a scroll container's own scrollbar-side
+// corners — has those corners clipped by the frame instead. Done once here, in JS,
+// rather than editing all ten sheets' markup by hand. Runs at load: app.js is the last
+// element in <body>, so every .modal-card is already parsed.
+function wrapModalScrollers(): void {
+  document.querySelectorAll<HTMLElement>('.modal-card').forEach((card) => {
+    if (card.querySelector(':scope > .modal-scroll')) return; // idempotent
+    // The save bar stays a direct child of the frame — a flush flex footer docked to
+    // the card's bottom edge. Inside the scroller it inherited the padding + both-edges
+    // gutter, so its negative-margin bleed stopped short of the frame and it floated
+    // detached (visible gaps on the sides and below it) in Firefox. As a frame footer
+    // it spans edge-to-edge and the frame's rounding clips its bottom corners.
+    const footer = card.querySelector<HTMLElement>(':scope > .save-bar');
+    const scroll = document.createElement('div');
+    scroll.className = 'modal-scroll';
+    Array.from(card.childNodes).forEach((n) => { if (n !== footer) scroll.appendChild(n); });
+    if (footer) card.insertBefore(scroll, footer); else card.appendChild(scroll);
+  });
+}
+wrapModalScrollers();
 
 // ---- The one confirmation dialog -------------------------------------------
 // Every irreversible action asks through here — deleting items, wiping local
@@ -3146,8 +3429,20 @@ async function applyServerUrl(): Promise<boolean> {
 // files access" grant, which is the only way to write Downloads/Orca (and the
 // only way at all to create the hidden .Orca folder; MediaStore refuses a
 // dot-prefixed directory).
-type AppPermissionStatus = { notifications: boolean; background: boolean; storage: boolean; clipboard: boolean };
+type AppPermissionStatus = { notifications: boolean; background: boolean; storage: boolean; clipboard: boolean; autoplay: boolean };
 let appPermissions: AppPermissionStatus | null = null;
+// The browser's autoplay stance, as last read from navigator.getAutoplayPolicy.
+// 'unsupported' covers browsers without the API (older Safari) — there we hide the
+// row and never nag, since a click-to-play always works regardless. Only Chromium
+// and Firefox expose it; on those, 'disallowed' is the sole state where even a
+// muted <video> won't autostart, so that's the only one we count as unmet.
+type AutoplayPermState = 'granted' | 'missing' | 'unsupported';
+let autoplayPermState: AutoplayPermState = 'unsupported';
+// A one-shot silent clip we play under a user gesture to nudge the autoplay policy
+// (there is no explicit requestPermission() for autoplay — priming media playback
+// on a gesture is the standard "unlock" every web player uses).
+const SILENT_AUDIO =
+  'data:audio/wav;base64,UklGRnQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YVAAAACAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgA==';
 // The browser's clipboard-read grant, as last read from the Permissions API.
 // 'unsupported' covers browsers that can't query it (Firefox/Safari) — there we
 // hide the row and never nag, since a plain readText() on gesture is the only
@@ -3220,7 +3515,7 @@ function pendingPermissions(): Array<keyof AppPermissionStatus> {
   if (!appPermissions) return [];
   const keys: Array<keyof AppPermissionStatus> = isAndroidApp()
     ? ['notifications', 'background', 'storage']
-    : ['notifications', 'clipboard'];
+    : ['notifications', 'clipboard', 'autoplay'];
   return keys.filter((k) => !appPermissions![k]);
 }
 
@@ -3229,6 +3524,7 @@ function renderAppPermissions(): void {
   renderAppPermission('background');
   renderAppPermission('storage');
   renderAppPermission('clipboard');
+  renderAppPermission('autoplay');
   renderHideDownloads();
   // Drop a web row the browser can't back: no Notification API, or a clipboard-read
   // grant it won't let script query. Either would otherwise sit there as a dead
@@ -3237,6 +3533,11 @@ function renderAppPermissions(): void {
     ?.classList.toggle('hidden', !isNativeApp && !('Notification' in window));
   els.permRow.querySelector('.permission-item[data-permission="clipboard"]')
     ?.classList.toggle('hidden', !isNativeApp && clipboardPermState === 'unsupported');
+  // Autoplay is a web-only concern (the native shell controls its own webview), and
+  // pointless where the browser can't report a policy — hide it in both cases so it
+  // never lingers as furniture.
+  els.permRow.querySelector('.permission-item[data-permission="autoplay"]')
+    ?.classList.toggle('hidden', isNativeApp || autoplayPermState === 'unsupported');
   // One rule for both platforms: the block hides the moment nothing is left
   // unsatisfied (all granted). A blocked or ungranted permission keeps it up.
   els.permRow.classList.toggle('hidden', pendingPermissions().length === 0);
@@ -3252,15 +3553,33 @@ function renderAppPermissions(): void {
 async function refreshWebPermissions(): Promise<void> {
   if (isNativeApp) return;
   clipboardPermState = await queryClipboardPermission();
+  autoplayPermState = queryAutoplayPermission();
   appPermissions = {
     // Unsupported → treated granted (nothing to ask), and its row is hidden below,
     // so it never lingers as a dead button or a green tick of furniture.
     notifications: !('Notification' in window) || Notification.permission === 'granted',
     clipboard: clipboardPermState === 'granted' || clipboardPermState === 'unsupported',
+    // Only a hard 'disallowed' counts as unmet; 'unsupported' can't be asked, so it
+    // rides as granted (its row is hidden above).
+    autoplay: autoplayPermState !== 'missing',
     background: true,
     storage: true,
   };
   renderAppPermissions();
+}
+
+// The browser's autoplay policy for media elements. 'allowed' and 'allowed-muted'
+// both let a <video> start on its own (muted always works), so only 'disallowed'
+// is a genuine block. Browsers without the API can't report it — a click-to-play
+// still works there, so we hide the row rather than guess.
+function queryAutoplayPermission(): AutoplayPermState {
+  const nav = navigator as Navigator & { getAutoplayPolicy?: (type: string) => string };
+  if (typeof nav.getAutoplayPolicy !== 'function') return 'unsupported';
+  try {
+    return nav.getAutoplayPolicy('mediaelement') === 'disallowed' ? 'missing' : 'granted';
+  } catch (_) {
+    return 'unsupported';
+  }
 }
 
 async function queryClipboardPermission(): Promise<ClipboardPermState> {
@@ -3284,6 +3603,14 @@ async function initWebPermissions(): Promise<void> {
   if (clipboardPermState === 'prompt') {
     try { await navigator.clipboard.readText(); } catch (_) { /* no gesture / denied */ }
     await refreshWebPermissions();
+  }
+  // Proactively prime autoplay on the very first interaction anywhere, so playback
+  // is already unlocked by the time the user hits play — no cold-start stall. A
+  // cold-load attempt can't (autoplay needs a gesture), hence the one-shot listener.
+  if (autoplayPermState === 'missing') {
+    window.addEventListener('pointerdown', () => {
+      void primeAutoplay().then(refreshWebPermissions);
+    }, { once: true, passive: true });
   }
 }
 
@@ -3312,6 +3639,7 @@ async function refreshAppPermissions(): Promise<AppPermissionStatus | null> {
       background: !!status.background,
       storage: !!status.storage,
       clipboard: true, // no native clipboard permission; its row is hidden here.
+      autoplay: true,  // the native webview owns autoplay; its row is hidden here.
     };
     hideDownloads = !!status.hideDownloads;
     // Visibility is renderAppPermissions' call now — it hides the block once
@@ -3363,8 +3691,36 @@ async function requestWebClipboard(): Promise<void> {
   await refreshWebPermissions();
 }
 
+// Autoplay has no requestPermission() either: playing a muted silent clip under
+// the click's user activation is the standard nudge. On Chromium a successful
+// gesture-driven play feeds the Media Engagement Index, which is what eventually
+// flips the policy to 'allowed'; the re-check afterwards reflects the new stance.
+async function requestWebAutoplay(): Promise<void> {
+  requestingPermissions.add('autoplay');
+  renderAppPermission('autoplay');
+  await primeAutoplay();
+  requestingPermissions.delete('autoplay');
+  await refreshWebPermissions();
+}
+
+// Play a short silent clip once to prime the autoplay policy. Muted so it makes no
+// sound and is allowed even before any grant; the point is to register a real
+// media-playback event. Best-effort — a still-blocked policy just leaves the row.
+let autoplayPrimed = false;
+async function primeAutoplay(): Promise<void> {
+  if (autoplayPrimed) return;
+  autoplayPrimed = true;
+  try {
+    const a = new Audio(SILENT_AUDIO);
+    a.muted = true;
+    await a.play();
+    a.pause();
+  } catch (_) { /* autoplay still blocked — the row's gesture path covers it */ }
+}
+
 function isPermissionKind(v: string | undefined): v is keyof AppPermissionStatus {
-  return v === 'notifications' || v === 'background' || v === 'storage' || v === 'clipboard';
+  return v === 'notifications' || v === 'background' || v === 'storage'
+    || v === 'clipboard' || v === 'autoplay';
 }
 
 document.addEventListener('click', (e) => {
@@ -3378,6 +3734,8 @@ document.addEventListener('click', (e) => {
     Notification.requestPermission().finally(() => { void refreshWebPermissions(); });
   } else if (kind === 'clipboard') {
     void requestWebClipboard();
+  } else if (kind === 'autoplay') {
+    void requestWebAutoplay();
   }
 });
 
@@ -4352,6 +4710,8 @@ els.submitForm.addEventListener('submit', (e) => {
   void stageInput();
 });
 
+wireTokenReveals();
+
 // Stage actions: Download batch-submits the selected prepare cards; Clear discards
 // the staging area without downloading anything.
 els.stageDownload.addEventListener('click', async () => {
@@ -4804,7 +5164,7 @@ els.search.addEventListener('input', debounce(() => {
 // chain and run pages on without a deliberate scroll. Reaching the end is the
 // gesture that asks for more, so wait for it.
 const loaderObserver = new IntersectionObserver((entries) => {
-  if (entries.some((e) => e.isIntersecting) && !state.loading && state.cursor != null) {
+  if (entries.some((e) => e.isIntersecting) && !state.loading && state.cursor != null && !pagingOnCooldown()) {
     loadItems(false);
   }
 });
@@ -5756,6 +6116,37 @@ function playCurrentInQueue(): void {
   if (cur) openPlayer(cur.id, cur.cloud, cur.poster);
 }
 
+// Honour a pending `#orca-play=<slug>` deep-link (from the browser extension) once
+// its item is in the loaded history: open it in the real player, which prefers the
+// copy the server already holds on disk over re-resolving the upstream. Single-shot
+// — the slug is cleared on the first attempt whether or not the item was found (a
+// missing/incomplete item just means nothing to play).
+function maybeOpenPendingPlay(): void {
+  if (!pendingPlaySlug) return;
+  const slug = pendingPlaySlug;
+  pendingPlaySlug = null;
+  let target: Item | undefined;
+  for (const it of state.items.values()) if (it.slug === slug) { target = it; break; }
+  if (!target || target.status !== 'completed') return;
+  openPlayer(target.id, !target.local_available, thumbUrl(target));
+}
+
+// The extension deep-links an already-open dashboard tab by setting the
+// `#orca-play=<slug>` hash from inside the page (no reload). Re-read it on every
+// hashchange and open the player in place. If the item isn't in the loaded
+// history yet (a just-finished download on a long-open tab), pull one fresh page
+// and try again — a single retry, so a stale/unknown slug can't loop.
+window.addEventListener('hashchange', () => {
+  const slug = consumePlaySlug();
+  if (!slug) return;
+  const loaded = [...state.items.values()].some(
+    (it) => it.slug === slug && it.status === 'completed',
+  );
+  pendingPlaySlug = slug;
+  if (loaded) maybeOpenPendingPlay();
+  else void softRefresh(); // pulls a fresh page, then calls maybeOpenPendingPlay
+});
+
 function openPlayer(id: number, cloud: boolean, poster?: string): void {
   const v = els.playerVideo;
   // Also runs when a fold advances to the next clip, so the previous item's
@@ -5768,7 +6159,9 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
   }
   // Show the source thumbnail as the poster so the load gap (especially the
   // cloud proxy resolve) reads as the still frame instead of Chrome's default
-  // gray media placeholder. Cleared again in closePlayer.
+  // gray media placeholder. Cleared again in closePlayer. Native has no direct
+  // thumbnail URL, so reuse the already-decrypted one from the list if present.
+  if (nativeMediaFallback()) poster = state.items.get(id)?.slug ? thumbObjectUrls.get(state.items.get(id)!.slug) : undefined;
   if (poster) v.poster = poster; else v.removeAttribute('poster');
   els.player.classList.remove('hidden');
   els.player.setAttribute('aria-hidden', 'false');
@@ -5790,16 +6183,25 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
       // arrive, and the <video> 'error' handler surfaces a failed resolve.
       const slug = state.items.get(id)?.slug;
       if (!slug) { toast(t('toast.streamFail'), 'error'); closePlayer(true); return; }
-      v.src = streamUrl(slug);
-      v.load();
-      play();
+      if (nativeMediaFallback()) {
+        playNativeProxy(v, slug, 'stream', play);
+      } else {
+        v.src = streamUrl(slug);
+        v.load();
+        play();
+      }
       // Streamed items have no on-disk sidecars, but the backend resolves subtitle
       // tracks from the source for them too, so ask the same way local playback does.
       loadSubtitles(id);
     } else {
-      v.src = fileUrl(id);
-      v.load();
-      play();
+      const slug = state.items.get(id)?.slug;
+      if (nativeMediaFallback() && slug) {
+        playNativeProxy(v, slug, 'file', play);
+      } else {
+        v.src = fileUrl(id);
+        v.load();
+        play();
+      }
       loadSubtitles(id);
     }
   }
@@ -5966,6 +6368,42 @@ function playLocal(id: number, v: HTMLVideoElement, play: () => void): boolean {
 // muxed into the file itself (yt-dlp `--embed-subs`), but the browser won't
 // surface embedded tracks from a progressive <video>, so the preview needs them
 // served alongside. Best-effort — a failure here must never break playback.
+// Preferred subtitle language for playback (device-local). Defaults to English;
+// the Stream settings section lets the user pick e.g. Simplified/Traditional
+// Chinese. When the preferred language isn't available the default track falls
+// back to English — never to some other language the user didn't ask for.
+const SUBLANG_KEY = 'orca_sub_lang';
+function preferredSubLang(): string { return localStorage.getItem(SUBLANG_KEY) || 'en'; }
+function setPreferredSubLang(lang: string): void {
+  if (lang) localStorage.setItem(SUBLANG_KEY, lang); else localStorage.removeItem(SUBLANG_KEY);
+}
+
+// Collapse a BCP-47-ish subtitle tag to a comparable key. Chinese is split into
+// simplified vs traditional (by script or region) since those are what users pick;
+// everything else reduces to its primary subtag (so `en-US` and `en` match).
+function normSubLang(lang: string): string {
+  const l = (lang || '').toLowerCase().replace(/_/g, '-');
+  if (l.startsWith('zh')) {
+    if (/hant|tw|hk|mo/.test(l)) return 'zh-hant';
+    if (/hans|cn|sg/.test(l)) return 'zh-hans';
+    return 'zh';
+  }
+  return l.split('-')[0] || l;
+}
+
+// Index of the track to default-on: the preferred language, then English, then
+// none. A bare `zh` track satisfies either Chinese preference and vice-versa.
+function pickDefaultSub(subs: Array<{ lang: string }>, pref: string): number {
+  const p = normSubLang(pref);
+  let idx = subs.findIndex((s) => normSubLang(s.lang) === p);
+  if (idx < 0 && p.startsWith('zh')) idx = subs.findIndex((s) => normSubLang(s.lang).startsWith('zh'));
+  if (idx < 0) idx = subs.findIndex((s) => normSubLang(s.lang) === 'en');
+  return idx;
+}
+
+// Object URLs for subtitle tracks decrypted in the native app; revoked on clear.
+const subBlobUrls: string[] = [];
+
 async function loadSubtitles(id: number): Promise<void> {
   const slug = state.items.get(id)?.slug;
   if (!slug || !getToken()) return;
@@ -5979,28 +6417,43 @@ async function loadSubtitles(id: number): Promise<void> {
     if (els.player.classList.contains('hidden')) return;
     if (playQueue.length && playQueue[playIndex]?.id !== id) return;
     const slugForTrack = state.items.get(id)?.slug;
+    const defIdx = pickDefaultSub(subs, preferredSubLang());
     subs.forEach((s, i) => {
       const track = document.createElement('track');
       track.kind = 'subtitles';
       track.srclang = s.lang;
       track.label = s.label || s.lang;
-      // Through the SW media plane (decrypted to a text/vtt blob) when a worker
-      // controls the page; else the direct path — `?token=` on the full profile's
-      // loopback fallback, or the orca_sess cookie under the selective profile. A
-      // <track> can't set headers, same as <video>.
-      track.src = slugForTrack && swControls()
-        ? mediaUrl('subs', slugForTrack, s.lang)
-        : withQuery(itemPath(id, '/subs/' + encodeURIComponent(s.lang)), mediaTokenParam());
-      if (i === 0) track.default = true;
+      if (i === defIdx) track.default = true;
+      if (nativeMediaFallback() && slugForTrack) {
+        // No service worker: a <track> can't attach E2EE headers and the ?token=
+        // path is loopback-only, so fetch+decrypt the WebVTT over the secure
+        // channel and hand the element a text/vtt blob.
+        void fetchMediaBytes(
+          apiBase(), getToken(),
+          itemPath(id, '/subs/' + encodeURIComponent(s.lang)), 'subs:' + slugForTrack + ':' + s.lang,
+        ).then((bytes) => {
+          if (!bytes.length) return;
+          const url = URL.createObjectURL(new Blob([bytes], { type: 'text/vtt' }));
+          subBlobUrls.push(url);
+          track.src = url;
+        }).catch(() => { /* a missing track is a normal, silent outcome */ });
+      } else {
+        // Through the SW media plane (decrypted to a text/vtt blob) when a worker
+        // controls the page; else the direct `?token=`/cookie path.
+        track.src = slugForTrack && swControls()
+          ? mediaUrl('subs', slugForTrack, s.lang)
+          : withQuery(itemPath(id, '/subs/' + encodeURIComponent(s.lang)), mediaTokenParam());
+      }
       els.playerVideo.appendChild(track);
     });
   } catch (_) { /* no subtitles is a normal, silent outcome */ }
 }
 
 // Drop any <track> elements from a previous item so they can't bleed into the
-// next one.
+// next one, and release any decrypted subtitle blobs they held.
 function clearSubtitles(): void {
   els.playerVideo.querySelectorAll('track').forEach((tr) => tr.remove());
+  while (subBlobUrls.length) URL.revokeObjectURL(subBlobUrls.pop() as string);
 }
 
 // Hide the player and release the media. `pop` true rewinds the history entry
@@ -6382,6 +6835,20 @@ if (els.langSelect) {
   els.langSelect.addEventListener('change', () => window.i18n.setLang(els.langSelect.value));
 }
 
+// Preferred subtitle language (Settings › Streaming). Device-local playback
+// preference — reflects/writes localStorage, applied the next time a video opens.
+if (els.subLang) {
+  els.subLang.value = preferredSubLang();
+  els.subLang.addEventListener('change', () => setPreferredSubLang(els.subLang.value));
+}
+
+// Maximum streaming resolution (Settings › Streaming). Device-local cap applied to
+// the /api/stream resolve; 0 = highest.
+if (els.streamMaxRes) {
+  els.streamMaxRes.value = String(maxStreamHeight());
+  els.streamMaxRes.addEventListener('change', () => setMaxStreamHeight(parseInt(els.streamMaxRes.value, 10) || 0));
+}
+
 // ---- Theme (Settings › Appearance) ----------------------------------------
 // Follows the OS by default via prefers-color-scheme (see style.css) — including
 // in the Android WebView, which tracks the system dark-mode setting. The
@@ -6481,11 +6948,30 @@ function autoRefresh(): void {
   // handler below catches the client up the moment it comes back.
   if (document.hidden || !getToken()) return;
   lastAutoRefresh = Date.now();
-  loadStats(); // cheap aggregate; runs every tick so the gauge never goes stale
+  // The storage gauge + status light ride the faster heartbeat now (below); this
+  // slower tick is just the gentle background list reconcile.
   if (state.loading) return;
   if (state.q) return;              // don't clobber an active search
   if (window.scrollY > 200) return; // user is browsing older pages — leave them be
   softRefresh();
+}
+
+// Status/storage heartbeat. A good /api/stats is our liveness probe (loadStats
+// drives the light), so we poll it on an adaptive cadence: unobtrusive while the
+// server is up, brisk while it's down so the top-bar readout and the light snap
+// back within a few seconds of the server returning — rather than waiting out the
+// SSE socket's ~25s drop-detection or the 30s list poll. Only runs foregrounded.
+const HEARTBEAT_UP_MS = 10 * 1000;
+const HEARTBEAT_DOWN_MS = 4 * 1000;
+let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleHeartbeat(): void {
+  if (heartbeatTimer != null) clearTimeout(heartbeatTimer);
+  heartbeatTimer = setTimeout(runHeartbeat, serverUp ? HEARTBEAT_UP_MS : HEARTBEAT_DOWN_MS);
+}
+async function runHeartbeat(): Promise<void> {
+  if (heartbeatTimer != null) { clearTimeout(heartbeatTimer); heartbeatTimer = null; }
+  if (!document.hidden && getToken()) await loadStats();
+  scheduleHeartbeat();
 }
 
 // Non-destructive page-1 refresh: reconcile the newest page in place instead of
@@ -6526,6 +7012,10 @@ async function softRefresh(establishPaging = false): Promise<void> {
       if (id >= floor && !present.has(id)) removeRow(id);
     }
     els.empty.classList.toggle('hidden', state.rows.size !== 0);
+    // Honour an extension `#orca-play=` deep-link on the cache-hydrated boot path
+    // too (this fresh fetch is what actually holds a just-downloaded item). Single
+    // -shot, so the later poll ticks are no-ops.
+    maybeOpenPendingPlay();
     if (establishPaging) {
       state.cursor = data.next_cursor;
       // Keep the spinner mounted (not display:none) while more pages exist, so
@@ -6542,10 +7032,13 @@ async function softRefresh(establishPaging = false): Promise<void> {
 }
 
 setInterval(autoRefresh, AUTO_REFRESH_MS);
+scheduleHeartbeat();
 // Mobile suspends background timers, so also refresh on regaining visibility once
 // at least one interval has elapsed since the last refresh.
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && Date.now() - lastAutoRefresh >= AUTO_REFRESH_MS) autoRefresh();
+  if (document.hidden) return;
+  void runHeartbeat(); // catch the storage readout + light up immediately on resume
+  if (Date.now() - lastAutoRefresh >= AUTO_REFRESH_MS) autoRefresh();
 });
 
 // ---- First run ------------------------------------------------------------
@@ -6621,7 +7114,12 @@ function openWelcome(): void {
   els.welcomeToken.focus();
 }
 
-els.welcomeStart.addEventListener('click', () => void submitWelcome());
+// The button is type=submit for its form, so a click and Enter in either field
+// both arrive here — one path, and Enter confirms the way people expect.
+byId<HTMLFormElement>('welcome-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  void submitWelcome();
+});
 
 // ---- Boot -----------------------------------------------------------------
 // Everything the main page needs once there are credentials to use it with.

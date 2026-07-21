@@ -105,6 +105,7 @@ export async function authenticator(gcm: CryptoKey, method: string, path: string
 // ---- Handshake + session cache ---------------------------------------------
 
 let cached: Session | null = null;
+let cachedToken: string | null = null;
 let pending: Promise<Session> | null = null;
 
 /// Run the ECDH handshake against `base`, deriving the forward-secret session key
@@ -135,12 +136,17 @@ async function handshake(base: string, token: string): Promise<Session> {
 /// The current session, handshaking (once, even under concurrent callers) if
 /// there is none or the base/token changed. `force` discards a stale session
 /// (e.g. after a 401) and re-handshakes.
+///
+/// The token is part of the cache key, not just the base: the session key is
+/// derived from the token (PSK), so a changed token needs a fresh handshake. A
+/// base-only cache kept serving the old token's session after a Settings change,
+/// which is why a new token only took effect after a full page reload.
 export async function ensureSession(base: string, token: string, force = false): Promise<Session> {
-  if (!force && cached && cached.base === base) return cached;
+  if (!force && cached && cached.base === base && cachedToken === token) return cached;
   if (pending) return pending;
   cached = null;
   pending = handshake(base, token)
-    .then((s) => { cached = s; notifyWorker(s); return s; })
+    .then((s) => { cached = s; cachedToken = token; notifyWorker(s); return s; })
     .finally(() => { pending = null; });
   return pending;
 }
@@ -219,6 +225,69 @@ export async function decryptChunk(key: CryptoKey, index: number, ciphertext: By
   const nonce = new Uint8Array(12);
   new DataView(nonce.buffer).setBigUint64(4, BigInt(index));
   return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ciphertext));
+}
+
+// ---- No-service-worker media fetch (native app) -----------------------------
+// The browser fetches the media plane through the service worker (see sw.ts). The
+// native app's WebView runs no controlling worker and the `?token=` fallback is
+// loopback-only, so it must fetch + decrypt media itself over the secure channel.
+// These mirror the worker's `fetchWindow`, but assemble a whole resource in memory
+// rather than serving seekable ranges — meant for thumbnails and modest media.
+
+/// A 401 during a media window: the session expired, retry after a re-handshake.
+class MediaAuthError extends Error {}
+
+interface MediaWindow { plainLen: number; plaintext: Bytes; }
+
+async function fetchMediaWindow(s: Session, apiPath: string, resource: string, start: number): Promise<MediaWindow> {
+  const auth = await authenticator(s.gcm, 'GET', apiPath);
+  const res = await fetch(`${s.base}${apiPath}`, {
+    headers: { 'X-Orca-Sid': s.sid, 'X-Orca-Auth': auth, 'X-Orca-Range': `${start}-` },
+  });
+  if (res.status === 401) throw new MediaAuthError('session expired');
+  if (!res.ok || res.headers.get('X-Orca-E2EE') !== '1') throw new Error(`media fetch ${res.status}`);
+  const plainLen = Number(res.headers.get('X-Orca-Plain-Len') || '0');
+  const i0 = Number(res.headers.get('X-Orca-Chunk-Index') || '0');
+  const body = new Uint8Array(await res.arrayBuffer());
+  const key = await mediaKey(s.key, resource);
+  const parts: Bytes[] = [];
+  let off = 0;
+  let idx = i0;
+  while (off < body.length) {
+    const ptLen = Math.min(MEDIA_CHUNK, plainLen - idx * MEDIA_CHUNK);
+    const ctLen = ptLen + MEDIA_TAG;
+    parts.push(await decryptChunk(key, idx, body.subarray(off, off + ctLen) as Bytes));
+    off += ctLen;
+    idx += 1;
+  }
+  return { plainLen, plaintext: concat(...parts) };
+}
+
+/// Fetch and decrypt a complete media resource over the secure channel. Walks the
+/// windowed media protocol (src/api/emedia.rs) from byte 0 to the end. A thumbnail
+/// or subtitle returns in one window; a whole file assembles fully in RAM, so keep
+/// this to thumbnails and modest media. Re-handshakes once on a 401.
+export async function fetchMediaBytes(base: string, token: string, apiPath: string, resource: string): Promise<Bytes> {
+  const run = async (s: Session): Promise<Bytes> => {
+    const first = await fetchMediaWindow(s, apiPath, resource, 0);
+    if (first.plainLen === 0) return new Uint8Array(0);
+    const out = new Uint8Array(first.plainLen);
+    out.set(first.plaintext, 0);
+    let next = first.plaintext.length;
+    while (next < first.plainLen) {
+      const w = await fetchMediaWindow(s, apiPath, resource, next);
+      if (w.plaintext.length === 0) break;
+      out.set(w.plaintext, next);
+      next += w.plaintext.length;
+    }
+    return out;
+  };
+  try {
+    return await run(await ensureSession(base, token));
+  } catch (e) {
+    if (e instanceof MediaAuthError) return run(await ensureSession(base, token, true));
+    throw e;
+  }
 }
 
 // ---- Service-worker session hand-off ----------------------------------------

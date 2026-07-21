@@ -181,6 +181,30 @@ pub(super) async fn find_by_archive_key(db: &Db, key: &str) -> anyhow::Result<Op
     row.map(|r| row_to_item(&r)).transpose()
 }
 
+pub(super) async fn find_downloaded_by_url(db: &Db, url: &str) -> anyhow::Result<Option<Item>> {
+    let row = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM items \
+         WHERE webpage_url = ? AND status = 'completed' \
+         ORDER BY id DESC LIMIT 1"
+    ))
+    .bind(url)
+    .fetch_optional(&db.pool)
+    .await?;
+
+    row.map(|r| row_to_item(&r)).transpose()
+}
+
+pub(super) async fn find_latest_by_url(db: &Db, url: &str) -> anyhow::Result<Option<Item>> {
+    let row = sqlx::query(&format!(
+        "SELECT {SELECT_COLS} FROM items WHERE webpage_url = ? ORDER BY id DESC LIMIT 1"
+    ))
+    .bind(url)
+    .fetch_optional(&db.pool)
+    .await?;
+
+    row.map(|r| row_to_item(&r)).transpose()
+}
+
 pub(super) async fn set_status(
     db: &Db,
     id: i64,
@@ -1389,6 +1413,38 @@ mod tests {
             .expect("item should exist");
         assert_eq!(found.id, item.id);
         assert_eq!(found.title, "Hello");
+    }
+
+    #[tokio::test]
+    async fn find_latest_by_url_sees_non_completed_but_downloaded_only_sees_completed() {
+        let (db, _dir) = temp_db().await;
+        let p = probe("youtube", "abc123", "Hello");
+        let url = p.webpage_url.clone();
+        let item = db.insert_probe(&p, Source::Download).await.unwrap();
+
+        // A canceled item: the overlay button must be able to find it (to render
+        // retry), but the "already saved" tick lookup must NOT (it isn't downloaded).
+        db.set_status(item.id, Status::Canceled, None).await.unwrap();
+        assert_eq!(
+            db.find_latest_by_url(&url).await.unwrap().map(|i| i.id),
+            Some(item.id),
+            "find_latest_by_url should return the canceled item",
+        );
+        assert!(
+            db.find_downloaded_by_url(&url).await.unwrap().is_none(),
+            "find_downloaded_by_url must ignore a canceled item",
+        );
+
+        // Once completed, both agree.
+        db.set_status(item.id, Status::Completed, None).await.unwrap();
+        assert_eq!(
+            db.find_downloaded_by_url(&url).await.unwrap().map(|i| i.id),
+            Some(item.id),
+        );
+        assert_eq!(
+            db.find_latest_by_url(&url).await.unwrap().map(|i| i.id),
+            Some(item.id),
+        );
     }
 
     #[tokio::test]

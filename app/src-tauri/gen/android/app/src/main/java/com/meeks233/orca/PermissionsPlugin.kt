@@ -1,4 +1,4 @@
-package com.orca.app
+package com.meeks233.orca
 
 import android.Manifest
 import android.app.Activity
@@ -41,6 +41,15 @@ class LocalQuery {
 @InvokeArg
 class LocalFilesArgs {
   var items: List<LocalQuery> = emptyList()
+}
+
+@InvokeArg
+class StreamArgs {
+  var slug: String? = null
+  /** "stream" (cloud proxy) or "file" (a file the server holds). */
+  var kind: String? = null
+  /** Max resolution cap for a cloud stream; 0 = highest. */
+  var height: Int = 0
 }
 
 @InvokeArg
@@ -94,6 +103,19 @@ class PermissionsPlugin(private val activity: Activity) : Plugin(activity) {
    * app being backgrounded. Called from the activity, which is foreground —
    * a requirement for starting a foreground service.
    */
+  /**
+   * A loopback URL that streams a remote item ([StreamArgs.kind] `stream`/`file`)
+   * through the E2EE proxy, so `<video>` can play it with range support and no
+   * whole-file buffering (see [RemoteMediaProxy]). Resolves `{ url: "" }` when
+   * there are no synced creds yet — the caller then falls back.
+   */
+  @Command
+  fun streamUrl(invoke: Invoke) {
+    val a = invoke.parseArgs(StreamArgs::class.java)
+    val url = RemoteMediaProxy.urlFor(activity, a.kind ?: "stream", a.slug.orEmpty(), a.height).orEmpty()
+    invoke.resolve(JSObject().apply { put("url", url) })
+  }
+
   @Command
   fun trackDownload(invoke: Invoke) {
     val slug = invoke.parseArgs(SlugArgs::class.java).slug

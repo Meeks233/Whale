@@ -1,0 +1,782 @@
+/* Orca popup — a compact control panel for a self-hosted video downloader.
+   Design language: deep-sea indigo canvas, a single violet accent, and the orca
+   mark on a branded tile. Calm and precise rather than decorated — the polish is
+   in consistent spacing (a 4px scale), soft 1px-bordered panels, and one accent
+   colour used sparingly. */
+:root {
+  --bg: #101019;
+  --panel: #191924;
+  --panel-2: #20202e;
+  --elev: #262635;
+  --line: #2c2c3b;
+  --line-2: #38384a;
+  --text: #ececf4;
+  --muted: #9494a8;
+  --faint: #6b6b7d;
+  --accent: #7c5cff;
+  --accent-2: #5b3ff0;
+  --accent-soft: rgba(124, 92, 255, 0.16);
+  --ok: #35c66b;
+  --warn: #e0b341;
+  --err: #ff5d54;
+  --radius: 12px;
+  --radius-sm: 9px;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f5fb;
+    --panel: #ffffff;
+    --panel-2: #f1f1f7;
+    --elev: #ffffff;
+    --line: #e5e5ee;
+    --line-2: #d7d7e3;
+    --text: #191924;
+    --muted: #6a6a7b;
+    --faint: #9494a6;
+    --accent-soft: rgba(124, 92, 255, 0.12);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  margin: 0;
+}
+body {
+  width: 380px;
+  max-height: 588px;
+  overflow-y: auto;
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+}
+.hidden {
+  display: none !important;
+}
+h1 {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+
+/* ---- form primitives ---- */
+label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+}
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--faint);
+}
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+textarea {
+  resize: vertical;
+}
+
+.btn {
+  padding: 7px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 550;
+  transition: border-color 0.14s ease, background 0.14s ease, transform 0.06s ease;
+}
+.btn:hover {
+  border-color: var(--line-2);
+  background: var(--elev);
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-color: transparent;
+  color: #fff;
+}
+.btn-primary:hover {
+  filter: brightness(1.06);
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+.btn-soft {
+  background: var(--accent-soft);
+  border-color: transparent;
+  color: var(--accent);
+}
+.btn-soft:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+.btn-ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn-ghost:hover {
+  background: var(--panel-2);
+  border-color: var(--line);
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+}
+.hint {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.err {
+  color: var(--err);
+  font-size: 12px;
+  min-height: 14px;
+}
+
+/* ---- header + brand tile ---- */
+header.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 10px;
+}
+.brand {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #8b6dff, #5b3ff0);
+  box-shadow: 0 2px 8px rgba(91, 63, 240, 0.35);
+  flex: none;
+}
+.brand img {
+  width: 19px;
+  height: 19px;
+  /* Source art is a black orca on transparency — recolour to white so it reads
+     on the violet tile (and on the dark popup, unlike the raw logo). */
+  filter: brightness(0) invert(1);
+}
+.spacer {
+  flex: 1;
+}
+
+/* ---- connection status pill ---- */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--muted);
+  padding: 4px 9px 4px 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+}
+.status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.status.up .dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgba(53, 198, 107, 0.18);
+}
+.status.down .dot {
+  background: var(--err);
+  box-shadow: 0 0 0 3px rgba(255, 93, 84, 0.18);
+}
+
+/* header icon button (open dashboard) */
+.icon-btn {
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  border-radius: 8px;
+  min-width: 28px;
+  height: 28px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  transition: color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
+}
+.icon-btn:hover {
+  color: var(--text);
+  border-color: var(--line-2);
+  background: var(--elev);
+}
+
+/* ---- lucide icons ---- */
+.orca-ico {
+  width: 16px;
+  height: 16px;
+  display: block;
+  flex: none;
+}
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+}
+/* A button with a leading icon + label (e.g. Extract cookies). */
+.btn-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+/* ---- password reveal (view token temporarily) ---- */
+.input-reveal {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.input-reveal input {
+  padding-right: 38px;
+}
+.reveal-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  border-radius: 7px;
+}
+.reveal-btn:hover {
+  color: var(--text);
+  background: var(--panel);
+}
+.reveal-btn .orca-ico {
+  width: 15px;
+  height: 15px;
+}
+
+/* ---- quick download bar ---- */
+.quick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 16px 0;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--panel), var(--panel-2));
+}
+.quick-meta {
+  flex: 1;
+  min-width: 0;
+}
+.quick-label {
+  display: block;
+  font-size: 9.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+}
+.quick-url {
+  display: block;
+  margin-top: 1px;
+  font-size: 12.5px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.quick-btn {
+  flex: none;
+}
+.quick-msg {
+  min-height: 14px;
+  margin: 6px 16px 0;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+/* When there's no message the paragraph would still reserve its min-height +
+   margin, leaving a mysterious blank strip below the Current-page bar and the
+   Extract-cookies button. Collapse it entirely until it actually says something. */
+.quick-msg:empty {
+  display: none;
+}
+.quick-msg.ok {
+  color: var(--ok);
+}
+.quick-msg.err {
+  color: var(--err);
+}
+
+/* ---- tabs ---- */
+.tabs {
+  display: flex;
+  gap: 2px;
+  padding: 2px 12px 0;
+  margin-top: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.tab {
+  padding: 9px 11px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 550;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.14s ease;
+}
+.tab:hover {
+  color: var(--text);
+}
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+main {
+  padding: 14px 16px 18px;
+}
+
+/* ---- feature toggles (settings) ---- */
+.feature {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+.feature input {
+  width: auto;
+  accent-color: var(--accent);
+}
+.feature .f-copy {
+  flex: 1;
+}
+.feature .f-copy label {
+  color: var(--text);
+  font-weight: 500;
+}
+.feature .f-copy small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* ---- website cards ---- */
+.sites-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.sites-toolbar input {
+  flex: 1;
+}
+.site-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 12px 10px;
+  margin-bottom: 9px;
+  background: var(--panel);
+}
+.site-card.disabled {
+  opacity: 0.6;
+}
+.site-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.site-id {
+  flex: 1;
+  min-width: 0;
+}
+.site-name {
+  font-weight: 600;
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.site-hosts {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- toggle switch ---- */
+.switch {
+  width: 36px;
+  height: 21px;
+  border-radius: 999px;
+  border: none;
+  background: var(--line-2);
+  position: relative;
+  cursor: pointer;
+  flex: none;
+  transition: background 0.16s ease;
+}
+.switch .knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  transition: left 0.16s ease;
+}
+.switch.on {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+.switch.on .knob {
+  left: 17px;
+}
+.switch-sm {
+  width: 30px;
+  height: 18px;
+}
+.switch-sm .knob {
+  width: 14px;
+  height: 14px;
+}
+.switch-sm.on .knob {
+  left: 14px;
+}
+
+/* ---- cookie status row ---- */
+.ck-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 11px 0 2px;
+}
+.ck-status {
+  flex: 1;
+  font-size: 12px;
+  color: var(--muted);
+}
+.ck-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: none;
+  background: var(--faint);
+}
+.ck-dot.present {
+  background: var(--ok);
+}
+.ck-dot.disabled {
+  background: var(--faint);
+}
+.ck-dot.expiring {
+  background: var(--warn);
+}
+.ck-dot.expired {
+  background: var(--err);
+}
+
+/* ---- card actions + overflow menu ---- */
+.card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 11px;
+}
+.card-actions .btn {
+  padding: 6px 11px;
+  font-size: 12px;
+}
+.flex-spacer {
+  flex: 1;
+}
+.more-wrap {
+  position: relative;
+}
+.more-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  min-width: 148px;
+  padding: 5px;
+  background: var(--elev);
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.4);
+  z-index: 20;
+}
+.more-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.more-item .orca-ico {
+  width: 15px;
+  height: 15px;
+  color: var(--muted);
+}
+.more-item:hover {
+  background: var(--panel-2);
+}
+.more-item.danger,
+.more-item.danger .orca-ico {
+  color: var(--err);
+}
+.more-item.danger:hover {
+  background: rgba(255, 93, 84, 0.12);
+}
+
+.ck-paste {
+  margin-top: 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11.5px;
+}
+
+/* ---- cookie extract bar ---- */
+.ck-extract {
+  margin-bottom: 12px;
+}
+
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 26px 10px;
+}
+
+/* ---- downloads list ---- */
+.dl-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.dl-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+}
+.dl-toolbar .btn {
+  padding: 4px 9px;
+  font-size: 13px;
+}
+.dl-row {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin-bottom: 7px;
+  background: var(--panel);
+  overflow: hidden;
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+.dl-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  min-width: 0;
+}
+.dl-row.clickable {
+  cursor: pointer;
+}
+.dl-row.clickable:hover {
+  border-color: var(--line-2);
+  background: var(--elev);
+}
+.dl-main {
+  min-width: 0;
+  flex: 1;
+}
+/* Preview card: a decrypted thumbnail above the meta row. `aspect-ratio` is set
+   inline from the image's natural size (dynamic portrait/landscape); 16/9 holds
+   the space until it loads, and the image fades in once painted. */
+.dl-thumb {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  max-height: 240px;
+  background: var(--elev);
+  overflow: hidden;
+}
+.dl-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+.dl-thumb.ready img {
+  opacity: 1;
+}
+/* Play affordance on a finished preview, mirroring the web player's badge. */
+.dl-play {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: rgba(12, 12, 16, 0.62);
+  color: #fff;
+  backdrop-filter: blur(2px);
+}
+.dl-play svg {
+  width: 15px;
+  height: 15px;
+  margin-left: 1px;
+}
+/* Privacy blur: same treatment as the web history — hide the preview, title and
+   site of a blur-on site's download, clearing while peeked/revealed. */
+.dl-row.blurred .dl-name,
+.dl-row.blurred .dl-sub {
+  filter: blur(9px);
+  transition: filter 0.18s ease;
+  user-select: none;
+}
+.dl-row.blurred .dl-thumb img {
+  filter: blur(20px);
+  transform: scale(1.06);
+  transition: filter 0.18s ease;
+}
+.dl-row.blurred .dl-play {
+  display: none;
+}
+.dl-row.blurred.peek .dl-name,
+.dl-row.blurred.peek .dl-sub,
+.dl-row.blurred.revealed .dl-name,
+.dl-row.blurred.revealed .dl-sub {
+  filter: none;
+}
+.dl-row.blurred.peek .dl-thumb img,
+.dl-row.blurred.revealed .dl-thumb img {
+  filter: none;
+  transform: none;
+}
+.dl-row.blurred.peek .dl-play,
+.dl-row.blurred.revealed .dl-play {
+  display: grid;
+}
+.dl-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dl-sub {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+/* Quick actions (cancel / retry / delete) pinned to the right of the meta row.
+   Slightly smaller than the standard icon-btn so they sit lightly in the row. */
+.dl-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+}
+.dl-act {
+  min-width: 26px;
+  height: 26px;
+}
+.dl-act .orca-ico {
+  width: 14px;
+  height: 14px;
+}
+.dl-act.danger:hover {
+  color: #fff;
+  border-color: var(--danger, #e5534b);
+  background: var(--danger, #e5534b);
+}
+.dl-act:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.dl-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--faint);
+}
+.dl-dot.completed,
+.dl-dot.duplicate {
+  background: var(--ok);
+}
+.dl-dot.running {
+  background: var(--accent);
+  box-shadow: 0 0 0 0 rgba(124, 92, 255, 0.5);
+  animation: dl-pulse 1.4s ease-out infinite;
+}
+.dl-dot.queued,
+.dl-dot.paused {
+  background: var(--warn);
+}
+.dl-dot.failed,
+.dl-dot.canceled {
+  background: var(--err);
+}
+@keyframes dl-pulse {
+  to {
+    box-shadow: 0 0 0 6px rgba(124, 92, 255, 0);
+  }
+}

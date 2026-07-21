@@ -65,6 +65,7 @@ impl StreamUrlCache {
         url: &str,
         cookies: Option<&Path>,
         playlist_index: Option<i64>,
+        max_height: Option<i64>,
     ) -> Result<String, YtdlpError> {
         let slot = {
             let mut slots = self.slots.lock().await;
@@ -84,7 +85,7 @@ impl StreamUrlCache {
             return Ok(hit.value.clone());
         }
 
-        let value = resolve_stream_url(cfg, url, cookies, playlist_index).await?;
+        let value = resolve_stream_url(cfg, url, cookies, playlist_index, max_height).await?;
         *cached = Some(CachedStreamUrl {
             value: value.clone(),
             expires_at: Instant::now() + Duration::from_secs(120),
@@ -303,12 +304,22 @@ pub async fn resolve_stream_url(
     url: &str,
     cookies: Option<&Path>,
     playlist_index: Option<i64>,
+    max_height: Option<i64>,
 ) -> Result<String, YtdlpError> {
     let mut cmd = tokio::process::Command::new(&cfg.ytdlp_path);
+    // A resolution cap is a *preference* (`<=?`), so a source that doesn't report
+    // heights still resolves rather than 404-ing the player; without a cap we keep
+    // the original "best single HTTP stream".
+    let fmt = match max_height {
+        Some(h) if h > 0 => {
+            format!("b[height<=?{h}][protocol^=http]/b[height<=?{h}]/b[protocol^=http]/b")
+        }
+        _ => "b[protocol^=http]/b".to_string(),
+    };
     cmd.arg("--ignore-config")
         .arg("--no-warnings")
         .arg("-f")
-        .arg("b[protocol^=http]/b")
+        .arg(&fmt)
         .arg("-g");
     if playlist_index.is_none() {
         cmd.arg("--no-playlist");

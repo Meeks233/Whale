@@ -75,6 +75,20 @@ impl Db {
         queries::find_by_archive_key(self, key).await
     }
 
+    /// Newest already-downloaded item for a canonical webpage URL, if any. Powers
+    /// the extension's "already saved" tick on a video page (no probe needed).
+    pub async fn find_downloaded_by_url(&self, url: &str) -> anyhow::Result<Option<Item>> {
+        queries::find_downloaded_by_url(self, url).await
+    }
+
+    /// Newest item for a canonical webpage URL regardless of status. Powers the
+    /// extension overlay button's live state sync, which must render retry for a
+    /// canceled/failed item (and the ring for an in-flight one), not only the
+    /// completed "already saved" tick `find_downloaded_by_url` answers.
+    pub async fn find_latest_by_url(&self, url: &str) -> anyhow::Result<Option<Item>> {
+        queries::find_latest_by_url(self, url).await
+    }
+
     pub async fn set_status(
         &self,
         id: i64,

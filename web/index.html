@@ -196,7 +196,7 @@
        all look and behave the same instead of each growing its own box. -->
   <div id="confirm" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
     <div class="modal-card modal-card-narrow">
-      <button id="confirm-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="confirm-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="confirm-title" class="modal-heading"></h2>
       <p id="confirm-sub" class="hint-muted"></p>
       <div class="share-actions">
@@ -213,7 +213,7 @@
        source URL straight away. -->
   <div id="share-choice" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="share-choice-title">
     <div class="modal-card modal-card-narrow">
-      <button id="share-choice-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="share-choice-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="share-choice-title" class="modal-heading" data-i18n="shareChoice.title">Share which link?</h2>
       <p id="share-choice-sub" class="hint-muted" data-i18n="shareChoice.sub">Share the original source link, or this downloader's own link.</p>
       <div class="share-actions">
@@ -227,7 +227,7 @@
        applied to every selected item at once (7 / 30 days / permanent). -->
   <div id="batch-share" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="batch-share-title">
     <div class="modal-card">
-      <button id="batch-share-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="batch-share-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="batch-share-title" class="modal-heading" data-i18n="batchShare.title">Share selected</h2>
       <p id="batch-share-sub" class="hint-muted"></p>
       <p class="field-label" data-i18n="share.duration">Link duration</p>
@@ -259,7 +259,7 @@
     <div class="modal-card welcome-card">
       <h2 id="welcome-title" class="modal-heading" data-i18n="welcome.title">Welcome to Orca</h2>
       <section class="set-group">
-        <div class="form-box">
+        <form id="welcome-form" class="form-box">
           <div id="welcome-server-row" class="form-row">
             <label class="form-row-label" for="welcome-server" data-i18n="settings.serverUrl">Server URL</label>
             <div class="form-row-ctl">
@@ -269,10 +269,13 @@
           <div class="form-row">
             <label class="form-row-label" for="welcome-token" data-i18n="settings.token">API token</label>
             <div class="form-row-ctl">
-              <input id="welcome-token" class="input" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
+              <div class="reveal-wrap">
+                <input id="welcome-token" class="input" type="password" autocomplete="off" placeholder="Access token" data-i18n-ph="ph.token">
+                <button type="button" class="reveal-btn" data-reveal="welcome-token" aria-label="Show token"></button>
+              </div>
             </div>
           </div>
-        </div>
+        </form>
       </section>
       <p id="welcome-error" class="hint hidden"></p>
       <section id="welcome-perms" class="set-group hidden">
@@ -296,7 +299,7 @@
         </div>
       </section>
       <div class="share-actions welcome-actions">
-        <button id="welcome-start" class="btn" data-i18n="welcome.start">Get started</button>
+        <button id="welcome-start" type="submit" form="welcome-form" class="btn" data-i18n="welcome.start">Get started</button>
       </div>
     </div>
   </div>
@@ -306,7 +309,7 @@
        the user explicitly chooses not to see it again. -->
   <div id="permissions-prompt" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="permissions-prompt-title">
     <div class="modal-card permission-prompt-card">
-      <button id="permissions-prompt-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="permissions-prompt-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="permissions-prompt-title" class="modal-heading" data-i18n="permissionsPrompt.title">App permissions</h2>
       <p class="hint-muted" data-i18n="permissionsPrompt.hint">Orca needs these to report downloads while in the background.</p>
       <div class="permission-box">
@@ -336,7 +339,7 @@
   <!-- In-app fullscreen player. Opened by tapping a completed thumbnail; the
        Android back button pops it (see app.js) instead of exiting the app. -->
   <div id="player" class="player-overlay hidden" aria-hidden="true">
-    <button id="player-close" class="player-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+    <button id="player-close" class="player-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
     <video id="player-video" class="player-video" crossorigin="anonymous" controls playsinline autoplay></video>
   </div>
 
@@ -344,7 +347,7 @@
        completed item: pick a window, create a tokenless public link, copy it. -->
   <div id="share" class="share-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="share-title">
     <div class="share-card">
-      <button id="share-close" class="share-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="share-close" class="share-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 class="share-heading" data-i18n="share.title">Share</h2>
       <p id="share-title" class="share-name"></p>
 
@@ -389,7 +392,7 @@
        per field. -->
   <div id="settings" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="modal-card">
-      <button id="settings-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="settings-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="settings-title" class="modal-heading" data-i18n="settings.title">Settings</h2>
 
       <!-- Grouping. Every block below is a .set-group: a heading naming the
@@ -461,6 +464,41 @@
         </div>
       </section>
 
+      <!-- Streaming: how online (cloud) items play back on this device. These are
+           per-viewer playback preferences (device-local, localStorage), not server
+           policy — they change what THIS device plays, not what others download. -->
+      <section class="set-group">
+        <label data-i18n="settings.streaming">Streaming</label>
+        <div id="stream-box" class="form-box">
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.streamMaxRes">Maximum resolution</span>
+            <div class="form-row-ctl">
+              <select id="stream-max-res" class="select">
+                <option value="0" data-i18n="res.highest">Highest</option>
+                <option value="2160">2160p</option>
+                <option value="1440">1440p</option>
+                <option value="1080">1080p</option>
+                <option value="720">720p</option>
+                <option value="480">480p</option>
+                <option value="360">360p</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <span class="form-row-label" data-i18n="settings.subLang">Preferred subtitles</span>
+            <div class="form-row-ctl">
+              <select id="sub-lang" class="select">
+                <option value="en" data-i18n="lang.en">English</option>
+                <option value="zh-Hans" data-i18n="lang.zhHans">简体中文</option>
+                <option value="zh-Hant" data-i18n="lang.zhHant">繁體中文</option>
+                <option value="ja" data-i18n="lang.ja">日本語</option>
+                <option value="ko" data-i18n="lang.ko">한국어</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- Connection: which server, and the token to talk to it. Kept adjacent
            because they are one thought — you cannot use one without the other,
            and a token failure is usually really a wrong-URL failure. Both are
@@ -480,7 +518,10 @@
           <div class="form-row">
             <label class="form-row-label" for="token" data-i18n="settings.token">API token</label>
             <div class="form-row-ctl">
-              <input id="token" class="input" type="password" autocomplete="off" placeholder="Bearer token" data-i18n-ph="ph.token">
+              <div class="reveal-wrap">
+                <input id="token" class="input" type="password" autocomplete="off" placeholder="Access token" data-i18n-ph="ph.token">
+                <button type="button" class="reveal-btn" data-reveal="token" aria-label="Show token"></button>
+              </div>
             </div>
           </div>
         </div>
@@ -511,6 +552,14 @@
           <button class="permission-item" type="button" data-permission="clipboard" data-state="checking">
             <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></span>
             <span class="permission-copy"><strong data-i18n="settings.permClipboard">Clipboard</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
+            <span class="permission-result" aria-hidden="true"></span>
+          </button>
+          <!-- Autoplay: web-only (hidden on the native app and where the browser
+               can't report a policy). Granting it lets online playback start on its
+               own instead of stalling until the first tap. -->
+          <button class="permission-item" type="button" data-permission="autoplay" data-state="checking">
+            <span class="permission-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg></span>
+            <span class="permission-copy"><strong data-i18n="settings.permAutoplay">Autoplay</strong><small class="permission-status" data-i18n="settings.permChecking">Checking…</small></span>
             <span class="permission-result" aria-hidden="true"></span>
           </button>
           <!-- Storage: needed before Save can write anything at all. On Android
@@ -670,7 +719,7 @@
        cap, enable/disable, alternate domains, and merging duplicates. -->
   <div id="websites" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="websites-title">
     <div class="modal-card modal-card-wide">
-      <button id="websites-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="websites-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="websites-title" class="modal-heading" data-i18n="sites.title">Website management</h2>
 
       <!-- Site-level defaults (max resolution, share quality, format, subtitles)
@@ -704,7 +753,7 @@
   <!-- Add / edit a website (name, key, domains). -->
   <div id="site-edit" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="site-edit-title">
     <div class="modal-card">
-      <button id="site-edit-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="site-edit-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="site-edit-title" class="modal-heading" data-i18n="sites.addTitle">Add website</h2>
       <label data-i18n="sites.name">Name</label>
       <input id="site-edit-name" class="input" type="text" autocomplete="off" placeholder="Example">
@@ -727,7 +776,7 @@
        downloads it; unchecking a downloaded one deletes its local file. -->
   <div id="resolution" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="resolution-title">
     <div class="modal-card">
-      <button id="resolution-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="resolution-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="resolution-title" class="modal-heading" data-i18n="res.title">Download resolutions</h2>
       <p class="hint-muted" data-i18n="res.hint">Unticking a downloaded version deletes its file.</p>
       <div id="resolution-list" class="res-list" role="group" aria-labelledby="resolution-title"></div>
@@ -745,7 +794,7 @@
        download managers use — rather than being queued behind the user's back. -->
   <div id="clip-confirm" class="modal-overlay hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="clip-title">
     <div class="modal-card">
-      <button id="clip-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close">✕</button>
+      <button id="clip-close" class="modal-close" aria-label="Close" data-i18n-aria="aria.close"><svg class="ico-x" xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
       <h2 id="clip-title" class="modal-heading" data-i18n="clip.title">Download detected link?</h2>
       <p id="clip-sub" class="hint-muted" data-i18n="clip.sub">Found in your clipboard.</p>
       <div id="clip-list" class="clip-list" role="group" aria-labelledby="clip-title"></div>

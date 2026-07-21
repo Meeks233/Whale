@@ -1,0 +1,141 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>Orca</title>
+  </head>
+  <body>
+    <!-- First-launch welcome: server + token, then E2EE handshake -->
+    <section id="welcome" class="hidden">
+      <header class="bar">
+        <span class="brand"><img src="icons/logo.png" alt="" /></span>
+        <h1>Welcome to Orca</h1>
+      </header>
+      <main>
+        <p class="hint">
+          Connect this browser to your self-hosted Orca. The token never leaves
+          your machine in cleartext — it seeds an end-to-end-encrypted channel.
+        </p>
+        <div class="field">
+          <label for="w-server">Server URL</label>
+          <input id="w-server" type="url" inputmode="url" autocomplete="off"
+            placeholder="https://orca.example.com" />
+        </div>
+        <div class="field">
+          <label for="w-token">API token</label>
+          <div class="input-reveal">
+            <input id="w-token" type="password" autocomplete="off" placeholder="Your access token" />
+            <button type="button" class="reveal-btn" data-reveal="w-token" title="Show token" aria-label="Show token"></button>
+          </div>
+        </div>
+        <p id="w-err" class="err"></p>
+        <button id="w-connect" class="btn btn-primary" style="width: 100%">Connect</button>
+      </main>
+    </section>
+
+    <!-- Main UI -->
+    <section id="app" class="hidden">
+      <header class="bar">
+        <span class="brand"><img src="icons/logo.png" alt="" /></span>
+        <h1>Orca</h1>
+        <span class="spacer"></span>
+        <span id="conn-status" class="status down"><span class="dot"></span><span id="conn-label">offline</span></span>
+        <button id="open-dash" class="icon-btn" title="Open dashboard in a tab" aria-label="Open dashboard in a tab" data-ico="gauge"></button>
+      </header>
+
+      <!-- Current page: adaptive — download / play a recognised video, or offer
+           cookie extraction on ambiguous pages. Hidden until it decides. -->
+      <div id="quick" class="quick hidden">
+        <div class="quick-meta">
+          <span class="quick-label">Current page</span>
+          <span id="quick-url" class="quick-url">—</span>
+        </div>
+        <button id="quick-dl" class="btn btn-primary quick-btn">Download</button>
+      </div>
+      <p id="quick-msg" class="quick-msg"></p>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="downloads">Downloads</button>
+        <button class="tab" data-tab="websites">Websites</button>
+        <button class="tab" data-tab="connection">Settings</button>
+      </nav>
+
+      <main>
+        <div id="tab-downloads">
+          <div class="dl-toolbar">
+            <span class="dl-title">Recent downloads</span>
+            <button id="dl-refresh" class="btn btn-ghost icon-btn" title="Refresh" aria-label="Refresh" data-ico="refresh"></button>
+          </div>
+          <div id="dl-list"></div>
+          <p id="dl-empty" class="empty hidden">No downloads yet.</p>
+        </div>
+
+        <div id="tab-connection" class="hidden">
+          <div class="field">
+            <label for="c-server">Server URL</label>
+            <input id="c-server" type="url" inputmode="url" autocomplete="off"
+              placeholder="https://orca.example.com" />
+          </div>
+          <div class="field">
+            <label for="c-token">API token</label>
+            <div class="input-reveal">
+              <input id="c-token" type="password" autocomplete="off" placeholder="Change my token" />
+              <button type="button" class="reveal-btn" data-reveal="c-token" title="Show token" aria-label="Show token"></button>
+            </div>
+          </div>
+          <p id="c-err" class="err"></p>
+          <div class="row">
+            <button id="c-save" class="btn btn-primary">Save & reconnect</button>
+          </div>
+
+          <h1 style="font-size: 13px; margin: 16px 0 4px">Features</h1>
+          <div class="feature">
+            <input type="checkbox" id="f-toolbarStatus" />
+            <div class="f-copy">
+              <label for="f-toolbarStatus">Toolbar status icon</label>
+              <small>Show download progress on the toolbar button.</small>
+            </div>
+          </div>
+          <div class="feature">
+            <input type="checkbox" id="f-inpageButton" />
+            <div class="f-copy">
+              <label for="f-inpageButton">In-page download button</label>
+              <small>Add a download button on video pages and posts.</small>
+            </div>
+          </div>
+          <div class="feature">
+            <input type="checkbox" id="f-websiteManagement" />
+            <div class="f-copy">
+              <label for="f-websiteManagement">Website management</label>
+              <small>Show the Websites tab for cookies & per-site settings.</small>
+            </div>
+          </div>
+        </div>
+
+        <div id="tab-websites" class="hidden">
+          <div class="ck-extract">
+            <button id="s-extract" class="btn btn-primary btn-ico" style="width: 100%"><span data-ico="download"></span>Extract cookies from this page</button>
+            <p id="s-extract-msg" class="quick-msg"></p>
+          </div>
+          <div class="sites-toolbar">
+            <input id="s-search" type="search" placeholder="Search sites…" autocomplete="off" />
+            <button id="s-add" class="btn">Add</button>
+          </div>
+          <div id="site-add-form" class="site-card hidden">
+            <div class="field"><label>Name</label><input id="sa-name" placeholder="YouTube" /></div>
+            <div class="field"><label>Key (a–z, 0–9, _)</label><input id="sa-key" placeholder="youtube" /></div>
+            <div class="field"><label>Domains (comma / newline separated)</label><textarea id="sa-hosts" rows="2" placeholder="youtube.com, youtu.be"></textarea></div>
+            <p id="sa-err" class="err"></p>
+            <div class="row"><button id="sa-save" class="btn btn-primary">Save</button><button id="sa-cancel" class="btn btn-ghost">Cancel</button></div>
+          </div>
+          <div id="site-list"></div>
+          <p id="site-empty" class="empty hidden">No sites yet.</p>
+        </div>
+      </main>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

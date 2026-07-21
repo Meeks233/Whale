@@ -1,4 +1,4 @@
-package com.orca.app
+package com.meeks233.orca
 
 import android.app.Activity
 import android.content.Intent
@@ -81,6 +81,9 @@ class ShareActivity : Activity() {
   /** Diagnostic dump of the raw incoming share intent — action, type, data URI,
    *  every string extra and any ClipData items. Lets us see EXACTLY what the X
    *  app delivers when a real share "silently" does nothing. */
+  // Bundle.get(String) is deprecated with no generic replacement; a diagnostic
+  // dump legitimately wants the untyped value, so silence the warning here.
+  @Suppress("DEPRECATION")
   private fun dumpIntent(i: Intent?) {
     if (i == null) { Log.w(TAG, "intent is null"); return }
     Log.i(TAG, "intent action=${i.action} type=${i.type} data=${i.dataString}")

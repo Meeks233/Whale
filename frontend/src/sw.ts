@@ -16,6 +16,14 @@ declare const self: ServiceWorkerGlobalScope;
 import { authenticator, decryptChunk, mediaKey, sessionFromRaw, MEDIA_TAG, type Session } from './e2ee';
 
 const CACHE = 'orca-shell-v7';
+// Persistent thumbnail store, separate from the shell cache so it survives across
+// sessions and token changes. The in-RAM blobCache below is wiped whenever the
+// session rotates (and dies with the worker), so once the token went bad every
+// `/__m/thumb/...` refetch 401'd and the pictures vanished. This keeps the last
+// decrypted copy on disk to serve when the live fetch can't (bad token, offline).
+// Mirrors the native app's IndexedDB thumb cache (thumbcache.ts) and its security
+// note: only low-sensitivity preview images are persisted, never full media.
+const THUMB_CACHE = 'orca-thumb-v1';
 const SHELL = [
   '/', '/index.html', '/app.js', '/theme.js', '/style.css',
   '/manifest.webmanifest', '/favicon.ico', '/icons/favicon-32.png',
@@ -33,7 +41,9 @@ self.addEventListener('install', (event) => {
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(
+        keys.filter((k) => k !== CACHE && k !== THUMB_CACHE).map((k) => caches.delete(k)),
+      ))
       .then(() => self.clients.claim())
   );
 });
@@ -133,9 +143,11 @@ function route(parts: string[]): Target | null {
 interface WindowData { plainLen: number; windowStart: number; plaintext: Uint8Array<ArrayBuffer>; }
 
 /// Fetch and decrypt one encrypted window starting at plaintext byte `start`.
-async function fetchWindow(s: Session, t: Target, start: number, end?: number): Promise<WindowData> {
+async function fetchWindow(s: Session, t: Target, start: number, end?: number, query = ''): Promise<WindowData> {
+  // The authenticator is bound to the path only (never the query), matching the
+  // server; `query` (e.g. a `?h=` resolution cap) rides the fetch URL alone.
   const auth = await authenticator(s.gcm, 'GET', t.apiPath);
-  const res = await fetch(`${s.base}${t.apiPath}`, {
+  const res = await fetch(`${s.base}${t.apiPath}${query}`, {
     headers: {
       'X-Orca-Sid': s.sid,
       'X-Orca-Auth': auth,
@@ -169,11 +181,11 @@ async function fetchWindow(s: Session, t: Target, start: number, end?: number): 
 }
 
 /// Serve a seekable `<video>` range: one decrypted window as a `206`.
-async function serveVideo(s: Session, t: Target, range: string | null, ct: string): Promise<Response> {
+async function serveVideo(s: Session, t: Target, range: string | null, ct: string, query = ''): Promise<Response> {
   const m = range && /bytes=(\d+)-(\d*)/.exec(range);
   const start = m ? Number(m[1]) : 0;
   const end = m && m[2] ? Number(m[2]) : undefined;
-  const w = await fetchWindow(s, t, start, end);
+  const w = await fetchWindow(s, t, start, end, query);
   if (w.plainLen === 0) return new Response(null, { status: 200, headers: { 'Content-Type': ct } });
 
   // Slice the decrypted window to exactly what the element asked for.
@@ -194,6 +206,30 @@ async function serveVideo(s: Session, t: Target, range: string | null, ct: strin
   });
 }
 
+// A thumbnail's persistent key. Keyed by resource label (`thumb:<slug>`) under a
+// synthetic same-origin URL the media plane never actually requests.
+function thumbCacheKey(resource: string): Request {
+  return new Request(`${self.location.origin}/__thumbcache/${encodeURIComponent(resource)}`);
+}
+
+// Stash a freshly decrypted thumbnail for later offline / bad-token fallback.
+async function persistThumb(resource: string, bytes: Uint8Array, ct: string): Promise<void> {
+  try {
+    const cache = await caches.open(THUMB_CACHE);
+    await cache.put(thumbCacheKey(resource), new Response(bytes.slice(), {
+      headers: { 'Content-Type': ct, 'Cache-Control': 'no-store' },
+    }));
+  } catch { /* best-effort: private mode / quota */ }
+}
+
+// The last-good decrypted thumbnail, if one was ever stored.
+async function thumbFromCache(resource: string): Promise<Response | null> {
+  try {
+    const cache = await caches.open(THUMB_CACHE);
+    return (await cache.match(thumbCacheKey(resource))) || null;
+  } catch { return null; }
+}
+
 /// Serve a whole small resource (thumbnail, subtitle) as one decrypted blob,
 /// from the in-RAM cache when we've already decrypted it this session.
 async function serveBlob(s: Session, t: Target, ct: string): Promise<Response> {
@@ -210,10 +246,13 @@ async function serveBlob(s: Session, t: Target, ct: string): Promise<Response> {
     }
     blobCache.set(t.resource, bytes);
   }
+  const isThumb = t.resource.startsWith('thumb:');
   const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
   headers['Content-Type'] = t.resource.startsWith('subs:')
     ? 'text/vtt; charset=utf-8'
     : (ct || sniffImage(bytes));
+  // Persist thumbnails to disk so a later bad-token/offline refetch can still paint.
+  if (isThumb && bytes.length) void persistThumb(t.resource, bytes, headers['Content-Type']);
   return new Response(bytes, { status: 200, headers });
 }
 
@@ -258,14 +297,23 @@ function sniffImage(b: Uint8Array): string {
 async function handleMedia(req: Request, parts: string[], url: URL): Promise<Response> {
   const t = route(parts);
   if (!t) return new Response('bad media path', { status: 400 });
+  const isThumb = t.resource.startsWith('thumb:');
   try {
     const s = await getSession();
     const ct = url.searchParams.get('ct') || '';
     if (t.kind === 'download') return await serveDownload(s, t, url.searchParams.get('name'));
     if (t.kind === 'blob') return await serveBlob(s, t, ct);
-    return await serveVideo(s, t, req.headers.get('Range'), ct || 'video/mp4');
+    // A `?h=` resolution cap only applies to the online-stream resolve.
+    const h = t.resource.startsWith('stream:') ? url.searchParams.get('h') : null;
+    return await serveVideo(s, t, req.headers.get('Range'), ct || 'video/mp4', h ? `?h=${encodeURIComponent(h)}` : '');
   } catch {
-    // A transient failure (no session yet, expiry) — let the element retry.
+    // Live fetch failed (no session yet, expiry, bad token, offline). A thumbnail
+    // we decrypted before is still on disk — paint that instead of a broken image.
+    if (isThumb) {
+      const cached = await thumbFromCache(t.resource);
+      if (cached) return cached;
+    }
+    // A transient failure — let the element retry.
     return new Response('media unavailable', { status: 503 });
   }
 }
