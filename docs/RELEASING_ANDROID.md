@@ -3,7 +3,7 @@
 ## Fixed application identity
 
 - Product: `Orca`
-- Android application ID: `com.orca.app`
+- Android application ID: `com.meeks233.orca`
 - Minimum SDK: 28
 - Compile/target SDK: 36
 - License: `GPL-3.0-or-later`
@@ -17,7 +17,7 @@ Play release. Confirm ownership of this ID before creating the Play listing.
    `app/src-tauri/Cargo.toml`.
 2. Ensure Android `versionCode` increases. Tauri currently maps `0.1.0` to
    `1000`; verify `app/src-tauri/gen/android/app/tauri.properties` after build.
-3. Update Fastlane changelogs and `packaging/fdroid/com.orca.app.yml`.
+3. Update Fastlane changelogs and `packaging/fdroid/com.meeks233.orca.yml`.
 4. Run the full CI suite, tag the exact commit as `vX.Y.Z`, and push the tag.
 
 The tag starts `.github/workflows/android-release.yml`, which builds arm64-v8a
@@ -116,7 +116,7 @@ Official references:
 F-Droid builds and signs its own APK from a public, tagged source revision. Make
 the GitHub repository public, publish `vX.Y.Z`, test
 `app/scripts/build-fdroid.sh` in a clean environment, then submit a merge request
-to `fdroid/fdroiddata` using `packaging/fdroid/com.orca.app.yml` as the starting
+to `fdroid/fdroiddata` using `packaging/fdroid/com.meeks233.orca.yml` as the starting
 metadata. Replace its tag reference with the exact release commit if requested
 by review.
 

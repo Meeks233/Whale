@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "Orca",
+  "version": "0.1.0",
+  "description": "Submit videos to your self-hosted Orca over an end-to-end-encrypted channel, and download them straight from any video page.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "orca@orca.app",
+      "strict_min_version": "115.0",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
+  },
+  "icons": {
+    "32": "icons/favicon-32.png",
+    "192": "icons/192.png",
+    "512": "icons/512.png"
+  },
+  "action": {
+    "default_title": "Orca",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "32": "icons/favicon-32.png",
+      "192": "icons/192.png"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "permissions": ["storage", "cookies", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["icons/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

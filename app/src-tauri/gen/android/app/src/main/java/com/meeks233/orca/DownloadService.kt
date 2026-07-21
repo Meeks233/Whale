@@ -1,4 +1,4 @@
-package com.orca.app
+package com.meeks233.orca
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -373,7 +373,7 @@ class DownloadService : Service() {
   companion object {
     private const val TAG = "OrcaDownloads"
     const val CHANNEL_ID = "quick_download"
-    private const val GROUP = "com.orca.app.DOWNLOADS"
+    private const val GROUP = "com.meeks233.orca.DOWNLOADS"
     private const val SUMMARY_ID = 199999
     private const val EXTRA_SLUG = "orca.slug"
     private const val EXTRA_URL = "orca.url"

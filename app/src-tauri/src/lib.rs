@@ -26,7 +26,7 @@ struct AndroidPermissions<R: tauri::Runtime>(tauri::plugin::PluginHandle<R>);
 fn android_permissions_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("orca-permissions")
         .setup(|app, api| {
-            let handle = api.register_android_plugin("com.orca.app", "PermissionsPlugin")?;
+            let handle = api.register_android_plugin("com.meeks233.orca", "PermissionsPlugin")?;
             app.manage(AndroidPermissions(handle));
             Ok(())
         })
@@ -259,6 +259,43 @@ fn set_hide_downloads<R: tauri::Runtime>(
     Err("Saving to device is only available in the Android app".into())
 }
 
+/// The `streamUrl` mobile plugin resolves a one-field envelope: a loopback URL
+/// the WebView can play through the E2EE proxy (empty when creds aren't synced).
+#[cfg(target_os = "android")]
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+struct StreamUrl {
+    #[serde(default)]
+    url: String,
+}
+
+/// A loopback URL that streams a remote item through the on-device E2EE proxy
+/// (see RemoteMediaProxy.kt), so the app's `<video>` plays it with range support
+/// and no whole-file buffering. `kind` is `"stream"` (cloud) or `"file"` (a file
+/// the server holds). Returns an empty string when creds aren't synced yet, and
+/// is a no-op error off Android (the browser uses the service-worker media plane).
+#[tauri::command]
+fn stream_url<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    _slug: String,
+    _kind: String,
+    _height: i64,
+) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    {
+        return _app
+            .state::<AndroidPermissions<R>>()
+            .0
+            .run_mobile_plugin::<StreamUrl>(
+                "streamUrl",
+                serde_json::json!({ "slug": _slug, "kind": _kind, "height": _height }),
+            )
+            .map(|r| r.url)
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    Err("native streaming is only available in the Android app".into())
+}
+
 /// Hand a download submitted from inside the app to the Android foreground
 /// service that owns download notifications, so an in-app download notifies the
 /// same way a shared link does. No-op off Android.
@@ -316,6 +353,7 @@ pub fn run() {
             request_storage_permission,
             save_media,
             local_files,
+            stream_url,
             delete_local,
             set_hide_downloads,
             track_download,

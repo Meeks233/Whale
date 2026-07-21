@@ -1,0 +1,255 @@
+/* Orca in-page download button — a compact circular control mounted on video
+   pages/posts, cycling through the download lifecycle glyphs. Namespaced under
+   .orca-dl- so it never collides with host-page styles.
+
+   Design notes:
+   - On a video it stays subtle (hidden until the player is hovered) so it never
+     hogs the corner; an active or just-finished download forces itself visible.
+   - The jitter came from a live `backdrop-filter: blur` sitting over the PLAYING
+     video: Chromium re-samples and re-composites that blurred region every video
+     frame, which shimmers/shakes the button edges. Mature download buttons use a
+     solid translucent pill instead — so we drop the backdrop blur and pin a
+     fixed compositor layer + transform-origin for steady spin/scale. */
+
+.orca-dl-btn {
+  --orca-accent: #7c5cff;
+  --orca-ok: #2ea043;
+  --orca-err: #e5534b;
+  --orca-frac: 0;
+  position: relative;
+  box-sizing: border-box;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  color: #fff;
+  /* Solid translucent pill — no backdrop-filter (see design note above). */
+  background: rgba(22, 22, 30, 0.86);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+  /* Own layer + fixed origin => steady spin/scale, no shimmer. */
+  transform: translateZ(0);
+  transform-origin: center center;
+  backface-visibility: hidden;
+  transition: opacity 0.18s ease, transform 0.14s ease, background 0.14s ease;
+  z-index: 2147483000;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Overlay buttons hide until the player is hovered or the download is doing
+   something worth showing. */
+.orca-dl-btn {
+  opacity: 0;
+}
+.orca-dl-btn.orca-visible,
+.orca-dl-btn[data-state='submitting'],
+.orca-dl-btn[data-state='progress'],
+.orca-dl-btn[data-state='error'],
+.orca-dl-btn[data-state='canceled'] {
+  opacity: 1;
+}
+/* Success is NOT force-visible: the green check tick reuses the idle download
+   button's reveal behavior, fading in/out with the native player controls
+   (via .orca-visible) rather than lingering in the corner. */
+
+.orca-dl-btn:hover {
+  transform: translateZ(0) scale(1.08);
+  background: rgba(30, 30, 42, 0.88);
+}
+.orca-dl-btn .orca-glyph {
+  width: 19px;
+  height: 19px;
+  display: block;
+  transform-origin: center center;
+}
+
+/* Progress ring overlay (SVG). Hidden unless state=progress. */
+.orca-dl-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+  display: none;
+  pointer-events: none;
+}
+.orca-dl-ring circle {
+  fill: none;
+  stroke-width: 2.4;
+}
+.orca-dl-ring .orca-dl-track {
+  stroke: rgba(255, 255, 255, 0.25);
+}
+.orca-dl-ring .orca-dl-arc {
+  stroke: var(--orca-accent);
+  stroke-linecap: round;
+  /* 2*pi*r with r=10 ~= 62.83. The dash length and offset MUST carry a `px`
+     unit: a unitless `calc(62.83 * …)` is an invalid <length> for
+     stroke-dashoffset in Firefox, so it silently fell back to 0 — a full ring
+     that read as a permanent "100%" no matter the real percent. */
+  stroke-dasharray: 62.83px;
+  stroke-dashoffset: calc(62.83px * (1 - var(--orca-frac)));
+  transition: stroke-dashoffset 0.25s ease;
+}
+
+/* Idle */
+.orca-dl-btn[data-state='idle'] .orca-glyph {
+  color: #fff;
+}
+
+/* Submitting / queued — a conic-gradient ring spinner. It's a full, radially
+   symmetric ring (masked hollow), so its geometric centre IS the button centre:
+   it rotates perfectly on-axis with no perceived offset, and a gradient (not a
+   stroked cap) means nothing to alias/shimmer. */
+.orca-dl-spinner {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 20px;
+  height: 20px;
+  display: none;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(255, 255, 255, 0) 0%,
+    rgba(255, 255, 255, 0.12) 45%,
+    #fff 100%
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 0);
+  transform: translateZ(0);
+  transform-origin: 50% 50%;
+  animation: orca-dl-spin 0.8s linear infinite;
+}
+.orca-dl-btn[data-state='submitting'] .orca-dl-spinner {
+  display: block;
+}
+.orca-dl-btn[data-state='submitting'] .orca-glyph {
+  opacity: 0;
+}
+@keyframes orca-dl-spin {
+  to {
+    transform: translateZ(0) rotate(360deg);
+  }
+}
+
+/* Downloading — the progress ring is the whole story; hide the inner cloud glyph
+   entirely (no need to draw a download icon behind the live ring). */
+.orca-dl-btn[data-state='progress'] .orca-dl-ring {
+  display: block;
+}
+.orca-dl-btn[data-state='progress'] .orca-glyph {
+  opacity: 0;
+}
+
+/* Finalizing — the transfer has hit the cap and yt-dlp is silently post-
+   processing (merge + embed). No more progress frames arrive, so instead of
+   leaving the near-full ring frozen at 95% ("stuck at 95%"), slowly sweep it so
+   it reads as "finalizing". The base ring sits at rotate(-90deg); the keyframes
+   carry that offset through a full turn so the 5% gap orbits smoothly. */
+.orca-dl-btn[data-state='progress'][data-finalizing='1'] .orca-dl-ring {
+  animation: orca-dl-finalizing 1.4s linear infinite;
+}
+.orca-dl-btn[data-state='progress'][data-finalizing='1'] .orca-dl-arc {
+  transition: none; /* let the rotation carry motion; no dashoffset easing tug */
+}
+@keyframes orca-dl-finalizing {
+  from {
+    transform: rotate(-90deg);
+  }
+  to {
+    transform: rotate(270deg);
+  }
+}
+
+/* Hover-to-cancel: an in-flight button (queued/spinner or downloading/ring) turns
+   into a Stop control on hover — the mature download-manager gesture. The X sits
+   over the spinner/ring, the live indicator dims under it, and the pill tints red
+   so "click to cancel" reads at a glance. pointer-events:none keeps the click on
+   the button itself. */
+.orca-dl-cancel {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.orca-dl-cancel .orca-glyph {
+  width: 15px;
+  height: 15px;
+  color: #fff;
+}
+.orca-dl-btn[data-state='submitting']:hover .orca-dl-cancel,
+.orca-dl-btn[data-state='progress']:hover .orca-dl-cancel {
+  display: flex;
+}
+/* The cancel X reuses `.orca-glyph`, which the progress/submitting rules above
+   force to opacity:0 (to hide the cloud/loader behind the ring/spinner) — that
+   also blanked the X, so hovering showed an empty red circle. Restore it with a
+   higher-specificity rule scoped to the revealed cancel affordance. */
+.orca-dl-btn[data-state='submitting']:hover .orca-dl-cancel .orca-glyph,
+.orca-dl-btn[data-state='progress']:hover .orca-dl-cancel .orca-glyph {
+  opacity: 1;
+}
+.orca-dl-btn[data-state='submitting']:hover .orca-dl-spinner,
+.orca-dl-btn[data-state='progress']:hover .orca-dl-arc {
+  opacity: 0.35;
+}
+.orca-dl-btn[data-state='submitting']:hover,
+.orca-dl-btn[data-state='progress']:hover {
+  background: rgba(46, 20, 20, 0.9);
+}
+
+/* Success */
+.orca-dl-btn[data-state='success'] {
+  background: rgba(18, 40, 24, 0.82);
+}
+.orca-dl-btn[data-state='success'] .orca-glyph {
+  color: var(--orca-ok);
+}
+
+/* Failure */
+.orca-dl-btn[data-state='error'] {
+  background: rgba(46, 20, 20, 0.82);
+}
+.orca-dl-btn[data-state='error'] .orca-glyph {
+  color: var(--orca-err);
+}
+
+/* Canceled — a parked retry affordance (accent-tinted), click to start over. */
+.orca-dl-btn[data-state='canceled'] {
+  background: rgba(22, 22, 30, 0.86);
+}
+.orca-dl-btn[data-state='canceled'] .orca-glyph {
+  color: var(--orca-accent);
+}
+
+/* YouTube playlist "already downloaded" tick. Unlike the overlay button, this
+   stays put (no hover) so a saved entry reads as done at a glance; un-saved
+   entries get nothing. Pinned to the thumbnail's top-left, clear of YouTube's
+   bottom-right duration badge. */
+.orca-yt-tick {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 100;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #2ea043;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+}
+.orca-yt-tick .orca-glyph {
+  width: 13px;
+  height: 13px;
+}

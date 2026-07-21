@@ -332,6 +332,45 @@ pub async fn preview(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LookupParams {
+    pub url: String,
+    /// `any=true` → return the latest item for this URL in ANY state (queued,
+    /// running, failed, canceled, …), not just a completed one. The extension
+    /// overlay button uses it to render the right control (retry / ring / tick)
+    /// when a video page is (re)opened; every other caller wants completed-only.
+    #[serde(default)]
+    pub any: bool,
+}
+
+/// GET /api/lookup?url=…[&any=true] — has this URL already been downloaded?
+/// Returns the matching completed item (decorated with its `blur`/`site_name`) as
+/// `{ "item": … }`, or `{ "item": null }`. Lets the browser extension render its
+/// "already saved" tick on a video page without triggering a probe/download.
+/// `any=true` widens the match to the latest item in ANY state (for the overlay
+/// button's retry / live-ring rendering); the default stays completed-only.
+pub async fn lookup(
+    State(state): State<AppState>,
+    Query(params): Query<LookupParams>,
+) -> AppResult<Response> {
+    if params.url.trim().is_empty() {
+        return Err(AppError::BadRequest("missing url".into()));
+    }
+    let url = crate::url_normalize::normalize(&params.url);
+    let found = if params.any {
+        state.db.find_latest_by_url(&url).await?
+    } else {
+        state.db.find_downloaded_by_url(&url).await?
+    };
+    match found {
+        Some(item) => {
+            let sites = state.db.list_websites().await.unwrap_or_default();
+            Ok(Json(json!({ "item": decorate_item(&item, &sites) })).into_response())
+        }
+        None => Ok(Json(json!({ "item": null })).into_response()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListParams {
     pub status: Option<String>,
     pub q: Option<String>,

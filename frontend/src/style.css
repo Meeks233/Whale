@@ -182,11 +182,11 @@ body {
      value also clears the Android status bar / notch (edge-to-edge WebView). */
   padding: calc(10px + env(safe-area-inset-top)) 14px 8px;
 }
-/* ---- Server status heartbeat (right of the brand) ----
-   A small dot that mirrors the SSE stream's health: green and breathing while
-   the stream is live, solid red when it's down / before a token is set. The
-   "breathing" is an expanding, fading halo (box-shadow) — the standard
-   connection-heartbeat indicator. See setServerStatus() in app.ts. */
+/* ---- Server status light (right of the brand) ----
+   A small dot that mirrors the SSE stream's health: a steady, always-on green
+   while the stream is live, solid red when it's down / before a token is set.
+   A fixed soft glow (box-shadow) reads as "live" without any breathing motion.
+   See setServerStatus() in app.ts. */
 .brand-wrap { display: flex; align-items: center; gap: 9px; }
 /* ---- Brand mark ----
    The orca, as black line art on a transparent ground (web/icons/logo.png), so
@@ -216,19 +216,17 @@ body {
   background: var(--muted);
   transition: background .3s ease;
 }
-.server-status.down { background: var(--err); }
+.server-status.down {
+  background: var(--err);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--err) 18%, transparent);
+}
+/* Steady, always-on light while the server is reachable — no breathing pulse. A
+   fixed soft glow reads as "live" at a glance without the motion. */
 .server-status.up {
   background: var(--ok);
-  animation: heartbeat 2.4s ease-in-out infinite;
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 22%, transparent);
 }
-@keyframes heartbeat {
-  0% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 65%, transparent); }
-  70% { box-shadow: 0 0 0 7px color-mix(in oklab, var(--ok) 0%, transparent); }
-  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--ok) 0%, transparent); }
-}
-/* Respect reduced-motion: keep the color, drop the pulsing halo. */
 @media (prefers-reduced-motion: reduce) {
-  .server-status.up { animation: none; }
   /* The scroll still lands on the row; it just doesn't pulse. */
   .item.focus-flash { animation: none; }
 }
@@ -419,12 +417,30 @@ input:focus { outline: none; border-color: var(--accent); }
   width: 100%;
   max-width: 460px;
   max-height: calc(100dvh - max(16px, env(safe-area-inset-top)) - max(16px, env(safe-area-inset-bottom)));
-  overflow-y: auto;
+  /* A rounded, clipping FRAME — the scrolling lives in the inner .modal-scroll.
+     Firefox won't clip a scroll container's border-radius on the scrollbar edge
+     (Chrome insets its custom scrollbar with ::-webkit-scrollbar-track margins;
+     Firefox has no equivalent), so a directly-scrolling card showed square corners
+     on the right. Nesting the scroller inside an overflow:hidden rounded frame clips
+     those corners round in every engine — the standard cross-browser fix. The card
+     children are wrapped into .modal-scroll at runtime (see wrapModalScrollers). */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-xl);
-  padding: 22px;
   box-shadow: 0 12px 40px rgba(0,0,0,.35);
+}
+/* The scroll region inside the frame. Carries the padding every sheet's rows expect,
+   the thin themed Firefox bar, and the both-edges gutter that keeps content centred;
+   its own square scrollbar-side corners are clipped by the rounded frame above, so
+   Firefox and Chrome both end up fully rounded. */
+.modal-scroll {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px;
   /* Firefox: thin themed bar instead of the chunky native one. */
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
@@ -437,21 +453,21 @@ input:focus { outline: none; border-color: var(--accent); }
 /* WebKit/Blink: a slim inset thumb that matches the card, so the long website
    list no longer shows the heavy OS scrollbar. Track stays transparent; the
    thumb is padded via a card-coloured border for the floating-pill look. */
-.modal-card::-webkit-scrollbar { width: 12px; }
+.modal-scroll::-webkit-scrollbar { width: 12px; }
 /* Inset the track by the card's own corner radius. The scrollbar is painted in
    the padding box, which the radius only *clips* — so a thumb scrolled hard to
    either end sat inside the corner arc and its rounded cap poked over the curve.
    Holding the track off both ends by exactly one radius keeps the thumb on the
    card's straight edge, where it can never cross the curve. */
-.modal-card::-webkit-scrollbar-track {
+.modal-scroll::-webkit-scrollbar-track {
   background: transparent;
   margin: var(--r-xl) 0;
 }
-.modal-card::-webkit-scrollbar-thumb {
+.modal-scroll::-webkit-scrollbar-thumb {
   background: var(--border); border-radius: var(--r-full);
   border: 3px solid var(--surface); background-clip: padding-box;
 }
-.modal-card::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
+.modal-scroll::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: padding-box; }
 .modal-close {
   position: absolute;
   top: 10px;
@@ -466,6 +482,11 @@ input:focus { outline: none; border-color: var(--accent); }
   line-height: 1;
   cursor: pointer;
 }
+/* Close buttons carry a Lucide "x" SVG (not a text glyph) — centre it and give a
+   subtle hover so every modal's close reads identically. */
+.modal-close, .player-close, .share-close { display: grid; place-items: center; }
+.modal-close svg, .player-close svg, .share-close svg { display: block; }
+.modal-close:hover { color: var(--text); }
 .modal-heading { margin: 0 0 16px; font-size: 18px; padding-right: 32px; }
 /* A section heading inside a sheet. It names the thing below it, so it reads at
    full text brightness — muted grey made these look disabled next to the
@@ -526,7 +547,24 @@ input:focus { outline: none; border-color: var(--accent); }
    like every other control, instead of stacking label-over-input across two
    lines. Allowed to shrink but never below legibility, so a long URL scrolls
    within the field rather than pushing the label off the row. */
-.form-row-ctl .input { flex: 0 1 240px; min-width: 140px; font-size: 14px; padding: 8px 10px; }
+.form-row-ctl .input { flex: 0 1 185px; min-width: 120px; font-size: 14px; padding: 10px; }
+/* Token field with a reveal (eye) toggle: the wrapper takes the field's inline
+   slot, the input fills it (leaving room for the button), and the button overlays
+   the trailing edge. Lets a saved token be viewed temporarily, then masked again. */
+/* Definite `width` (not a flex-basis) for the field slot: Firefox sizes the parent
+   .form-row-ctl from a flex-basis child as if it were content-wide, which grew the
+   control to the full row and squeezed the label to 0 (it overlapped the token
+   text). A width behaves like .storage-ctl's fixed width and lines up in both
+   engines; flex-shrink stays on so it still narrows on a phone. */
+.reveal-wrap { position: relative; display: flex; align-items: center; flex: 0 1 auto; width: 185px; min-width: 120px; }
+.reveal-wrap .input { flex: 1 1 auto; min-width: 0; padding-right: 38px; text-align: left; }
+.reveal-btn {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  display: grid; place-items: center; width: 30px; height: 30px; padding: 0;
+  border: none; background: transparent; color: var(--muted); cursor: pointer; border-radius: 8px;
+}
+.reveal-btn:hover { color: var(--text); background: color-mix(in oklab, var(--text) 8%, transparent); }
+.reveal-btn svg { width: 16px; height: 16px; display: block; }
 /* Storage cap: a number and its unit reading as ONE value, occupying exactly the
    width a lone field does in these rows (123 + 6 + 74 = 203px) so it lines up
    with API token / Server URL instead of running wider than everything above it.
@@ -585,9 +623,10 @@ html:not(.app-native) #welcome-server-row + .form-row { border-top: none; }
    prompt) without either having to know the other exists. */
 html:not(.app-native) .permission-item[data-permission="background"],
 html:not(.app-native) .permission-item[data-permission="storage"] { display: none; }
-/* Clipboard is the mirror case: a browser-only permission with no native app
-   equivalent, so it drops out of the native builds. */
-html.app-native .permission-item[data-permission="clipboard"] { display: none; }
+/* Clipboard and autoplay are the mirror case: browser-only permissions with no
+   native app equivalent, so they drop out of the native builds. */
+html.app-native .permission-item[data-permission="clipboard"],
+html.app-native .permission-item[data-permission="autoplay"] { display: none; }
 .hint { color: var(--err); font-size: 13px; margin: 8px 0 0; }
 .hint-muted { color: var(--muted); font-size: 12px; margin: 0 0 12px; line-height: 1.5; }
 .hint-muted code { background: var(--surface-2); padding: 0 4px; border-radius: var(--r-xs); font-size: 11px; }
@@ -700,6 +739,10 @@ html.app-native .permission-item[data-permission="clipboard"] { display: none; }
 .permission-prompt-actions { margin-top: 14px; }
 
 .topbar-actions { display: flex; gap: 2px; }
+/* The last action's own right padding insets its glyph from the bar edge, so the
+   settings gear sat a step left of the Download button below it. Drop that trailing
+   pad so the icon group's right edge lines up with the Download button. */
+.topbar-actions .icon-btn:last-child { padding-right: 0; }
 
 /* ---- Cookies panel ---- */
 .cookie-list { display: flex; flex-direction: column; gap: 8px; }
@@ -1704,7 +1747,9 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
 .segment:has(input:checked) {
   background: var(--accent);
   color: #fff;
-  box-shadow: 0 1px 4px rgba(0,0,0,.22);
+  /* No drop shadow: a downward-only shadow gave the selected pill a "chin" —
+     shaded below, flat on top. The flat accent fill reads as selected on its own
+     and keeps the pill symmetric top-to-bottom. */
 }
 .segment:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* A segmented control filling a settings row sheds the block-level margin. */
@@ -1890,21 +1935,21 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
    settings pattern, in place of a Save button beside every field. It sticks so a
    change made at the top of a long sheet is still committable without scrolling
    back down to find the button. */
+/* Docked footer of the modal frame (a direct child of .modal-card, after the
+   scroller — see wrapModalScrollers). As a flex footer it spans the card edge to
+   edge and sits flush on the bottom in both engines; the frame's overflow:hidden +
+   border-radius clips its bottom corners round, so it no longer needs its own radius
+   or the negative-margin bleed that left gaps in Firefox. */
 .save-bar {
-  position: sticky;
-  bottom: -22px; /* cancel the card's own bottom padding so it sits flush */
-  z-index: 6;
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  margin: 14px -22px -22px;
   padding: 12px 22px calc(12px + env(safe-area-inset-bottom));
   background: var(--surface-2);
   border-top: 1px solid var(--border);
-  /* Only the bottom corners, and only as round as the card it's docked into. */
-  border-radius: 0 0 var(--r-xl) var(--r-xl);
   box-shadow: 0 -4px 20px rgba(0,0,0,.25);
 }
 .save-bar-msg { font-size: 13px; font-weight: 600; color: var(--text); }
@@ -1959,9 +2004,14 @@ body.player-open { position: fixed; left: 0; right: 0; overflow: hidden; }
    controls stay reachable so it can be re-enabled. */
 .website-card.disabled { opacity: .55; filter: grayscale(0.6); }
 
-/* Header row: toggle · (name + status, domains) · overflow menu. */
-.site-main { display: flex; align-items: flex-start; gap: 10px; }
+/* Header row: toggle · (name + status, domains) · overflow menu. Centre the row
+   so the on/off switch sits between the name and its domain line — level with the
+   overflow (⋯) button on the right — rather than pinned to the top text line. */
+.site-main { display: flex; align-items: center; gap: 10px; }
 .site-info { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+/* The shared toggle nudge (margin-top:1px) was for the old top-aligned row; the
+   centred row doesn't need it. */
+.site-main > .site-toggle { margin-top: 0; }
 .site-titlerow { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .site-name { font-weight: 600; font-size: 15px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .site-domains-list { font-size: 12px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

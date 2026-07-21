@@ -158,7 +158,7 @@ jobs:
         uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1.1.5
         with:
           serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
-          packageName: com.orca.app
+          packageName: com.meeks233.orca
           releaseFiles: dist/*.aab
           tracks: ${{ inputs.play_track }}
           status: completed

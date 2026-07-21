@@ -12,7 +12,8 @@
 use super::{emedia, AppState};
 use crate::error::AppError;
 use crate::types::{Item, Status};
-use axum::body::Body;
+use axum::body::{Body, Bytes};
+use futures::StreamExt;
 use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::header;
 use axum::http::StatusCode;
@@ -174,7 +175,7 @@ pub async fn stream(
     let path = req.uri().path().to_string();
     let session_key =
         super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
-    let (item, upstream, cookie) = resolve_stream_target(&state, &slug).await?;
+    let (item, upstream, cookie) = resolve_stream_target(&state, &slug, height_param(&query)).await?;
     let cookie_header = cookie_header_for(cookie.as_deref(), &upstream);
 
     match session_key {
@@ -210,6 +211,7 @@ pub async fn stream(
                 cookie_header,
                 range,
                 state.cfg.allow_private_dns,
+                stream_pacing(&item),
             )
             .await
         }
@@ -281,13 +283,24 @@ pub async fn prepare_stream(
     let path = req.uri().path().to_string();
     // Auth only — no body is returned, so nothing to encrypt.
     super::auth::authenticate_media(&state, req.headers(), &query, peer_ip(&req), &path).await?;
-    let _ = resolve_stream_target(&state, &slug).await?;
+    let _ = resolve_stream_target(&state, &slug, height_param(&query)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The optional `?h=<pixels>` streaming resolution cap the player appends. Any
+/// non-positive or unparsable value means "no cap" (serve the best stream).
+fn height_param(query: &str) -> Option<i64> {
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("h="))
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|h| *h > 0)
 }
 
 async fn resolve_stream_target(
     state: &AppState,
     slug: &str,
+    max_height: Option<i64>,
 ) -> Result<(Item, String, Option<std::path::PathBuf>), AppError> {
     let item = state
         .db
@@ -307,11 +320,14 @@ async fn resolve_stream_target(
     let upstream = state
         .stream_urls
         .resolve(
-            slug,
+            // Fold the cap into the cache key so a 720p and a 1080p resolve of the
+            // same item don't clobber each other's cached upstream URL.
+            &format!("{slug}@{}", max_height.unwrap_or(0)),
             &state.cfg,
             &item.webpage_url,
             cookie.as_deref(),
             item.playlist_index,
+            max_height,
         )
         .await
         .map_err(|e| AppError::Internal(format!("stream url resolve failed: {e}")))?;
@@ -328,6 +344,7 @@ async fn proxy_upstream(
     cookie_header: Option<String>,
     range: Option<String>,
     allow_private_dns: bool,
+    pacing: Option<(u64, u64)>,
 ) -> Result<Response, AppError> {
     let client = proxy_client().await?;
 
@@ -397,12 +414,114 @@ async fn proxy_upstream(
             }
         }
     }
-    let body = Body::from_stream(resp.bytes_stream());
+    // Pace the egress: an initial burst so the player buffers and starts instantly,
+    // then a throttle to a small multiple of the clip's real bitrate. A viewer who
+    // seeks away or stops never costs the operator the whole file. Unranged bodies
+    // (`bytes=0-` or none) are the ones that would otherwise pump the entire file at
+    // link speed; when the rate is unknown we stream unthrottled.
+    let body = match pacing {
+        Some((rate, burst)) => paced_body(resp.bytes_stream(), rate, burst),
+        None => Body::from_stream(resp.bytes_stream()),
+    };
     builder = builder.header(header::CACHE_CONTROL, "private, no-store");
     builder
         .body(body)
         .map(IntoResponse::into_response)
         .map_err(|e| AppError::Internal(format!("proxy response build failed: {e}")))
+}
+
+/// Per-request egress pacing for online playback, in the spirit of nginx's
+/// `limit_rate_after` + `limit_rate` (and roughly what YouTube does): let the
+/// player pull an initial *burst* at full link speed so it buffers and starts
+/// instantly, then cap the sustained rate to ~1.5× the clip's real bitrate. The
+/// point is upstream-bandwidth thrift — a viewer who seeks away or abandons a clip
+/// mid-play no longer costs the operator the whole file, only what was actually
+/// watched plus one buffer's worth. Returns `(rate_bytes_per_sec, burst_bytes)`,
+/// or `None` (stream unthrottled) when the bitrate can't be estimated.
+///
+/// Every ranged request gets its own burst + throttle, so seeks stay snappy: the
+/// pacing is anchored at each response's start, exactly like nginx applies it per
+/// connection.
+fn stream_pacing(item: &Item) -> Option<(u64, u64)> {
+    let bitrate_bps = estimate_bitrate_bps(item.filesize, item.duration, item.height)?;
+    let (rate, burst) = pacing_for_bitrate(bitrate_bps);
+    (rate > 0).then_some((rate, burst))
+}
+
+/// The rate/burst pair for a known bitrate (bits/sec). Split out from
+/// `stream_pacing` so the arithmetic is unit-testable without a full `Item`.
+fn pacing_for_bitrate(bitrate_bps: u64) -> (u64, u64) {
+    // 1.5× the media bitrate: enough headroom that playback never starves even as
+    // the buffer drains, while still shaving an abandoned watch. Tutorials and real
+    // players land in the 1.3–2× band; 1.5 is the middle.
+    let rate = (bitrate_bps / 8).saturating_mul(3) / 2; // bytes/sec
+    // ~4 seconds of head-start at full speed, floored at 2 MiB so a low-bitrate
+    // audio clip still starts instantly.
+    let burst = rate.saturating_mul(4).max(2 * 1024 * 1024);
+    (rate, burst)
+}
+
+/// Estimate a stream's bitrate in bits/sec. Prefer the true figure — filesize over
+/// duration — and fall back to a resolution ladder of typical H.264/VP9 streaming
+/// bitrates when either is missing, so a cloud-only item with no recorded filesize
+/// still earns a sane cap. `None` when neither size+duration nor height is known.
+fn estimate_bitrate_bps(
+    filesize: Option<i64>,
+    duration: Option<i64>,
+    height: Option<i64>,
+) -> Option<u64> {
+    if let (Some(size), Some(dur)) = (filesize, duration) {
+        if size > 0 && dur > 0 {
+            return Some((size as u64).saturating_mul(8) / dur as u64);
+        }
+    }
+    height.map(|h| match h {
+        ..=360 => 1_000_000,
+        361..=480 => 2_500_000,
+        481..=720 => 5_000_000,
+        721..=1080 => 8_000_000,
+        1081..=1440 => 16_000_000,
+        _ => 25_000_000,
+    })
+}
+
+/// Wrap an upstream byte stream so it delivers `burst` bytes at full speed, then
+/// throttles to `rate` bytes/sec. Pacing uses a virtual clock: the stream sleeps
+/// only when it has run *ahead* of the schedule `(sent - burst) / rate`, so bursty
+/// upstream chunks average out to the target rate without a fixed per-chunk delay.
+fn paced_body<S>(inner: S, rate: u64, burst: u64) -> Body
+where
+    S: futures::Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+{
+    struct Pace<S> {
+        inner: std::pin::Pin<Box<S>>,
+        start: tokio::time::Instant,
+        sent: u64,
+        rate: u64,
+        burst: u64,
+    }
+    let st = Pace {
+        inner: Box::pin(inner),
+        start: tokio::time::Instant::now(),
+        sent: 0,
+        rate,
+        burst,
+    };
+    let stream = futures::stream::unfold(st, |mut st| async move {
+        let next = st.inner.next().await;
+        if let Some(Ok(chunk)) = &next {
+            st.sent = st.sent.saturating_add(chunk.len() as u64);
+            if st.rate > 0 && st.sent > st.burst {
+                let owed = (st.sent - st.burst) as f64 / st.rate as f64;
+                let elapsed = st.start.elapsed().as_secs_f64();
+                if owed > elapsed {
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(owed - elapsed)).await;
+                }
+            }
+        }
+        next.map(|res| (res, st))
+    });
+    Body::from_stream(stream)
 }
 
 /// Shared redirect-following HTTP client for proxied upstream fetches. Redirects
@@ -870,6 +989,32 @@ fn percent_encode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bitrate_prefers_true_size_over_duration() {
+        // 10 MB over 40 s = 2 Mbit/s — the true figure wins over the height ladder.
+        assert_eq!(
+            estimate_bitrate_bps(Some(10 * 1000 * 1000), Some(40), Some(1080)),
+            Some(2_000_000)
+        );
+    }
+
+    #[test]
+    fn bitrate_falls_back_to_resolution_ladder() {
+        // No usable size/duration → height picks the tier.
+        assert_eq!(estimate_bitrate_bps(None, None, Some(1080)), Some(8_000_000));
+        assert_eq!(estimate_bitrate_bps(Some(0), Some(0), Some(720)), Some(5_000_000));
+        // Nothing to go on at all → unthrottled.
+        assert_eq!(estimate_bitrate_bps(None, None, None), None);
+    }
+
+    #[test]
+    fn pacing_is_one_and_a_half_bitrate_with_a_floored_burst() {
+        // 8 Mbit/s → 1 MB/s; ×1.5 = 1.5 MB/s; burst = 4 s = 6 MB (> 2 MiB floor).
+        assert_eq!(pacing_for_bitrate(8_000_000), (1_500_000, 6_000_000));
+        // A tiny-bitrate clip still gets the 2 MiB burst floor so playback starts fast.
+        assert_eq!(pacing_for_bitrate(1_000_000).1, 2 * 1024 * 1024);
+    }
 
     #[test]
     fn encodes_unicode_filename() {
