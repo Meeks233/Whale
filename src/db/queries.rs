@@ -205,6 +205,30 @@ pub(super) async fn find_latest_by_url(db: &Db, url: &str) -> anyhow::Result<Opt
     row.map(|r| row_to_item(&r)).transpose()
 }
 
+pub(super) async fn find_downloaded_urls(
+    db: &Db,
+    urls: &[String],
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    if urls.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+    // One `IN (?, ?, …)` over the whole batch — a single index scan instead of a
+    // round-trip per URL. The caller already caps the batch size.
+    let placeholders = std::iter::repeat("?")
+        .take(urls.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT DISTINCT webpage_url FROM items \
+         WHERE status = 'completed' AND webpage_url IN ({placeholders})"
+    );
+    let mut q = sqlx::query_scalar::<_, String>(&sql);
+    for u in urls {
+        q = q.bind(u);
+    }
+    Ok(q.fetch_all(&db.pool).await?.into_iter().collect())
+}
+
 pub(super) async fn set_status(
     db: &Db,
     id: i64,
@@ -1445,6 +1469,30 @@ mod tests {
             db.find_latest_by_url(&url).await.unwrap().map(|i| i.id),
             Some(item.id),
         );
+    }
+
+    #[tokio::test]
+    async fn find_downloaded_urls_returns_only_completed_matches() {
+        let (db, _dir) = temp_db().await;
+        let done = probe("youtube", "aaa111", "Done");
+        let done_url = done.webpage_url.clone();
+        let done_item = db.insert_probe(&done, Source::Download).await.unwrap();
+        db.set_status(done_item.id, Status::Completed, None).await.unwrap();
+
+        let queued = probe("youtube", "bbb222", "Queued");
+        let queued_url = queued.webpage_url.clone();
+        db.insert_probe(&queued, Source::Download).await.unwrap();
+
+        let missing_url = "https://www.youtube.com/watch?v=zzz999".to_string();
+        let found = db
+            .find_downloaded_urls(&[done_url.clone(), queued_url, missing_url])
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1, "only the completed url matches");
+        assert!(found.contains(&done_url));
+
+        // Empty input short-circuits to an empty set (no query).
+        assert!(db.find_downloaded_urls(&[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]

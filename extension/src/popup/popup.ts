@@ -12,6 +12,7 @@ import type {
   Status,
   StoredConfig,
   SubmitResult,
+  UserSiteAdapter,
   Website,
 } from '../lib/types.js';
 
@@ -60,6 +61,7 @@ interface ConfigView {
   welcomeDone: boolean;
   features: FeatureFlags;
   hasToken: boolean;
+  siteAdapters: UserSiteAdapter[];
 }
 
 let cfg: ConfigView;
@@ -147,6 +149,33 @@ function initConnection(): void {
       ($('c-err') as HTMLElement).textContent = 'Saved.';
       void refreshStatus();
     }
+  });
+
+  // Custom site adapters: a JSON array persisted to config. Content scripts pick it
+  // up within ~15s (or on the next navigation), so a new platform lights up with no
+  // reload. Validated as JSON-array here; each entry is sanitized where it's used.
+  const adaptersBox = $('c-adapters') as HTMLTextAreaElement;
+  adaptersBox.value = cfg.siteAdapters.length ? JSON.stringify(cfg.siteAdapters, null, 2) : '';
+  $('c-adapters-save').addEventListener('click', async () => {
+    const err = $('c-adapters-err') as HTMLElement;
+    err.textContent = '';
+    const raw = adaptersBox.value.trim();
+    let parsed: unknown = [];
+    if (raw) {
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        err.textContent = 'Not valid JSON.';
+        return;
+      }
+      if (!Array.isArray(parsed)) {
+        err.textContent = 'Expected a JSON array of adapters.';
+        return;
+      }
+    }
+    cfg.siteAdapters = parsed as UserSiteAdapter[];
+    await send({ type: 'setSiteAdapters', siteAdapters: cfg.siteAdapters });
+    err.textContent = `Saved ${cfg.siteAdapters.length} adapter(s).`;
   });
 }
 
@@ -903,6 +932,7 @@ async function readStoredConfig(): Promise<ConfigView> {
         welcomeDone: c.welcomeDone ?? false,
         features: { ...DEFAULT_FEATURES, ...(c.features ?? {}) },
         hasToken: !!c.token,
+        siteAdapters: c.siteAdapters ?? [],
       };
   } catch {
     /* fall through to the background */

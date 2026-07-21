@@ -60,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         // self-authorizes via `?token=` and lives in `public` below.
         .route("/api/items/:slug/subs", get(subs::list))
         .route("/api/lookup", get(items::lookup))
+        .route("/api/lookup/batch", post(items::lookup_batch))
         .route("/api/preview", post(items::preview))
         .route("/api/stats", get(items::stats))
         .route("/api/logs", get(items::logs))

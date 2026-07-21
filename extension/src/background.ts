@@ -78,6 +78,7 @@ async function loadConfig(): Promise<StoredConfig> {
     token: raw.orcaConfig?.token ?? '',
     welcomeDone: raw.orcaConfig?.welcomeDone ?? false,
     features: { ...DEFAULT_FEATURES, ...(raw.orcaConfig?.features ?? {}) },
+    siteAdapters: raw.orcaConfig?.siteAdapters ?? [],
   };
   // Dev-only auto-config seed (see build.ts define). Both constants are "" in a
   // shipped build, so this whole block compiles to a dead no-op there.
@@ -699,7 +700,19 @@ async function handle(req: BgRequest, sender: browser.runtime.MessageSender): Pr
   const cfg = await loadConfig();
   switch (req.type) {
     case 'getConfig':
-      return { base: cfg.base, welcomeDone: cfg.welcomeDone, features: cfg.features, hasToken: !!cfg.token };
+      return {
+        base: cfg.base,
+        welcomeDone: cfg.welcomeDone,
+        features: cfg.features,
+        hasToken: !!cfg.token,
+        siteAdapters: cfg.siteAdapters,
+      };
+
+    case 'setSiteAdapters': {
+      cfg.siteAdapters = req.siteAdapters;
+      await saveConfig();
+      return { siteAdapters: cfg.siteAdapters };
+    }
 
     case 'setConnection': {
       cfg.base = req.base.replace(/\/+$/, '');
@@ -774,6 +787,12 @@ async function handle(req: BgRequest, sender: browser.runtime.MessageSender): Pr
     case 'lookupItem': {
       const item = await getClient().lookupByUrl(req.url, req.any ?? false);
       return { item };
+    }
+
+    case 'lookupBatch': {
+      // Return an array (structured-clone can't carry a Set across the message port).
+      const downloaded = await getClient().lookupBatch(req.urls);
+      return { downloaded: [...downloaded] };
     }
 
     case 'listItems':

@@ -89,6 +89,18 @@ impl Db {
         queries::find_latest_by_url(self, url).await
     }
 
+    /// Which of these canonical webpage URLs already have a completed download.
+    /// Batched form of `find_downloaded_by_url` — one query for a whole grid of
+    /// YouTube thumbnails (search results / recommendations / playlist) so the
+    /// content script paints its "already saved" ticks with a single sealed
+    /// round-trip instead of one lookup per row.
+    pub async fn find_downloaded_urls(
+        &self,
+        urls: &[String],
+    ) -> anyhow::Result<std::collections::HashSet<String>> {
+        queries::find_downloaded_urls(self, urls).await
+    }
+
     pub async fn set_status(
         &self,
         id: i64,
