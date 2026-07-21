@@ -63,12 +63,26 @@ export interface Website {
   cookie?: CookieStatus | null;
 }
 
+// A user-imported, declarative site adapter (see content/sites.ts) — selectors +
+// a URL rule describing how to recognise video thumbnails / permalinks on a site
+// the built-in adapters don't cover. Stored raw; validated at use.
+export interface UserSiteAdapter {
+  id: string;
+  hosts: string[];
+  thumbSelector?: string;
+  queryParam?: string;
+  pathRegex?: string;
+  canonical?: string;
+}
+
 // Persisted config (browser.storage.local).
 export interface StoredConfig {
   base: string;
   token: string;
   welcomeDone: boolean;
   features: FeatureFlags;
+  /** User-imported site adapters, merged over the built-ins at runtime. */
+  siteAdapters: UserSiteAdapter[];
 }
 
 export interface FeatureFlags {
@@ -94,6 +108,8 @@ export type BgRequest =
   | { type: 'retryItem'; slug: string; tabWatch?: boolean }
   | { type: 'deleteItem'; slug: string }
   | { type: 'lookupItem'; url: string; any?: boolean }
+  | { type: 'lookupBatch'; urls: string[] }
+  | { type: 'setSiteAdapters'; siteAdapters: UserSiteAdapter[] }
   | { type: 'listItems'; limit?: number }
   | { type: 'thumb'; slug: string }
   | { type: 'extractCookies'; url: string }

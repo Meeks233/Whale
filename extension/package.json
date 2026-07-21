@@ -9,11 +9,13 @@
   },
   "scripts": {
     "build": "tsx build.ts",
+    "build:userscript": "tsx build-userscript.ts",
     "typecheck": "tsc --noEmit",
     "dev": "npm run build && librewolf 'about:debugging#/runtime/this-firefox' && echo '\n>> 点 Load Temporary Add-on，选择: dist-ext/manifest.json  （改代码后重跑 npm run dev 并在该页点 Reload）'",
     "lint": "web-ext lint --source-dir dist-ext",
     "package": "web-ext build --source-dir dist-ext --artifacts-dir web-ext-artifacts --overwrite-dest",
     "dist": "npm run typecheck && npm run build && npm run package",
+    "dist:userscript": "npm run typecheck && npm run build:userscript",
     "verify:ext": "node scripts/mcp-verify.mjs"
   },
   "devDependencies": {

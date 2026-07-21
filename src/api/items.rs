@@ -371,6 +371,55 @@ pub async fn lookup(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct LookupBatchBody {
+    pub urls: Vec<String>,
+}
+
+/// Cap on how many URLs one batch-lookup answers, so a single request can't ask
+/// the DB to build an unbounded `IN (…)` clause. A YouTube grid never shows more
+/// than this at once; the content script chunks anything larger.
+const LOOKUP_BATCH_MAX: usize = 256;
+
+/// POST /api/lookup/batch — which of these URLs are already downloaded?
+/// Body `{ "urls": [...] }`; returns `{ "downloaded": [...] }` echoing back the
+/// subset of the caller's ORIGINAL url strings that have a completed item (so the
+/// client can test membership by the exact string it sent, without re-implementing
+/// normalization). The content script uses it to paint "already saved" ticks
+/// across a whole grid of YouTube thumbnails in ONE sealed round-trip rather than
+/// one lookup per row.
+pub async fn lookup_batch(
+    State(state): State<AppState>,
+    Json(body): Json<LookupBatchBody>,
+) -> AppResult<Response> {
+    if body.urls.len() > LOOKUP_BATCH_MAX {
+        return Err(AppError::BadRequest(format!(
+            "too many urls (max {LOOKUP_BATCH_MAX})"
+        )));
+    }
+    // Pair each original url with its canonical form once, so the DB sees the same
+    // form it stored and we can still echo the caller's exact string back.
+    let pairs: Vec<(&String, String)> = body
+        .urls
+        .iter()
+        .map(|u| (u, crate::url_normalize::normalize(u)))
+        .collect();
+    // Dedupe the canonical forms for the query (a grid with repeats binds once).
+    let mut seen = std::collections::HashSet::new();
+    let normalized: Vec<String> = pairs
+        .iter()
+        .filter(|(_, n)| !n.is_empty() && seen.insert(n.clone()))
+        .map(|(_, n)| n.clone())
+        .collect();
+    let found = state.db.find_downloaded_urls(&normalized).await?;
+    let downloaded: Vec<&String> = pairs
+        .iter()
+        .filter(|(_, n)| found.contains(n))
+        .map(|(orig, _)| *orig)
+        .collect();
+    Ok(Json(json!({ "downloaded": downloaded })).into_response())
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ListParams {
     pub status: Option<String>,
     pub q: Option<String>,

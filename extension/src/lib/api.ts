@@ -197,6 +197,16 @@ export class OrcaClient {
     return res.item;
   }
 
+  // Batch form of lookupByUrl: given many URLs, return the SET of those already
+  // downloaded (completed). One sealed round-trip for a whole grid of YouTube
+  // thumbnails instead of one request per row. Completed-only — the persistent
+  // "already saved" tick never wants an in-flight/failed match.
+  async lookupBatch(urls: string[]): Promise<Set<string>> {
+    if (urls.length === 0) return new Set();
+    const res = await this.request<{ downloaded: string[] }>('POST', '/api/lookup/batch', { urls });
+    return new Set(res.downloaded ?? []);
+  }
+
   // The registry endpoint wraps the array as `{ websites: [...] }`; unwrap it so
   // callers get a real array (an object here is what fed the `x.filter is not a
   // function` crash in the popup).

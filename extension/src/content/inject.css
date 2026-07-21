@@ -48,13 +48,18 @@
 .orca-dl-btn.orca-visible,
 .orca-dl-btn[data-state='submitting'],
 .orca-dl-btn[data-state='progress'],
-.orca-dl-btn[data-state='error'],
-.orca-dl-btn[data-state='canceled'] {
+.orca-dl-btn.orca-pinned {
   opacity: 1;
 }
-/* Success is NOT force-visible: the green check tick reuses the idle download
-   button's reveal behavior, fading in/out with the native player controls
-   (via .orca-visible) rather than lingering in the corner. */
+/* An IN-FLIGHT download (submitting/progress) always forces itself visible. On a
+   real player the parked retry states (error/canceled — the "redownload" glyph) are
+   NOT force-visible: they reuse the idle button's reveal behavior, fading with the
+   native controls rather than lingering in the corner after the download settles.
+   A PINNED button is different: it has been promoted onto a feed/search thumbnail
+   and is that row's only status light, so it stays visible in every state — a
+   failure that faded out would read as "nothing happened". (Success never stays
+   pinned: it hands off to the static .orca-yt-tick so a freshly saved video looks
+   identical to one saved long ago.) */
 
 .orca-dl-btn:hover {
   transform: translateZ(0) scale(1.08);
@@ -247,7 +252,13 @@
   color: #fff;
   background: #2ea043;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
-  pointer-events: none;
+  /* Interactive: on a saved thumbnail this tick IS the control (the download
+     button hands off to it), so a click plays the saved copy in Orca. */
+  pointer-events: auto;
+  cursor: pointer;
+}
+.orca-yt-tick:hover {
+  background: #3fb950;
 }
 .orca-yt-tick .orca-glyph {
   width: 13px;

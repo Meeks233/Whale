@@ -112,6 +112,17 @@
               <small>Show the Websites tab for cookies & per-site settings.</small>
             </div>
           </div>
+
+          <h1 style="font-size: 13px; margin: 16px 0 4px">Custom site adapters</h1>
+          <small style="display:block;color:var(--muted);margin-bottom:6px">
+            JSON array teaching Orca to recognise video thumbnails on sites the
+            built-ins don't cover. Leave empty for YouTube + generic sites.
+          </small>
+          <textarea id="c-adapters" rows="4" spellcheck="false"
+            style="width:100%;font-family:monospace;font-size:11px;resize:vertical"
+            placeholder='[{"id":"bilibili","hosts":["bilibili.com"],"thumbSelector":"a:has(img)","pathRegex":"/video/(BV[\w]+)","canonical":"https://www.bilibili.com/video/{id}"}]'></textarea>
+          <p id="c-adapters-err" class="err"></p>
+          <button id="c-adapters-save" class="btn">Save adapters</button>
         </div>
 
         <div id="tab-websites" class="hidden">

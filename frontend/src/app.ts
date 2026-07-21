@@ -1931,7 +1931,7 @@ async function loadItems(reset?: boolean): Promise<void> {
     const isEmpty = state.rows.size === 0;
     els.empty.classList.toggle('hidden', !isEmpty);
     pageRetryBlockedUntil = 0; // a good page clears any pagination backoff
-    if (reset) maybeOpenPendingPlay();
+    if (reset) void maybeOpenPendingPlay();
   } catch (e) {
     if (!isUnauthorized(e)) {
       toast(t('toast.network'), 'error');
@@ -6116,36 +6116,106 @@ function playCurrentInQueue(): void {
   if (cur) openPlayer(cur.id, cur.cloud, cur.poster);
 }
 
-// Honour a pending `#orca-play=<slug>` deep-link (from the browser extension) once
-// its item is in the loaded history: open it in the real player, which prefers the
-// copy the server already holds on disk over re-resolving the upstream. Single-shot
-// — the slug is cleared on the first attempt whether or not the item was found (a
-// missing/incomplete item just means nothing to play).
-function maybeOpenPendingPlay(): void {
+// Honour a pending `#orca-play=<slug>` deep-link (from the browser extension):
+// open it in the real player, which prefers the copy the server already holds on
+// disk over re-resolving the upstream. Single-shot — the slug is cleared on the
+// first attempt whether or not the item was found.
+//
+// The item is looked for in the loaded history first, but MUST NOT depend on being
+// there: the extension can deep-link any saved video, including one far down the
+// history that this session has never paged in (history loads a page at a time).
+// That used to fail silently — the tab opened on the dashboard with no player and
+// no explanation. Fall back to fetching the item by slug.
+async function maybeOpenPendingPlay(): Promise<void> {
   if (!pendingPlaySlug) return;
   const slug = pendingPlaySlug;
   pendingPlaySlug = null;
   let target: Item | undefined;
   for (const it of state.items.values()) if (it.slug === slug) { target = it; break; }
+  if (!target) target = await fetchItemBySlug(slug);
   if (!target || target.status !== 'completed') return;
+  // openPlayer resolves its media/thumbnail URLs through state.items, so an item
+  // pulled in from outside the loaded page has to be registered there.
+  state.items.set(target.id, target);
   openPlayer(target.id, !target.local_available, thumbUrl(target));
+}
+
+// One item by public slug, independent of history paging. Undefined when it is
+// gone or unreachable, so the caller just does nothing.
+async function fetchItemBySlug(slug: string): Promise<Item | undefined> {
+  try {
+    const res = await apiFetch('/api/items/' + encodeURIComponent(slug));
+    if (!res.ok) return undefined;
+    return (await res.json()) as Item;
+  } catch {
+    return undefined;
+  }
 }
 
 // The extension deep-links an already-open dashboard tab by setting the
 // `#orca-play=<slug>` hash from inside the page (no reload). Re-read it on every
-// hashchange and open the player in place. If the item isn't in the loaded
-// history yet (a just-finished download on a long-open tab), pull one fresh page
-// and try again — a single retry, so a stale/unknown slug can't loop.
+// hashchange and open the player in place. maybeOpenPendingPlay resolves the item
+// whether or not it is in the loaded history, so no speculative refresh is needed
+// to page it in — which never worked for an item deep in the history anyway.
 window.addEventListener('hashchange', () => {
   const slug = consumePlaySlug();
   if (!slug) return;
-  const loaded = [...state.items.values()].some(
-    (it) => it.slug === slug && it.status === 'completed',
-  );
   pendingPlaySlug = slug;
-  if (loaded) maybeOpenPendingPlay();
-  else void softRefresh(); // pulls a fresh page, then calls maybeOpenPendingPlay
+  void maybeOpenPendingPlay();
 });
+
+// Start playback, coping with the browser's autoplay policy.
+//
+// An extension deep-link (`#orca-play=`) opens or focuses this tab with NO user
+// activation in it, so a plain play() is rejected (NotAllowedError) and the video
+// would sit on its poster until the user pressed play — the click we were trying to
+// save them. Recover in the order that preserves the most:
+//   1. the media may simply not be ready yet (a cloud stream still resolving
+//      server-side rejects an early play) — retry once it can play;
+//   2. otherwise start MUTED, which is always permitted, then lift the mute as soon
+//      as it is rolling;
+//   3. if the engine re-pauses on that unmute, keep it playing muted and restore
+//      sound on the first interaction rather than leaving it silently muted.
+// Where a real click opened the player this all no-ops: the first play() resolves.
+function startPlayback(v: HTMLVideoElement): void {
+  const playing = (): boolean => !els.player.classList.contains('hidden');
+  const muteFallback = (): void => {
+    if (v.muted || !playing()) return;
+    v.muted = true;
+    v.play()
+      .then(() => {
+        v.muted = false;
+        setTimeout(() => {
+          if (v.paused && playing()) {
+            v.muted = true;
+            void v.play();
+            const restore = (): void => {
+              v.muted = false;
+            };
+            addEventListener('pointerdown', restore, { once: true });
+            addEventListener('keydown', restore, { once: true });
+          }
+        }, 0);
+      })
+      .catch(() => {
+        /* nothing left to try — the poster and native controls remain */
+      });
+  };
+  v.play().catch(() => {
+    if (!playing()) return;
+    if (v.readyState >= 2) {
+      muteFallback();
+      return;
+    }
+    v.addEventListener(
+      'canplay',
+      () => {
+        if (playing()) v.play().catch(muteFallback);
+      },
+      { once: true },
+    );
+  });
+}
 
 function openPlayer(id: number, cloud: boolean, poster?: string): void {
   const v = els.playerVideo;
@@ -6169,7 +6239,7 @@ function openPlayer(id: number, cloud: boolean, poster?: string): void {
   // Browser: push a history entry so Back pops the player. In the native app the
   // central back handler (below) does this via its own sentinel — don't stack.
   if (!isNativeApp && !(history.state && history.state.player)) history.pushState({ player: true }, '');
-  const play = () => v.play().catch(() => { /* autoplay may need a tap */ });
+  const play = () => startPlayback(v);
 
   // Prefer a copy already on this device: it starts instantly, costs no data,
   // and works with the server unreachable. Everything below is the fallback for
@@ -7015,7 +7085,7 @@ async function softRefresh(establishPaging = false): Promise<void> {
     // Honour an extension `#orca-play=` deep-link on the cache-hydrated boot path
     // too (this fresh fetch is what actually holds a just-downloaded item). Single
     // -shot, so the later poll ticks are no-ops.
-    maybeOpenPendingPlay();
+    void maybeOpenPendingPlay();
     if (establishPaging) {
       state.cursor = data.next_cursor;
       // Keep the spinner mounted (not display:none) while more pages exist, so

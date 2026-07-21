@@ -91,6 +91,55 @@ chrome-devtools MCP offers — the Firefox equivalent of that flow.
 
 [ffmcp]: https://github.com/mozilla/firefox-devtools-mcp
 
+## Headless userscript (Tampermonkey / Violentmonkey)
+
+For browsers where you'd rather run a userscript than install an extension, the
+same code ships as a **single-file userscript** — `dist-userscript/orca.user.js`.
+It is the headless twin of the extension: the in-page **download / status
+button** (top-left of any video) and the **token bridge** come from the *exact
+same sources* as the extension, so you maintain one codebase, not two.
+
+```sh
+npm run dist:userscript   # typecheck -> dist-userscript/orca.user.js
+```
+
+Then open the file (or drag it into your userscript manager) to install.
+
+**How it reuses the extension code.** The bundle is built from
+`src/content/detect.ts` + `src/lib/*` **unchanged** — the button, the OSC v2
+crypto (`e2ee.ts`), the API client (`api.ts`) and the progress math are shared
+verbatim. The only userscript-specific glue is `src/userscript/`:
+
+| File | Role |
+|---|---|
+| `src/userscript/shim.ts` | Stands in for the background page: recreates the sliver of `browser.*` `detect.ts` talks to, backed by the real `OrcaClient`; bridges the token; routes API calls through `GM_xmlhttpRequest`. |
+| `src/userscript/main.ts` | Entry point — imports the shim (first) then the shared content script. |
+| `build-userscript.ts` | esbuild → one `.user.js` with the userscript header; inlines `inject.css`. |
+
+**Token flow (zero-config).** There is no popup. Instead:
+
+- On your **Orca dashboard** page, the script reads `localStorage.orca_token` and
+  mirrors it (plus the server base) into the userscript manager's cross-origin GM
+  store — so video pages on other sites can use it.
+- If the dashboard ever loses its token but the GM store still has one for that
+  server, the script **reverse-injects** it back into `localStorage` and reloads,
+  so the dashboard boots logged in again (guarded against reload loops).
+
+So: log in to your Orca web app once, and the button starts working everywhere.
+Token changes made later on the dashboard (Settings / welcome field) are picked up
+live — a `storage` listener for other tabs, plus a light poll on the dashboard page
+for same-tab edits the event can't see. Because API calls go over `GM_xmlhttpRequest`
+(declared `@connect *`), the E2EE channel reaches a self-hosted server on any origin
+— LAN, localhost or a domain — without CORS / Private-Network-Access friction.
+
+**Manual fallback (no web app needed).** The userscript-manager menu (the extension
+icon → *Orca*) offers **set server + token**, **show current config**, and **clear
+config** — for anyone who hasn't opened the dashboard, to reset a stale token, or to
+debug. *Set* validates the credentials with a real handshake and reports the result.
+
+There is no SSE fan-out in the userscript; `detect.ts`'s built-in poll fallback
+drives the live progress ring, so behaviour matches the extension.
+
 ## Publishing to AMO
 
 The build passes `web-ext lint` with 0 errors/warnings/notices and declares
