@@ -1645,7 +1645,12 @@ function patchRow(ev: ProgressEv): void {
       chipRefetched.add(ev.id);
       apiFetch(itemPath(ev.id))
         .then((r) => (r.ok ? r.json() : null))
-        .then((it) => { if (it) upsertRow(it, false); })
+        .then((it) => {
+          // The download may have FINISHED while this was in flight. That snapshot
+          // predates the completion, so rebuilding from it would put the row back
+          // into download mode with no further event coming to undo it.
+          if (it && !TERMINAL[state.progress.get(ev.id)?.status ?? '']) upsertRow(it, false);
+        })
         .catch(() => { /* the poll will catch up */ });
     }
   }
@@ -2164,10 +2169,24 @@ async function connectEvents(): Promise<void> {
   es = new EventSource(encrypted.url);
   // Stream established → server is reachable (green status light).
   es.onopen = () => { setServerStatus(true); reconnectDelay = RECONNECT_MIN_MS; };
-  es.addEventListener('progress', async (e) => {
+  // Events have to be APPLIED in the order they arrived. Each one is decrypted
+  // first, and WebCrypto resolves two decryptions started back to back in either
+  // order — so the last `running` tick of a download could be patched in AFTER the
+  // `completed` that followed it, repainting the finished row as still downloading.
+  // Nothing more is ever sent for that job, so the row stayed stuck (the item that
+  // "sometimes doesn't get marked complete", while the item itself was fine on the
+  // server). Chaining the handlers keeps decrypt-then-patch strictly sequential.
+  let applying: Promise<void> = Promise.resolve();
+  es.addEventListener('progress', (e) => {
     setServerStatus(true); // any delivered event also confirms liveness
     reconnectDelay = RECONNECT_MIN_MS; // a live event proves the link is back
-    try { patchRow(JSON.parse(await decryptEvent(encrypted.session, (e as MessageEvent).data))); } catch (_) { /* ignore */ }
+    const data = (e as MessageEvent).data;
+    applying = applying.then(async () => {
+      try {
+        const ev = JSON.parse(await decryptEvent(encrypted.session, data));
+        if (generation === eventGeneration) patchRow(ev); // not from a superseded stream
+      } catch (_) { /* ignore */ }
+    });
   });
   // Stream dropped → red. EventSource retries a merely-stalled stream itself,
   // but on some (Android WebView) engines a connection that never opened — e.g.
