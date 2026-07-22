@@ -214,8 +214,7 @@ pub(super) async fn find_downloaded_urls(
     }
     // One `IN (?, ?, …)` over the whole batch — a single index scan instead of a
     // round-trip per URL. The caller already caps the batch size.
-    let placeholders = std::iter::repeat("?")
-        .take(urls.len())
+    let placeholders = std::iter::repeat_n("?", urls.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
@@ -1151,6 +1150,28 @@ pub(super) async fn register_client(
         .ok_or_else(|| anyhow::anyhow!("client vanished after insert"))
 }
 
+/// How many clients are still awaiting the owner's approval. `/api/clients/register`
+/// is deliberately unauthenticated, so this is the number an anonymous caller can
+/// grow; the handler caps it.
+pub(super) async fn pending_client_count(db: &Db) -> anyhow::Result<i64> {
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM clients WHERE trusted = 0")
+        .fetch_one(&db.pool)
+        .await?;
+    Ok(row.try_get("n")?)
+}
+
+/// Whether this passphrase already names a client row, trusted or not. Lets
+/// registration stay idempotent for a client that has registered before, even
+/// once the pending-registration cap has been reached.
+pub(super) async fn client_known(db: &Db, passphrase: &str) -> anyhow::Result<bool> {
+    let hash = hash_passphrase(passphrase);
+    let row = sqlx::query("SELECT 1 FROM clients WHERE passphrase_hash = ?")
+        .bind(&hash)
+        .fetch_optional(&db.pool)
+        .await?;
+    Ok(row.is_some())
+}
+
 /// Resolve a passphrase to a *trusted* client id, or `None` if unknown/untrusted.
 pub(super) async fn find_trusted_client_id(
     db: &Db,
@@ -1365,6 +1386,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    /// The two reads behind the pending-registration cap on the unauthenticated
+    /// `/api/clients/register` route: how many rows an anonymous caller has piled
+    /// up, and whether a given passphrase is one we've already seen (so a repeat
+    /// registration stays idempotent instead of consuming another slot).
+    #[tokio::test]
+    async fn pending_client_count_tracks_unapproved_registrations() {
+        let (db, _dir) = temp_db().await;
+        assert_eq!(db.pending_client_count().await.unwrap(), 0);
+
+        db.register_client("pending-one-xxxx", None, false).await.unwrap();
+        let two = db.register_client("pending-two-xxxx", None, false).await.unwrap();
+        assert_eq!(db.pending_client_count().await.unwrap(), 2);
+
+        // A repeat registration is the same row, not a new pending slot.
+        db.register_client("pending-one-xxxx", None, false).await.unwrap();
+        assert_eq!(db.pending_client_count().await.unwrap(), 2);
+        assert!(db.client_known("pending-one-xxxx").await.unwrap());
+        assert!(!db.client_known("never-registered").await.unwrap());
+
+        // Approving (or deleting) frees a slot.
+        db.trust_client(two.id).await.unwrap();
+        assert_eq!(db.pending_client_count().await.unwrap(), 1);
+        // A trusted client is still "known", so it can re-register at any time.
+        assert!(db.client_known("pending-two-xxxx").await.unwrap());
     }
 
     #[tokio::test]

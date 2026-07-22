@@ -148,8 +148,17 @@ pub fn router(state: AppState) -> Router {
         .merge(registration)
         .merge(public)
         // Allow the native app's webview origin (and browsers on other origins)
-        // to call the API. Auth is a bearer token, not cookies, so permissive
-        // (no credentials) is safe here.
+        // to call the API. Permissive CORS is safe here only because of three
+        // properties, all of which must hold — break any one and a hostile page
+        // can drive this API with the victim's ambient credentials:
+        //   1. This layer sends no `Access-Control-Allow-Credentials`, so the
+        //      browser strips credentials from cross-origin requests.
+        //   2. Authentication is a bearer token the caller must supply
+        //      explicitly — never a cookie the browser attaches for us.
+        //   3. The one cookie we do issue (media playback) is `SameSite=Lax`, so
+        //      it is not sent on cross-site subresource requests either.
+        // Adding a cookie-authenticated route, or allowing credentials, requires
+        // replacing this with an explicit origin allowlist.
         .layer(CorsLayer::permissive())
         .with_state(state)
 }

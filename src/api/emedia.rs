@@ -67,6 +67,14 @@ pub fn plan(plain_len: u64, start: u64, end: Option<u64>) -> Option<Window> {
 }
 
 /// Seal chunks `i0..=i1` from a plaintext `slab` that begins at `read_start`.
+///
+/// The chunk bounds are derived with checked arithmetic and clamped to `slab`.
+/// A window built by [`plan`] always satisfies them exactly, but this is the one
+/// place where a *remote* claim — the upstream's `Content-Range` total, which
+/// feeds `plain_len` on the proxy path — meets raw index math, so it refuses a
+/// bad window rather than trusting it: an upstream reporting a total below the
+/// window's own start used to underflow `plain_len - read_start` and panic the
+/// handler on the resulting out-of-range slice.
 fn seal_slab(
     stream_key: &[u8; 32],
     plain_len: u64,
@@ -76,14 +84,30 @@ fn seal_slab(
     slab: &[u8],
 ) -> AppResult<Vec<u8>> {
     let p = e2ee::MEDIA_CHUNK as u64;
+    if i1 < i0 {
+        return Err(AppError::Internal("media window is inverted".into()));
+    }
     // One cipher for the whole window (key schedule once), sealing each chunk in
     // place into `body` — no per-chunk cipher build and no per-chunk scratch Vec.
     let cipher = e2ee::media_cipher(stream_key)?;
-    let mut body =
-        Vec::with_capacity(slab.len() + ((i1 - i0 + 1) as usize) * e2ee::MEDIA_TAG);
+    let mut body = Vec::with_capacity(slab.len() + ((i1 - i0 + 1) as usize) * e2ee::MEDIA_TAG);
     for idx in i0..=i1 {
-        let cs = (idx * p - read_start) as usize;
-        let ce = (((idx + 1) * p).min(plain_len) - read_start) as usize;
+        let bounds = idx
+            .checked_mul(p)
+            .and_then(|s| s.checked_sub(read_start))
+            .zip(
+                (idx + 1)
+                    .checked_mul(p)
+                    .map(|e| e.min(plain_len))
+                    .and_then(|e| e.checked_sub(read_start)),
+            );
+        let Some((cs, ce)) = bounds else {
+            return Err(AppError::Internal("media window is out of range".into()));
+        };
+        let (cs, ce) = (cs as usize, ce as usize);
+        if cs > ce || ce > slab.len() {
+            return Err(AppError::Internal("media window is out of range".into()));
+        }
         e2ee::seal_into(&cipher, idx, &slab[cs..ce], &mut body)?;
     }
     Ok(body)
@@ -100,6 +124,13 @@ fn respond(plain_len: u64, first_chunk: u64, body: Vec<u8>) -> AppResult<Respons
         .header(header::CACHE_CONTROL, "private, no-store")
         .body(Body::from(body))
         .map_err(|e| AppError::Internal(format!("media response build failed: {e}")))
+}
+
+/// The "nothing to send" window: no chunks, but still reporting the resource's
+/// size so the Service Worker can bound its seeks. Used when [`plan`] declines —
+/// an empty resource, or a seek landing at/past EOF.
+pub fn serve_empty(plain_len: u64, first_chunk: u64) -> AppResult<Response> {
+    respond(plain_len, first_chunk, Vec::new())
 }
 
 /// Serve one encrypted window of a local file. `resource` uniquely labels this
@@ -120,7 +151,7 @@ pub async fn serve_file(
 
     let Some(w) = plan(plain_len, start, end) else {
         // Empty file, or a seek at/past EOF: no chunks, but still report the size.
-        return respond(plain_len, start / e2ee::MEDIA_CHUNK as u64, Vec::new());
+        return serve_empty(plain_len, start / e2ee::MEDIA_CHUNK as u64);
     };
 
     let mut file = tokio::fs::File::open(path)
@@ -193,6 +224,31 @@ mod tests {
         assert!(plan(0, 0, None).is_none());
     }
 
+    /// Regression: the upstream-proxy path derives `plain_len` from a *remote*
+    /// `Content-Range`. When that total lands below the requested window's own
+    /// chunk-aligned start, the chunk bounds used to underflow and panic the
+    /// handler on an out-of-range slice. It must be a clean error instead.
+    #[test]
+    fn seal_slab_refuses_a_window_beyond_the_resource() {
+        let key = e2ee::media_stream_key(&[3u8; 32], "stream:x");
+        let p = e2ee::MEDIA_CHUNK as u64;
+        // Upstream claims 1000 bytes total; the window starts at chunk 1.
+        assert!(seal_slab(&key, 1000, 1, 1, p, &[]).is_err());
+        // An inverted window is refused rather than looping oddly.
+        assert!(seal_slab(&key, 10 * p, 3, 2, 3 * p, &[]).is_err());
+        // A window whose slab is shorter than the chunk it claims to hold.
+        assert!(seal_slab(&key, 10 * p, 0, 1, 0, &[0u8; 16]).is_err());
+    }
+
+    /// The empty-window response still reports the resource size (so the Service
+    /// Worker can re-clamp a seek) while sealing nothing.
+    #[test]
+    fn empty_window_reports_size_without_chunks() {
+        let r = serve_empty(1000, 1).unwrap();
+        assert_eq!(r.headers().get(e2ee::HEADER_PLAIN_LEN).unwrap(), "1000");
+        assert_eq!(r.headers().get(e2ee::HEADER_CHUNK_INDEX).unwrap(), "1");
+    }
+
     #[test]
     fn seal_slab_round_trips_each_chunk() {
         let key = e2ee::media_stream_key(&[3u8; 32], "file:abc");
@@ -211,3 +267,4 @@ mod tests {
         assert_eq!(pt1, &slab[p as usize..2 * p as usize]);
     }
 }
+

@@ -169,6 +169,7 @@ pub fn seal_into(
 
 /// Seal one standalone media chunk. Output is `plaintext.len() + 16` bytes. Thin
 /// wrapper over [`media_cipher`] + [`seal_into`] for single-chunk callers/tests.
+#[cfg(test)]
 pub fn seal_chunk(stream_key: &[u8; 32], index: u64, plaintext: &[u8]) -> AppResult<Vec<u8>> {
     let cipher = media_cipher(stream_key)?;
     let mut out = Vec::with_capacity(plaintext.len() + MEDIA_TAG);

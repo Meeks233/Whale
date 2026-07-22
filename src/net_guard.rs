@@ -10,8 +10,36 @@
 //! [`guard`] enforces a scheme allowlist, rejects literal internal addresses, and
 //! resolves hostnames to reject internal DNS answers. Operators using a fake-IP
 //! proxy can explicitly bypass only the DNS classification.
+//!
+//! # DNS rebinding
+//!
+//! A check-then-connect guard is a TOCTOU: the guard resolves a hostname, likes
+//! the answer, and then the HTTP client resolves it *again* and gets whatever the
+//! attacker's nameserver felt like returning the second time (`169.254.169.254`).
+//! Closing that requires the connect-time resolution to be the checked one, so
+//! this module owns both ends:
+//!
+//! - [`resolve_checked`] resolves over **Cloudflare DNS-over-HTTPS**
+//!   (`https://1.1.1.1/dns-query`, authenticated by TLS and immune to a poisoned
+//!   or hostile local resolver), rejects the host if *any* returned address is
+//!   internal, and memoizes the surviving set under the answer's TTL.
+//! - [`GuardedResolver`] is a `reqwest` DNS resolver backed by that same
+//!   memo. Installed on the proxy client, it means the addresses hyper dials are
+//!   the exact addresses the guard approved — one resolution, not two.
+//!
+//! The escape hatch (`allow_private_dns`, for fake-IP proxy setups) bypasses both
+//! halves together and falls back to the system resolver.
+//!
+//! Caveat, deliberate: **`yt-dlp` resolves for itself.** It is a separate process
+//! with its own DNS stack, so for submitted URLs the guard stays a pre-flight
+//! check and the rebinding window remains open there. Pinning it would mean
+//! teaching yt-dlp our resolver; the guard's job on that path is to reject the
+//! obvious and the honest, not to be airtight.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 /// Why a URL was refused. Carries a stable, user-facing reason string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,25 +108,186 @@ pub fn precheck(url: &str) -> Result<String, UrlRejection> {
     Ok(host)
 }
 
-/// Reject a submitted URL that must not reach yt-dlp: a non-http(s) scheme, or a
-/// literal internal IP / localhost host. Hostnames are intentionally not
-/// resolved (see the module docs). Run once at submit time.
-pub async fn guard(url: &str, allow_private_dns: bool) -> Result<(), UrlRejection> {
+/// Reject a URL that must not be fetched: a non-http(s) scheme, a literal
+/// internal IP / localhost host, or a hostname that resolves to an internal
+/// address. Returns the approved addresses, which [`GuardedResolver`] will hand
+/// straight to the connector (empty when `allow_private_dns` waives the check).
+pub async fn guard(url: &str, allow_private_dns: bool) -> Result<Vec<IpAddr>, UrlRejection> {
     let host = precheck(url)?;
-    if allow_private_dns || host.parse::<IpAddr>().is_ok() {
-        return Ok(());
+    if allow_private_dns {
+        return Ok(Vec::new());
     }
-    let addrs = tokio::net::lookup_host((host.as_str(), 0))
-        .await
-        .map_err(|_| UrlRejection::BadHost)?;
-    let mut saw_address = false;
-    for addr in addrs {
-        saw_address = true;
-        if is_forbidden_ip(addr.ip()) {
-            return Err(UrlRejection::PrivateAddress);
+    resolve_checked(&host).await
+}
+
+/// Cloudflare's DoH endpoint, addressed by literal IP so resolving it needs no
+/// resolver (and so a hostile local DNS can't redirect the resolver itself). The
+/// certificate carries `1.1.1.1` as an IP SAN, so TLS still authenticates it.
+const DOH_URL: &str = "https://1.1.1.1/dns-query";
+/// Floor/ceiling on how long a DoH answer is trusted. The floor keeps a
+/// 0-TTL answer from costing a DoH round trip per redirect hop; the ceiling keeps
+/// a long TTL from outliving a legitimate address change.
+const TTL_FLOOR: Duration = Duration::from_secs(10);
+const TTL_CEIL: Duration = Duration::from_secs(300);
+/// Entry cap for the memo; blown past only by a pathological redirect chain.
+const CACHE_MAX: usize = 512;
+
+/// host -> (approved addresses, when they stop being trusted).
+type DnsCache = Mutex<HashMap<String, (Vec<IpAddr>, Instant)>>;
+
+static CACHE: LazyLock<DnsCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The DoH client. Its own DNS is never exercised (literal-IP URL), so it can
+/// safely use the default resolver without recursing into this module.
+static DOH: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()
+});
+
+/// Resolve `host` to the set of addresses it is allowed to be dialed at, or
+/// reject it. Answers are memoized under their TTL so the guard's resolution and
+/// the connector's resolution are the *same* resolution — see the module docs.
+pub async fn resolve_checked(host: &str) -> Result<Vec<IpAddr>, UrlRejection> {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match is_forbidden_ip(ip) {
+            true => Err(UrlRejection::PrivateAddress),
+            false => Ok(vec![ip]),
+        };
+    }
+    if let Some(ips) = cache_get(host) {
+        return Ok(ips);
+    }
+
+    let (ips, ttl) = match doh_resolve(host).await {
+        Some(answer) => answer,
+        // DoH unreachable (blocked egress, captive network). Falling back to the
+        // system resolver keeps the downloader working; the address check below
+        // still applies, we just lose DoH's integrity guarantee.
+        None => {
+            tracing::warn!(host, "DoH resolution failed, falling back to system resolver");
+            let addrs = tokio::net::lookup_host((host, 0))
+                .await
+                .map_err(|_| UrlRejection::BadHost)?;
+            (addrs.map(|a| a.ip()).collect(), TTL_FLOOR)
+        }
+    };
+
+    if ips.is_empty() {
+        return Err(UrlRejection::BadHost);
+    }
+    // All-or-nothing: one internal address in the answer condemns the host. A
+    // partial accept would let an attacker mix a public address in to get past
+    // the guard and still win the connect race.
+    if ips.iter().any(|ip| is_forbidden_ip(*ip)) {
+        return Err(UrlRejection::PrivateAddress);
+    }
+    cache_put(host, &ips, ttl);
+    Ok(ips)
+}
+
+fn cache_get(host: &str) -> Option<Vec<IpAddr>> {
+    let cache = CACHE.lock().ok()?;
+    cache
+        .get(host)
+        .filter(|(_, expiry)| *expiry > Instant::now())
+        .map(|(ips, _)| ips.clone())
+}
+
+fn cache_put(host: &str, ips: &[IpAddr], ttl: Duration) {
+    let Ok(mut cache) = CACHE.lock() else { return };
+    if cache.len() >= CACHE_MAX {
+        let now = Instant::now();
+        cache.retain(|_, (_, expiry)| *expiry > now);
+        if cache.len() >= CACHE_MAX {
+            cache.clear();
         }
     }
-    saw_address.then_some(()).ok_or(UrlRejection::BadHost)
+    cache.insert(host.to_string(), (ips.to_vec(), Instant::now() + ttl));
+}
+
+/// Ask Cloudflare for `host`'s A and AAAA records. `None` means the DoH
+/// transport itself failed (caller falls back); `Some` with an empty vec means
+/// Cloudflare answered and the name has no addresses.
+async fn doh_resolve(host: &str) -> Option<(Vec<IpAddr>, Duration)> {
+    let client = DOH.as_ref()?;
+    let (a, aaaa) = tokio::join!(doh_query(client, host, 1), doh_query(client, host, 28));
+    if a.is_none() && aaaa.is_none() {
+        return None;
+    }
+    let mut ips = Vec::new();
+    let mut ttl = TTL_CEIL;
+    for (records, record_ttl) in [a, aaaa].into_iter().flatten() {
+        ips.extend(records);
+        ttl = ttl.min(record_ttl);
+    }
+    Some((ips, ttl.clamp(TTL_FLOOR, TTL_CEIL)))
+}
+
+/// One DoH query for a single record type, over the JSON API (`application/dns-json`)
+/// so no wire-format DNS codec is needed. Returns the addresses and the smallest
+/// TTL in the answer.
+async fn doh_query(client: &reqwest::Client, host: &str, rtype: u16) -> Option<(Vec<IpAddr>, Duration)> {
+    let resp = client
+        .get(DOH_URL)
+        .query(&[("name", host), ("type", &rtype.to_string())])
+        .header(reqwest::header::ACCEPT, "application/dns-json")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_slice(&resp.bytes().await.ok()?).ok()?;
+    let mut ips = Vec::new();
+    let mut ttl = TTL_CEIL;
+    // CNAME hops share the answer section; keep only records of the type asked
+    // for, whose `data` is then always a bare address.
+    for answer in body["Answer"].as_array().into_iter().flatten() {
+        if answer["type"].as_u64() != Some(rtype as u64) {
+            continue;
+        }
+        if let Some(ip) = answer["data"].as_str().and_then(|d| d.parse::<IpAddr>().ok()) {
+            ips.push(ip);
+            if let Some(secs) = answer["TTL"].as_u64() {
+                ttl = ttl.min(Duration::from_secs(secs));
+            }
+        }
+    }
+    Some((ips, ttl))
+}
+
+/// `reqwest` DNS resolver that answers from [`resolve_checked`], so the addresses
+/// hyper connects to are exactly the ones the guard approved. Install it on any
+/// client that fetches user-influenced URLs.
+pub struct GuardedResolver {
+    allow_private_dns: bool,
+}
+
+impl GuardedResolver {
+    pub fn new(allow_private_dns: bool) -> Arc<Self> {
+        Arc::new(Self { allow_private_dns })
+    }
+}
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_ascii_lowercase();
+        let allow_private_dns = self.allow_private_dns;
+        Box::pin(async move {
+            if allow_private_dns {
+                let addrs: Vec<SocketAddr> =
+                    tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+                return Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs);
+            }
+            let ips = resolve_checked(&host)
+                .await
+                .map_err(|r| std::io::Error::other(r.reason()))?;
+            // Port 0: reqwest substitutes the URL's port, or the scheme default.
+            Ok(Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0))) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 /// True if `ip` is anything other than a routable public address: loopback,
@@ -197,6 +386,48 @@ mod tests {
             guard("file:///etc/passwd", false).await.unwrap_err(),
             UrlRejection::BadScheme
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_checked_classifies_literal_hosts_without_dns() {
+        assert_eq!(
+            resolve_checked("8.8.8.8").await.unwrap(),
+            vec!["8.8.8.8".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            resolve_checked("169.254.169.254").await.unwrap_err(),
+            UrlRejection::PrivateAddress
+        );
+    }
+
+    /// Live DoH check — `#[ignore]`d because it needs the network. Run with
+    /// `cargo test -- --ignored resolves_over_doh`.
+    ///
+    /// The rebinding case: `127.0.0.1.nip.io` is a *public* name whose A record
+    /// is loopback, i.e. exactly the answer a rebinding attacker returns. Only a
+    /// resolving guard catches it.
+    #[tokio::test]
+    #[ignore]
+    async fn resolves_over_doh() {
+        assert_eq!(
+            resolve_checked("127.0.0.1.nip.io").await.unwrap_err(),
+            UrlRejection::PrivateAddress
+        );
+        let ips = resolve_checked("www.youtube.com").await.unwrap();
+        assert!(!ips.is_empty());
+        assert!(ips.iter().all(|ip| !is_forbidden_ip(*ip)));
+    }
+
+    // A cached answer is what both the guard and the connector read, so an entry
+    // must survive until its TTL and never outlive it.
+    #[test]
+    fn cache_honors_ttl() {
+        let public: Vec<IpAddr> = vec!["9.9.9.9".parse().unwrap()];
+        cache_put("fresh.test", &public, Duration::from_secs(60));
+        cache_put("stale.test", &public, Duration::from_millis(0));
+        assert_eq!(cache_get("fresh.test"), Some(public));
+        assert_eq!(cache_get("stale.test"), None);
+        assert_eq!(cache_get("never-inserted.test"), None);
     }
 
     #[test]

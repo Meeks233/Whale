@@ -250,19 +250,12 @@ async fn stream_encrypted(
     .await?;
     let plain_len = total.unwrap_or(read_start + slab.len() as u64);
     let resource = format!("stream:{slug}");
+    // Seek at/past EOF (or an upstream reporting a total below the window start):
+    // report the size so the SW can re-clamp, but seal no chunks. Going through
+    // `serve_window` with a zero-length window instead would ask the sealer to
+    // index a chunk that lies beyond `plain_len` entirely.
     let Some(w) = emedia::plan(plain_len, start, end) else {
-        return emedia::serve_window(
-            session_key,
-            &resource,
-            plain_len,
-            &emedia::Window {
-                i0,
-                i1: i0,
-                read_start,
-                read_end: read_start,
-            },
-            &[],
-        );
+        return emedia::serve_empty(plain_len, i0);
     };
     let needed = (w.read_end - w.read_start) as usize;
     if slab.len() < needed {
@@ -346,54 +339,14 @@ async fn proxy_upstream(
     allow_private_dns: bool,
     pacing: Option<(u64, u64)>,
 ) -> Result<Response, AppError> {
-    let client = proxy_client().await?;
-
-    let mut url = upstream.to_string();
-    let mut redirects = 0;
-    let resp = loop {
-        // Guard every hop, not just the first. A CDN redirect to a *hostname*
-        // that resolves to 169.254.169.254 or 127.0.0.1 is the whole SSRF, and
-        // only a resolving check sees it.
-        crate::net_guard::guard(&url, allow_private_dns)
-            .await
-            .map_err(|r| AppError::BadRequest(r.reason().into()))?;
-
-        let mut rb = client
-            .get(&url)
-            .header(reqwest::header::USER_AGENT, PROXY_UA)
-            .header(reqwest::header::REFERER, referer);
-        if let Some(c) = &cookie_header {
-            rb = rb.header(reqwest::header::COOKIE, c.clone());
-        }
-        if let Some(r) = &range {
-            rb = rb.header(reqwest::header::RANGE, r.clone());
-        }
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("upstream fetch failed: {e}")))?;
-
-        if !resp.status().is_redirection() {
-            break resp;
-        }
-        let location = resp
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AppError::Internal("upstream redirect without location".into()))?;
-        // Resolve against the current URL so a relative Location works.
-        let next = reqwest::Url::parse(&url)
-            .and_then(|base| base.join(location))
-            .map_err(|_| AppError::BadRequest("upstream redirect is not a valid url".into()))?;
-        if !matches!(next.scheme(), "http" | "https") {
-            return Err(AppError::BadRequest("upstream redirect scheme".into()));
-        }
-        url = next.into();
-        redirects += 1;
-        if redirects > MAX_REDIRECTS {
-            return Err(AppError::BadRequest("too many upstream redirects".into()));
-        }
-    };
+    let resp = guarded_get(
+        upstream,
+        referer,
+        cookie_header.as_deref(),
+        range.as_deref(),
+        allow_private_dns,
+    )
+    .await?;
 
     let status = resp.status();
     let mut builder = Response::builder().status(status.as_u16());
@@ -528,58 +481,74 @@ where
 /// are handled by hand at each call site so every hop can pass the async
 /// DNS-resolving SSRF guard — reqwest's own redirect hook is synchronous and
 /// can only see the literal URL, not what a hostname resolves to.
-async fn proxy_client() -> Result<&'static reqwest::Client, AppError> {
+///
+/// The client resolves through [`net_guard::GuardedResolver`], so the address it
+/// dials is the one the guard checked rather than a second, re-attackable
+/// lookup. `allow_private_dns` is baked in at first use; it comes from immutable
+/// config, so the client built here is the client every later call wants.
+async fn proxy_client(allow_private_dns: bool) -> Result<&'static reqwest::Client, AppError> {
     static CLIENT: tokio::sync::OnceCell<reqwest::Client> = tokio::sync::OnceCell::const_new();
     CLIENT
         .get_or_try_init(|| async {
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .dns_resolver(crate::net_guard::GuardedResolver::new(allow_private_dns))
                 .build()
         })
         .await
         .map_err(|e| AppError::Internal(format!("http client build failed: {e}")))
 }
 
-/// Fetch one ranged window of an upstream stream fully into memory, guarding
-/// every redirect hop for SSRF like `proxy_upstream`. Returns the buffered bytes
-/// and the resource's total length parsed from `Content-Range` (`None` if the
-/// upstream didn't report it). `cap` bounds the buffer so a hostile row can't
-/// stream an unbounded body into memory.
-async fn fetch_upstream_window(
+/// Fetch `upstream`, following redirects by hand so **every hop** passes the
+/// resolving SSRF guard — a CDN redirect to a hostname that resolves to
+/// `169.254.169.254` or `127.0.0.1` is the whole attack, and only a resolving
+/// check sees it. This is the single choke point every proxied fetch goes
+/// through (media stream, ranged window, thumbnail, subtitle track), so the guard
+/// cannot be tightened in one path and forgotten in another.
+///
+/// Returns the final response with its body **unread**: the caller decides
+/// whether to stream it through ([`proxy_upstream`]) or buffer it under a budget
+/// ([`read_capped`]), and checks the status itself so it can phrase its own
+/// user-facing error.
+async fn guarded_get(
     upstream: &str,
     referer: &str,
-    cookie_header: Option<String>,
-    range: &str,
+    cookie_header: Option<&str>,
+    range: Option<&str>,
     allow_private_dns: bool,
-    cap: usize,
-) -> Result<(Vec<u8>, Option<u64>), AppError> {
-    let client = proxy_client().await?;
+) -> Result<reqwest::Response, AppError> {
+    let client = proxy_client(allow_private_dns).await?;
     let mut url = upstream.to_string();
     let mut redirects = 0;
-    let resp = loop {
+    loop {
         crate::net_guard::guard(&url, allow_private_dns)
             .await
             .map_err(|r| AppError::BadRequest(r.reason().into()))?;
+
         let mut rb = client
             .get(&url)
             .header(reqwest::header::USER_AGENT, PROXY_UA)
-            .header(reqwest::header::REFERER, referer)
-            .header(reqwest::header::RANGE, range);
-        if let Some(c) = &cookie_header {
-            rb = rb.header(reqwest::header::COOKIE, c.clone());
+            .header(reqwest::header::REFERER, referer);
+        if let Some(c) = cookie_header {
+            rb = rb.header(reqwest::header::COOKIE, c);
+        }
+        if let Some(r) = range {
+            rb = rb.header(reqwest::header::RANGE, r);
         }
         let resp = rb
             .send()
             .await
             .map_err(|e| AppError::Internal(format!("upstream fetch failed: {e}")))?;
+
         if !resp.status().is_redirection() {
-            break resp;
+            return Ok(resp);
         }
         let location = resp
             .headers()
             .get(header::LOCATION)
             .and_then(|v| v.to_str().ok())
             .ok_or_else(|| AppError::Internal("upstream redirect without location".into()))?;
+        // Resolve against the current URL so a relative Location works.
         let next = reqwest::Url::parse(&url)
             .and_then(|base| base.join(location))
             .map_err(|_| AppError::BadRequest("upstream redirect is not a valid url".into()))?;
@@ -591,7 +560,60 @@ async fn fetch_upstream_window(
         if redirects > MAX_REDIRECTS {
             return Err(AppError::BadRequest("too many upstream redirects".into()));
         }
-    };
+    }
+}
+
+/// Buffer a response body into memory under a hard byte budget, streaming it
+/// chunk by chunk and giving up the moment the budget is passed.
+///
+/// The budget has to be enforced *during* the read, not after it: every upstream
+/// URL here is attacker-influenced (yt-dlp reports whatever the source page
+/// declares as its media/thumbnail URL), a `Content-Length` is a claim rather
+/// than a fact, and an upstream is free to ignore our `Range` entirely. Reading
+/// the whole body first and measuring it afterwards means a single hostile row
+/// can pull an arbitrary number of bytes into RAM before the check ever runs.
+/// Dropping the response mid-stream closes the connection and stops the transfer.
+async fn read_capped(
+    mut resp: reqwest::Response,
+    cap: usize,
+    what: &str,
+) -> Result<Vec<u8>, AppError> {
+    let hint = resp.content_length().unwrap_or(0).min(cap as u64) as usize;
+    let mut out: Vec<u8> = Vec::with_capacity(hint);
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| AppError::Internal(format!("{what} read failed: {e}")))?
+    {
+        if out.len() + chunk.len() > cap {
+            return Err(AppError::BadRequest(format!("{what} is too large")));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// Fetch one ranged window of an upstream stream into memory, guarding every
+/// redirect hop for SSRF. Returns the buffered bytes and the resource's total
+/// length parsed from `Content-Range` (`None` if the upstream didn't report it).
+/// `cap` bounds the buffer so a hostile row can't stream an unbounded body into
+/// memory.
+async fn fetch_upstream_window(
+    upstream: &str,
+    referer: &str,
+    cookie_header: Option<String>,
+    range: &str,
+    allow_private_dns: bool,
+    cap: usize,
+) -> Result<(Vec<u8>, Option<u64>), AppError> {
+    let resp = guarded_get(
+        upstream,
+        referer,
+        cookie_header.as_deref(),
+        Some(range),
+        allow_private_dns,
+    )
+    .await?;
     if !resp.status().is_success() {
         return Err(AppError::BadRequest("upstream stream error".into()));
     }
@@ -609,14 +631,8 @@ async fn fetch_upstream_window(
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.trim().parse::<u64>().ok())
         });
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("upstream read failed: {e}")))?;
-    if bytes.len() > cap {
-        return Err(AppError::BadRequest("upstream window too large".into()));
-    }
-    Ok((bytes.to_vec(), total))
+    let bytes = read_capped(resp, cap, "upstream window").await?;
+    Ok((bytes, total))
 }
 
 /// GET /api/items/:slug/thumb — **thumbnail proxy + cache**. Authenticates via the
@@ -679,55 +695,26 @@ pub async fn thumb(
     }
 }
 
+/// Ceiling on a buffered thumbnail. Real cover art is tens to hundreds of KB;
+/// this is roomy enough for any of it while keeping a `thumbnail_url` that
+/// actually points at a multi-gigabyte file — the source page declares that URL,
+/// so it is attacker-influenced — from being pulled into RAM and written to the
+/// on-disk cache.
+const MAX_THUMB_BYTES: usize = 8 * 1024 * 1024;
+
 /// Fetch an upstream thumbnail into memory, guarding every redirect hop for SSRF
-/// the same way `proxy_upstream` does. Thumbnails are small, so the whole body is
-/// buffered (no streaming) — the caller writes it to the cache and serves it.
+/// and bounding the buffer at [`MAX_THUMB_BYTES`]. The caller writes it to the
+/// cache and serves it.
 async fn fetch_thumbnail(
     upstream: &str,
     referer: &str,
     allow_private_dns: bool,
 ) -> Result<Vec<u8>, AppError> {
-    let client = proxy_client().await?;
-    let mut url = upstream.to_string();
-    let mut redirects = 0;
-    let resp = loop {
-        crate::net_guard::guard(&url, allow_private_dns)
-            .await
-            .map_err(|r| AppError::BadRequest(r.reason().into()))?;
-        let resp = client
-            .get(&url)
-            .header(reqwest::header::USER_AGENT, PROXY_UA)
-            .header(reqwest::header::REFERER, referer)
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("thumbnail fetch failed: {e}")))?;
-        if !resp.status().is_redirection() {
-            break resp;
-        }
-        let location = resp
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AppError::Internal("thumbnail redirect without location".into()))?;
-        let next = reqwest::Url::parse(&url)
-            .and_then(|base| base.join(location))
-            .map_err(|_| AppError::BadRequest("thumbnail redirect is not a valid url".into()))?;
-        if !matches!(next.scheme(), "http" | "https") {
-            return Err(AppError::BadRequest("thumbnail redirect scheme".into()));
-        }
-        url = next.into();
-        redirects += 1;
-        if redirects > MAX_REDIRECTS {
-            return Err(AppError::BadRequest("too many thumbnail redirects".into()));
-        }
-    };
+    let resp = guarded_get(upstream, referer, None, None, allow_private_dns).await?;
     if !resp.status().is_success() {
         return Err(AppError::BadRequest("thumbnail upstream error".into()));
     }
-    resp.bytes()
-        .await
-        .map(|b| b.to_vec())
-        .map_err(|e| AppError::Internal(format!("thumbnail read failed: {e}")))
+    read_capped(resp, MAX_THUMB_BYTES, "thumbnail").await
 }
 
 /// Fetch an upstream thumbnail and encode it as a `data:` URI, or `None` on any
@@ -768,55 +755,18 @@ pub(super) async fn fetch_upstream_bytes(
     allow_private_dns: bool,
     max_bytes: usize,
 ) -> Result<Vec<u8>, AppError> {
-    let client = proxy_client().await?;
-    let mut url = upstream.to_string();
-    let mut redirects = 0;
-    let resp = loop {
-        crate::net_guard::guard(&url, allow_private_dns)
-            .await
-            .map_err(|r| AppError::BadRequest(r.reason().into()))?;
-        let mut rb = client
-            .get(&url)
-            .header(reqwest::header::USER_AGENT, PROXY_UA)
-            .header(reqwest::header::REFERER, referer);
-        if let Some(c) = &cookie_header {
-            rb = rb.header(reqwest::header::COOKIE, c.clone());
-        }
-        let resp = rb
-            .send()
-            .await
-            .map_err(|e| AppError::Internal(format!("subtitle fetch failed: {e}")))?;
-        if !resp.status().is_redirection() {
-            break resp;
-        }
-        let location = resp
-            .headers()
-            .get(header::LOCATION)
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AppError::Internal("subtitle redirect without location".into()))?;
-        let next = reqwest::Url::parse(&url)
-            .and_then(|base| base.join(location))
-            .map_err(|_| AppError::BadRequest("subtitle redirect is not a valid url".into()))?;
-        if !matches!(next.scheme(), "http" | "https") {
-            return Err(AppError::BadRequest("subtitle redirect scheme".into()));
-        }
-        url = next.into();
-        redirects += 1;
-        if redirects > MAX_REDIRECTS {
-            return Err(AppError::BadRequest("too many subtitle redirects".into()));
-        }
-    };
+    let resp = guarded_get(
+        upstream,
+        referer,
+        cookie_header.as_deref(),
+        None,
+        allow_private_dns,
+    )
+    .await?;
     if !resp.status().is_success() {
         return Err(AppError::BadRequest("subtitle upstream error".into()));
     }
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| AppError::Internal(format!("subtitle read failed: {e}")))?;
-    if bytes.len() > max_bytes {
-        return Err(AppError::BadRequest("subtitle file is too large".into()));
-    }
-    Ok(bytes.to_vec())
+    read_capped(resp, max_bytes, "subtitle file").await
 }
 
 /// Best-effort image content-type from the leading magic bytes. Falls back to a

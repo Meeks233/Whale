@@ -301,6 +301,14 @@ impl Db {
         queries::register_client(self, passphrase, label, auto_trust).await
     }
 
+    pub async fn pending_client_count(&self) -> anyhow::Result<i64> {
+        queries::pending_client_count(self).await
+    }
+
+    pub async fn client_known(&self, passphrase: &str) -> anyhow::Result<bool> {
+        queries::client_known(self, passphrase).await
+    }
+
     pub async fn find_trusted_client_id(&self, passphrase: &str) -> anyhow::Result<Option<i64>> {
         queries::find_trusted_client_id(self, passphrase).await
     }

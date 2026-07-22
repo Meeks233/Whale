@@ -16,6 +16,15 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+/// How many clients may sit unapproved at once. `/api/clients/register` is the
+/// only unauthenticated write in the API — that is by design (a new phone has no
+/// token yet), but it means anyone who can reach the server can create rows. The
+/// cap bounds that to a queue the owner could plausibly review: past it, further
+/// *new* passphrases are refused until the owner approves or deletes some, while
+/// an already-known client can still re-register (below). Sized well above any
+/// honest household's device count, so it only ever trips on abuse.
+const MAX_PENDING_CLIENTS: i64 = 32;
+
 /// POST /api/clients/register — self-registration (no owner token required).
 /// Idempotent: re-registering the same passphrase returns the existing client.
 pub async fn register(
@@ -31,6 +40,17 @@ pub async fn register(
     if req.label.as_deref().is_some_and(|label| label.len() > 128) {
         return Err(AppError::BadRequest(
             "label must not exceed 128 bytes".into(),
+        ));
+    }
+    // Only a passphrase we've never seen consumes a pending slot. Checking
+    // existence first keeps re-registration idempotent — a device that already
+    // registered (and may still be waiting for approval) never gets locked out by
+    // a queue someone else flooded.
+    if !state.db.client_known(pass).await?
+        && state.db.pending_client_count().await? >= MAX_PENDING_CLIENTS
+    {
+        return Err(AppError::BadRequest(
+            "too many client registrations are awaiting approval".into(),
         ));
     }
     let client = state

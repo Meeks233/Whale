@@ -27,27 +27,12 @@ fn header_token(headers: &HeaderMap) -> Option<String> {
     (!tok.is_empty()).then(|| tok.to_string())
 }
 
-/// Extract a bearer token from the `Authorization: Bearer` header or a `token=` query param.
+/// Extract a bearer token from the `Authorization: Bearer` header or a `token=`
+/// query param, header first. Both halves are the shared parsers below, so the
+/// header form can't drift between here and [`header_token`] — the two used to be
+/// separate copies of the same ten lines.
 pub fn extract_token(headers: &HeaderMap, query: &str) -> Option<String> {
-    if let Some(val) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(s) = val.to_str() {
-            if let Some(tok) = s.strip_prefix("Bearer ") {
-                let tok = tok.trim();
-                if !tok.is_empty() {
-                    return Some(tok.to_string());
-                }
-            }
-        }
-    }
-    for pair in query.split('&') {
-        if let Some(tok) = pair.strip_prefix("token=") {
-            let decoded = urldecode(tok);
-            if !decoded.is_empty() {
-                return Some(decoded);
-            }
-        }
-    }
-    None
+    header_token(headers).or_else(|| query_param(query, "token"))
 }
 
 pub fn query_param(query: &str, name: &str) -> Option<String> {
@@ -374,6 +359,25 @@ mod tests {
         let mut h = HeaderMap::new();
         h.insert(axum::http::header::COOKIE, v.parse().unwrap());
         h
+    }
+
+    #[test]
+    fn extract_token_prefers_the_header_then_falls_back_to_the_query() {
+        let mut h = HeaderMap::new();
+        h.insert(axum::http::header::AUTHORIZATION, "Bearer hdr-tok".parse().unwrap());
+        // Header wins over a query token.
+        assert_eq!(extract_token(&h, "token=qs-tok").as_deref(), Some("hdr-tok"));
+        // No header → the `?token=` fallback, percent-decoded, position-independent.
+        let empty = HeaderMap::new();
+        assert_eq!(extract_token(&empty, "a=1&token=qs%2Btok").as_deref(), Some("qs+tok"));
+        // A malformed or empty header falls through to the query rather than failing.
+        let mut bad = HeaderMap::new();
+        bad.insert(axum::http::header::AUTHORIZATION, "Bearer ".parse().unwrap());
+        assert_eq!(extract_token(&bad, "token=qs-tok").as_deref(), Some("qs-tok"));
+        // Nothing anywhere.
+        assert_eq!(extract_token(&empty, "a=1"), None);
+        // A param merely *ending* in `token=` is not the token param.
+        assert_eq!(extract_token(&empty, "xtoken=nope"), None);
     }
 
     #[test]

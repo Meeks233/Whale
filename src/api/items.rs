@@ -547,14 +547,12 @@ pub async fn pause(State(state): State<AppState>, Path(slug): Path<String>) -> A
     // `.part` and leave the completed file and status untouched — the row simply
     // drops back to its resting state. `false` (no live job) falls through so the
     // usual "nothing to pause" rejection still applies to a truly idle item.
-    if matches!(item.status, Status::Completed | Status::Canceled) {
-        if state.queue.cancel(item.id) {
-            // The killed variant's run_job broadcasts a terminal tick as it unwinds,
-            // which clears the live chip on every client; the item keeps its status
-            // and file.
-            let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
-            return Ok(Json(refreshed).into_response());
-        }
+    if matches!(item.status, Status::Completed | Status::Canceled) && state.queue.cancel(item.id) {
+        // The killed variant's run_job broadcasts a terminal tick as it unwinds,
+        // which clears the live chip on every client; the item keeps its status
+        // and file.
+        let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
+        return Ok(Json(refreshed).into_response());
     }
     if !matches!(item.status, Status::Queued | Status::Running) {
         return Err(AppError::BadRequest(
@@ -584,15 +582,13 @@ pub async fn cancel(
     // fetch and drop its partials while keeping the existing completed file and the
     // item's status intact. `false` (no live job) falls through so the normal
     // rejection still guards a truly idle item.
-    if matches!(item.status, Status::Completed | Status::Canceled) {
-        if state.queue.cancel(item.id) {
-            crate::queue::discard_partials(&state.cfg.download_dir, &item.video_id);
-            // The killed variant's run_job broadcasts a terminal tick as it unwinds,
-            // which clears the live chip on every client; the item keeps its status
-            // and file.
-            let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
-            return Ok(Json(refreshed).into_response());
-        }
+    if matches!(item.status, Status::Completed | Status::Canceled) && state.queue.cancel(item.id) {
+        crate::queue::discard_partials(&state.cfg.download_dir, &item.video_id);
+        // The killed variant's run_job broadcasts a terminal tick as it unwinds,
+        // which clears the live chip on every client; the item keeps its status
+        // and file.
+        let refreshed = state.db.get(item.id).await?.ok_or(AppError::NotFound)?;
+        return Ok(Json(refreshed).into_response());
     }
     if !matches!(
         item.status,
