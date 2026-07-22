@@ -13,6 +13,7 @@ in SQLite unless `ORCA_MAX_HEIGHT` pins them.
 | `ORCA_PUBLIC_URL` | unset | Canonical HTTPS base used for public links |
 | `ORCA_CLIENT_TOFU` | `false` | Automatically trust newly registered submit-only clients |
 | `ORCA_ALLOW_PRIVATE_DNS` | `false` | Permit hostname DNS answers in reserved/private ranges for fake-IP proxies |
+| `ORCA_DNS_MODE` | `auto` | `auto` detects a fake-IP resolver (defer to the system resolver) or else resolves over DoH — Cloudflare `1.1.1.1`, falling back to AliDNS `223.5.5.5`. `doh` forces DoH, `system` disables it |
 | `ORCA_ENCRYPT_MEDIA` | `true` | Encrypt the media plane (video/thumbnails/subtitles) under the forward-secret session key. `false` serves media as cacheable plaintext authenticated by an HttpOnly session cookie — see note below |
 | `ORCA_CONCURRENCY` | `2` | Maximum jobs when polite mode is disabled |
 | `ORCA_POLITE` | `true` | Serialize jobs and add an inter-download delay |

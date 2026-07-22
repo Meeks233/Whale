@@ -940,6 +940,21 @@ fn percent_encode(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Every proxied upstream fetch — media, ranged windows, thumbnails,
+    /// subtitles — goes out over this client, so this is the one place worth
+    /// asserting the transport on. Cloudflare's trace endpoint reports back the
+    /// TLS version it saw, which is the negotiated one rather than our guess at
+    /// it. `#[ignore]`d because it needs the network.
+    #[tokio::test]
+    #[ignore]
+    async fn upstream_requests_negotiate_tls_1_3() {
+        let resp = guarded_get("https://1.1.1.1/cdn-cgi/trace", "", None, None, false)
+            .await
+            .unwrap();
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("tls=TLSv1.3"), "{body}");
+    }
+
     #[test]
     fn bitrate_prefers_true_size_over_duration() {
         // 10 MB over 40 s = 2 Mbit/s — the true figure wins over the height ladder.

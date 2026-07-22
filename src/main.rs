@@ -14,6 +14,7 @@ mod e2ee;
 mod errlog;
 mod error;
 mod net_guard;
+mod net_proxy;
 mod platform;
 mod queue;
 mod resolution;
@@ -84,6 +85,11 @@ async fn serve(cfg: config::Config) -> anyhow::Result<()> {
         );
         tracing::warn!("Enter this token in the web UI to unlock it. Set ORCA_TOKEN in your environment to keep it stable across restarts.");
     }
+
+    // Detect the resolver before anything resolves, and bring the yt-dlp proxy up
+    // before any download can want it.
+    net_guard::init_mode().await;
+    net_proxy::start(cfg.allow_private_dns).await;
 
     let ytdlp_version = ytdlp::version(&cfg).await?;
     tracing::info!("yt-dlp version: {ytdlp_version}");

@@ -66,6 +66,13 @@ not expose the Docker socket. DNS answers resolving to private addresses are
 blocked by default; `ORCA_ALLOW_PRIVATE_DNS=1` is an explicit compatibility
 exception for fake-IP proxy environments.
 
+Hostnames are resolved over DNS-over-HTTPS (Cloudflare `1.1.1.1`, falling back
+to AliDNS `223.5.5.5`) and the verified addresses are pinned into the
+connection, so a rebinding answer cannot slip between the check and the connect.
+yt-dlp is routed through a loopback proxy so it resolves the same way. Startup
+detects a fake-IP proxy and defers to the system resolver instead — override
+with `ORCA_DNS_MODE`.
+
 ## Documentation
 
 - [Getting started](docs/GETTING_STARTED.md)

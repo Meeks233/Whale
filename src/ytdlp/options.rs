@@ -5,6 +5,16 @@ use crate::config::Config;
 use crate::types::Item;
 use std::path::Path;
 
+/// Route yt-dlp through the loopback proxy when this process resolves over DoH,
+/// so its connections are resolved by our resolver instead of its own — see
+/// [`crate::net_proxy`]. A no-op in every other DNS mode.
+fn push_proxy(args: &mut Vec<String>) {
+    if let Some(url) = crate::net_proxy::url() {
+        args.push("--proxy".into());
+        args.push(url.into());
+    }
+}
+
 /// Args for the metadata probe (`yt-dlp --dump-json --skip-download ...`).
 ///
 /// `cookies` is the already-resolved cookie file for this URL (per-platform
@@ -23,6 +33,7 @@ pub fn probe_args(cfg: &Config, url: &str, cookies: Option<&Path>) -> Vec<String
         args.push("--cookies".into());
         args.push(cookies.display().to_string());
     }
+    push_proxy(&mut args);
     // End-of-options: a URL starting with `-` must not be read as a flag.
     args.push("--".into());
     args.push(url.to_string());
@@ -218,6 +229,8 @@ pub fn download_args(
     if cfg.auto_subs {
         args.push("--write-auto-subs".into());
     }
+
+    push_proxy(&mut args);
 
     // End-of-options: a URL starting with `-` must not be read as a flag.
     args.push("--".into());
